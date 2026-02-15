@@ -1,0 +1,13 @@
+{
+  "name": "mpegts-klv-streamer",
+  "version": "1.0.0",
+  "description": "MPEG-TS streamer with ST0601 KLV metadata for testing DVR demo",
+  "type": "module",
+  "main": "streamer.js",
+  "scripts": {
+    "start": "node streamer.js"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  }
+}

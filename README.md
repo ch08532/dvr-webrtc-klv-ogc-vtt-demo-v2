@@ -31,6 +31,25 @@ This will:
 - Run with host networking to access UDP streams
 - Mount `./recordings` and `./db` for persistent storage
 
+## Testing with Video Streams
+
+A companion streaming tool is included in the `streamer/` directory to test with your own video files:
+
+```bash
+cd streamer
+npm install
+
+# Generate a test video
+node generate-sample.js -o sample.ts -d 30
+
+# Stream your video over UDP multicast
+node streamer.js -i ../path/to/your/video.mp4
+```
+
+Then configure the DVR demo to ingest from `udp://239.1.2.3:5000`.
+
+**Note**: The current streamer streams video but does not inject KLV metadata. For testing KLV parsing, you need video files that already contain embedded ST0601 metadata.
+
 Open:
 - UI: http://localhost:8090
 - OGC collections: http://localhost:8090/ogc/collections

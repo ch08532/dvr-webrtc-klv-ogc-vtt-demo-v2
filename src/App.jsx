@@ -1,7 +1,7 @@
 import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, JsonInput } from '@mantine/core';
 
 const theme = createTheme({
@@ -23,8 +23,6 @@ function App() {
 
   const videoRef = useRef(null);
   const wsRef = useRef(null);
-  const hlsRef = useRef(null);
-  const liveRef = useRef({ device: null, transport: null, consumer: null });
   const vttHookedRef = useRef(false);
 
   const api = async (url, opts) => {
@@ -45,7 +43,6 @@ function App() {
   const stopSource = async () => {
     const result = await api(`/sources/${encodeURIComponent(streamId)}`, { method: "DELETE" });
     setStatus(JSON.stringify(result, null, 2));
-    await stopLive();
   };
 
   const refreshSources = async () => {
@@ -73,30 +70,52 @@ function App() {
     wsRef.current.send(JSON.stringify({ type: "subscribe", streamId, mode: "live" }));
   };
 
-  const attachHlsDvr = (streamId) => {
+  const attachHlsDvr = (streamId, retryCount = 0) => {
+    const maxRetries = 50; // Stop after 50 retries (~5 seconds)
+
     const url = `/hls/${encodeURIComponent(streamId)}/master.m3u8`;
 
     vttHookedRef.current = false;
 
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    // Dispose existing player
+    if (window.player) {
+      window.player.dispose();
+      window.player = null;
+    }
 
-    if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
-      videoRef.current.srcObject = null;
-      videoRef.current.src = url;
-      videoRef.current.play().catch(()=>{});
-      hookVttOverlaySoon();
+    // Check if element exists and is in DOM
+    if (!videoRef.current || !document.contains(videoRef.current)) {
+      if (retryCount < maxRetries) {
+        console.warn(`Video element not ready, retrying in 100ms (${retryCount + 1}/${maxRetries})`);
+        setTimeout(() => attachHlsDvr(streamId, retryCount + 1), 100);
+      } else {
+        console.error('Video element not found after maximum retries');
+      }
       return;
     }
 
-    hlsRef.current = new Hls({ lowLatencyMode: true, backBufferLength: 90 });
-    hlsRef.current.attachMedia(videoRef.current);
+    try {
+      // Initialize video.js player
+      window.player = videojs(videoRef.current, {
+        html5: {
+          hls: {
+            overrideNative: !videojs.browser.IS_SAFARI
+          }
+        }
+      });
 
-    hlsRef.current.on(Hls.Events.MEDIA_ATTACHED, () => hlsRef.current.loadSource(url));
-    hlsRef.current.on(Hls.Events.ERROR, () => {});
+      window.player.src({
+        src: url,
+        type: 'application/x-mpegURL'
+      });
 
-    videoRef.current.srcObject = null;
-    videoRef.current.play().catch(()=>{});
-    hookVttOverlaySoon();
+      window.player.ready(() => {
+        // Don't auto-play to avoid browser restrictions
+        hookVttOverlaySoon();
+      });
+    } catch (error) {
+      console.error('Error initializing video.js player:', error);
+    }
   };
 
   const hookVttOverlaySoon = () => {
@@ -116,7 +135,7 @@ function App() {
   const tryHookVttTrack = () => {
     if (vttHookedRef.current) return true;
 
-    const tracks = videoRef.current.textTracks;
+    const tracks = window.player ? window.player.textTracks() : [];
     if (!tracks || !tracks.length) return false;
 
     let metaTrack = null;
@@ -145,74 +164,10 @@ function App() {
     return true;
   };
 
-  const startLive = async (streamId) => {
-    await stopLive();
-
-    const routerCaps = await api("/webrtc/rtpCapabilities");
-
-    const device = new mediasoupClient.Device();
-    await device.load({ routerRtpCapabilities: routerCaps });
-
-    const t = await api("/webrtc/createTransport", { method: "POST" });
-
-    const transport = device.createRecvTransport({
-      id: t.transportId,
-      iceParameters: t.iceParameters,
-      iceCandidates: t.iceCandidates,
-      dtlsParameters: t.dtlsParameters
-    });
-
-    transport.on("connect", async ({ dtlsParameters }, cb, eb) => {
-      try {
-        await api("/webrtc/connectTransport", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ transportId: t.transportId, dtlsParameters })
-        });
-        cb();
-      } catch (e) { eb(e); }
-    });
-
-    const c = await api("/webrtc/consume", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ streamId, transportId: t.transportId, rtpCapabilities: device.rtpCapabilities })
-    });
-
-    const consumer = await transport.consume({
-      id: c.consumerId,
-      producerId: c.producerId || "ignored",
-      kind: c.kind,
-      rtpParameters: c.rtpParameters
-    });
-
-    const ms = new MediaStream();
-    ms.addTrack(consumer.track);
-    videoRef.current.srcObject = ms;
-    await videoRef.current.play().catch(()=>{});
-
-    liveRef.current = { device, transport, consumer };
-  };
-
-  const stopLive = async () => {
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-    try { liveRef.current.consumer?.close(); } catch {}
-    try { liveRef.current.transport?.close(); } catch {}
-    liveRef.current = { device: null, transport: null, consumer: null };
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current.removeAttribute("src");
-      videoRef.current.load();
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab === 'live') {
-      startLive(streamId);
-    } else if (activeTab === 'dvr') {
-      stopLive();
-      attachHlsDvr(streamId);
+  useLayoutEffect(() => {
+    if (activeTab === 'dvr') {
+      // Defer to next tick to ensure DOM is fully updated
+      setTimeout(() => attachHlsDvr(streamId), 0);
     } else if (activeTab === 'live-klv') {
       connectWs();
       subscribeWs();
@@ -263,19 +218,13 @@ function App() {
               <Text size="lg" fw={500}>Playback</Text>
               <Tabs value={activeTab} onChange={setActiveTab}>
                 <Tabs.List>
-                  <Tabs.Tab value="live">Live (WebRTC)</Tabs.Tab>
                   <Tabs.Tab value="dvr">DVR (HLS)</Tabs.Tab>
                   <Tabs.Tab value="live-klv">Live KLV (WS)</Tabs.Tab>
                 </Tabs.List>
 
-                <Tabs.Panel value="live" pt="xs">
-                  <Text>Live WebRTC playback</Text>
-                  <video ref={videoRef} controls style={{ width: '100%', maxHeight: '400px' }}></video>
-                </Tabs.Panel>
-
                 <Tabs.Panel value="dvr" pt="xs">
                   <Text>DVR HLS playback with VTT overlay</Text>
-                  <video ref={videoRef} controls style={{ width: '100%', maxHeight: '400px' }}></video>
+                  <video ref={videoRef} id="video-player" class="video-js" controls style={{ width: '100%', maxHeight: '400px' }}></video>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-klv" pt="xs">
