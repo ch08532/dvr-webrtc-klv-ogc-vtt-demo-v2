@@ -13,6 +13,13 @@ A runnable Node.js demo that:
 ## Prereqs
 - Node.js 18+
 - `ffmpeg` installed and on PATH
+- For GPU encode (default), install FFmpeg with hardware encoder support (for example `h264_nvenc`).
+
+### FFmpeg GPU settings
+- `FFMPEG_USE_GPU=1` (default) enables GPU encode for transcode modes (`xcode-any`).
+- `FFMPEG_GPU_CODEC=h264_nvenc` selects the GPU encoder.
+- `FFMPEG_HWACCEL=auto` selects decode hwaccel mode.
+- Set `FFMPEG_USE_GPU=0` to force CPU `libx264` fallback.
 
 ## Install / run
 ```bash

@@ -139,6 +139,10 @@ export class SegmentedVttWriter {
     // Lean subset for VTT (tune as needed)
     const lean = {
       timestampIso: payload.timestampIso,
+      ingestTimestampIso: payload.ingestTimestampIso,
+      videoClockTimestampIso: payload.videoClockTimestampIso,
+      ingestTimestampUnixMicros: payload.ingestTimestampUnixMicros,
+      videoClockTimestampUnixMicros: payload.videoClockTimestampUnixMicros,
       sensorLat: payload.sensorLat,
       sensorLon: payload.sensorLon,
       frameCenterLat: payload.frameCenterLat,
@@ -211,6 +215,10 @@ export class SegmentedVttWriter {
 `;
 
     for (let segNo = firstSegNo; segNo <= lastSegNo; segNo++) {
+      const segPath = this._segPath(segNo);
+      if (!fs.existsSync(segPath)) {
+        fs.writeFileSync(segPath, "WEBVTT\n\n");
+      }
       const segStartMs = segNo * this.segMs;
       txt += `#EXT-X-PROGRAM-DATE-TIME:${iso(segStartMs)}\n`;
       txt += `#EXTINF:${this.segSec.toFixed(3)},\n`;

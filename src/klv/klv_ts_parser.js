@@ -1,8 +1,12 @@
 import fs from "node:fs";
-import dgramStream from "dgram-stream";
+import dgram from "node:dgram";
 import { Transform } from "node:stream";
+import { PassThrough } from "node:stream";
 import { decodeSt0601LocalSet } from "./st0601.js";
 import { parseTsHeader, parsePat, parsePmt, chooseKlvPidFromPmt } from "./ts_psi.js";
+import { createServiceLogger, serializeError } from "../service_logger.js";
+
+const log = createServiceLogger("klv_ts_parser");
 
 const ST0601_KEY = Buffer.from([
   0x06, 0x0e, 0x2b, 0x34, 0x02, 0x0b, 0x01, 0x01,
@@ -32,11 +36,50 @@ class TsPacketizer extends Transform {
   }
 }
 
+function isIpv4Multicast(address) {
+  const first = Number(address.split(".")[0]);
+  return Number.isInteger(first) && first >= 224 && first <= 239;
+}
+
 function openInput(inputUrl) {
   if (inputUrl.startsWith("udp://")) {
     const m = inputUrl.match(/^udp:\/\/([^:]+):(\d+)$/);
     if (!m) throw new Error("UDP URL must be udp://host:port");
-    return dgramStream.createReadStream({ address: m[1], port: Number(m[2]), reuseAddr: true });
+
+    const address = m[1];
+    const port = Number(m[2]);
+    const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+    const out = new PassThrough();
+
+    sock.on("message", (msg) => {
+      out.write(msg);
+    });
+
+    sock.on("error", (error) => {
+      out.destroy(error);
+    });
+
+    sock.on("close", () => {
+      out.end();
+    });
+
+    sock.bind(port, isIpv4Multicast(address) ? "0.0.0.0" : address, () => {
+      if (isIpv4Multicast(address)) {
+        try {
+          sock.addMembership(address);
+        } catch (error) {
+          out.destroy(error);
+        }
+      }
+    });
+
+    const destroy = out.destroy.bind(out);
+    out.destroy = (error) => {
+      try { sock.close(); } catch {}
+      return destroy(error);
+    };
+
+    return out;
   }
   return fs.createReadStream(inputUrl);
 }
@@ -62,12 +105,13 @@ function scanForSt0601(buf, onDecoded) {
   }
 }
 
-export async function startKlvIngest({ streamId, inputUrl, onDecoded }) {
+export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId }) {
+  log.info("start", { requestId, streamId, inputUrl });
   const input = openInput(inputUrl);
   const packetizer = new TsPacketizer();
 
   let pmtPid = null;
-  let klvPid = null;
+  let klvPids = null;
 
   const rolling = new Map();
   const KEEP = 256 * 1024;
@@ -89,19 +133,38 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded }) {
     if (h.pid === 0x0000 && h.pusi) {
       const progs = parsePat(h.payload);
       if (progs?.length) pmtPid = progs[0].pmtPid;
+      if (progs?.length) log.debug("pat_detected", { requestId, streamId, pmtPid });
       return;
     }
 
     if (pmtPid != null && h.pid === pmtPid && h.pusi) {
       const streams = parsePmt(h.payload);
-      if (streams) klvPid = chooseKlvPidFromPmt(streams);
+      if (streams) {
+        const preferred = chooseKlvPidFromPmt(streams);
+        const allCandidates = streams
+          .filter((s) => s.streamType === 0x06)
+          .map((s) => s.pid);
+        if (preferred != null) {
+          klvPids = new Set([preferred, ...allCandidates]);
+        } else if (allCandidates.length) {
+          klvPids = new Set(allCandidates);
+        }
+      }
+      if (streams) {
+        log.debug("pmt_detected", {
+          requestId,
+          streamId,
+          pmtPid,
+          klvPids: klvPids ? [...klvPids] : null
+        });
+      }
       return;
     }
 
     if (!h.payload?.length) return;
 
-    if (klvPid != null) {
-      if (h.pid !== klvPid) return;
+    if (klvPids?.size) {
+      if (!klvPids.has(h.pid)) return;
       const buf = append(h.pid, h.payload);
       scanForSt0601(buf, onDecoded);
     } else {
@@ -111,13 +174,19 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded }) {
     }
   });
 
-  input.on("error", () => {});
-  packetizer.on("error", () => {});
+  input.on("error", (error) => {
+    log.error("input_error", { requestId, streamId, error: serializeError(error) });
+  });
 
-  return { streamId, inputUrl, input, packetizer };
+  packetizer.on("error", (error) => {
+    log.error("packetizer_error", { requestId, streamId, error: serializeError(error) });
+  });
+
+  return { streamId, inputUrl, input, packetizer, requestId };
 }
 
 export async function stopKlvIngest(handle) {
+  log.info("stop_requested", { requestId: handle?.requestId, streamId: handle?.streamId });
   try { handle?.input?.destroy(); } catch {}
   try { handle?.packetizer?.destroy(); } catch {}
 }

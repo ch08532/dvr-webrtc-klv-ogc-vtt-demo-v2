@@ -1,4 +1,7 @@
 import sqlite3 from "sqlite3";
+import { createServiceLogger, serializeError } from "../service_logger.js";
+
+const log = createServiceLogger("sqlite_klv_store");
 
 function openDb(dbPath) {
   return new Promise((resolve, reject) => {
@@ -29,6 +32,7 @@ export class SqliteKlvStore {
   }
 
   async init() {
+    log.info("init_start", { dbPath: this.dbPath });
     this.db = await openDb(this.dbPath);
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS klv_events (
@@ -38,6 +42,7 @@ export class SqliteKlvStore {
       );
     `);
     await run(this.db, `CREATE INDEX IF NOT EXISTS idx_klv_stream_time ON klv_events(stream_id, t_ms);`);
+    log.info("init_complete", { dbPath: this.dbPath });
   }
 
   async add(streamId, decoded) {
@@ -66,11 +71,27 @@ export class SqliteKlvStore {
     return { tMs: row.t_ms, data: JSON.parse(row.json) };
   }
 
+  async purgeStream(streamId) {
+    const result = await run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]);
+    const deleted = result?.changes ?? 0;
+    log.info("purge_stream", { streamId, deleted });
+    return deleted;
+  }
+
   startRetentionJob({ maxAgeMs }) {
     if (this._retentionTimer) clearInterval(this._retentionTimer);
+    log.info("retention_started", { maxAgeMs, intervalMs: 30000 });
+
     this._retentionTimer = setInterval(async () => {
       const cutoff = Date.now() - maxAgeMs;
-      try { await run(this.db, `DELETE FROM klv_events WHERE t_ms < ?`, [cutoff]); } catch {}
+      try {
+        const result = await run(this.db, `DELETE FROM klv_events WHERE t_ms < ?`, [cutoff]);
+        if ((result?.changes ?? 0) > 0) {
+          log.debug("retention_deleted", { deleted: result.changes, cutoff });
+        }
+      } catch (error) {
+        log.error("retention_error", { error: serializeError(error) });
+      }
     }, 30_000);
   }
 }

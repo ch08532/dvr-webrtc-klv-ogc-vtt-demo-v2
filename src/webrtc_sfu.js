@@ -1,7 +1,11 @@
 import * as mediasoup from "mediasoup";
+import { createServiceLogger } from "./service_logger.js";
+
+const log = createServiceLogger("webrtc_sfu");
 
 export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
   const worker = await mediasoup.createWorker({ rtcMinPort, rtcMaxPort });
+  log.info("worker_created", { pid: worker.pid, rtcMinPort, rtcMaxPort, announcedIp: announcedIp ?? null });
 
   const router = await worker.createRouter({
     mediaCodecs: [{
@@ -15,6 +19,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       }
     }]
   });
+  log.info("router_created", { codecs: router.rtpCapabilities?.codecs?.length ?? 0 });
 
   const webRtcTransports = new Map();        // id -> transport
   const ingestPlainTransports = new Map();   // streamId -> plain transport
@@ -34,13 +39,24 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     });
 
     ingestPlainTransports.set(streamId, plain);
+    log.info("ingest_transport_created", {
+      streamId,
+      ip: plain.tuple.localIp,
+      port: plain.tuple.localPort,
+      rtcpPort: plain.rtcpTuple.localPort
+    });
   }
 
   function ingestInfo(streamId) {
     const plain = ingestPlainTransports.get(streamId);
     if (!plain) throw new Error("No ingest transport for streamId");
+    const bindIp = plain.tuple.localIp;
+    const targetIp = (!bindIp || bindIp === "0.0.0.0" || bindIp === "::")
+      ? (announcedIp || "127.0.0.1")
+      : bindIp;
     return {
-      ip: plain.tuple.localIp,
+      ip: targetIp,
+      bindIp,
       port: plain.tuple.localPort,
       rtcpPort: plain.rtcpTuple.localPort
     };
@@ -55,6 +71,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
 
     const producer = await plain.produce({ kind: "video", rtpParameters });
     ingestProducers.set(streamId, producer);
+    log.info("producer_set", { streamId, producerId: producer.id });
     return producer.id;
   }
 
@@ -66,6 +83,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     const t = ingestPlainTransports.get(streamId);
     if (t) { try { t.close(); } catch {} }
     ingestPlainTransports.delete(streamId);
+    log.info("ingest_closed", { streamId });
   }
 
   async function createWebRtcTransport() {
@@ -77,12 +95,19 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     });
 
     webRtcTransports.set(transport.id, transport);
+    log.debug("webrtc_transport_created", { transportId: transport.id });
 
     transport.on("dtlsstatechange", (state) => {
+      log.debug("dtls_state_change", { transportId: transport.id, state });
       if (state === "closed") {
         webRtcTransports.delete(transport.id);
         try { transport.close(); } catch {}
+        log.info("webrtc_transport_closed", { transportId: transport.id });
       }
+    });
+
+    transport.on("icestatechange", (state) => {
+      log.debug("ice_state_change", { transportId: transport.id, state });
     });
 
     return {
@@ -97,6 +122,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     const t = webRtcTransports.get(transportId);
     if (!t) throw new Error("transport not found");
     await t.connect({ dtlsParameters });
+    log.info("webrtc_transport_connected", { transportId });
   }
 
   async function consume(streamId, transportId, rtpCapabilities) {
@@ -115,9 +141,19 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       rtpCapabilities,
       paused: false
     });
+    log.info("consumer_created", { streamId, transportId, consumerId: consumer.id, producerId: producer.id });
+
+    consumer.on("transportclose", () => {
+      log.info("consumer_transport_closed", { consumerId: consumer.id, streamId, transportId });
+    });
+
+    consumer.on("producerclose", () => {
+      log.info("consumer_producer_closed", { consumerId: consumer.id, streamId, producerId: producer.id });
+    });
 
     return {
       consumerId: consumer.id,
+      producerId: producer.id,
       kind: consumer.kind,
       rtpParameters: consumer.rtpParameters
     };

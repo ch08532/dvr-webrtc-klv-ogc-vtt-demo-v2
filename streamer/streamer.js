@@ -36,6 +36,8 @@ console.log(`Press Ctrl+C to stop`);
 const ffmpegArgs = [
   '-re', // Read input at native frame rate
   '-i', options.input, // Input file
+  '-map', '0', // Keep all streams (video/audio/KLV data)
+  '-copy_unknown', // Preserve data streams such as KLVA
   '-c', 'copy', // Copy streams without re-encoding
   '-f', 'mpegts', // Output format
 ];

@@ -10,8 +10,14 @@ export function readHlsPdtWindowMs(videoPlaylistPath) {
     const last = Date.parse(matches[matches.length - 1][1].trim());
     if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
 
-    // video segments are 1s in this recorder -> add 1s to cover last segment
-    return { firstMs: first, lastMs: last + 1000 };
+    // Approximate live edge coverage using declared target duration when available.
+    const tdMatch = txt.match(/#EXT-X-TARGETDURATION:\s*(\d+(?:\.\d+)?)/);
+    const targetDurationSec = tdMatch ? Number(tdMatch[1]) : 1;
+    const durationMs = Number.isFinite(targetDurationSec) && targetDurationSec > 0
+      ? Math.round(targetDurationSec * 1000)
+      : 1000;
+
+    return { firstMs: first, lastMs: last + durationMs };
   } catch {
     return null;
   }
