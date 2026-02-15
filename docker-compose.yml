@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  dvr-demo:
+    build: .
+    network_mode: host
+    volumes:
+      - ./recordings:/app/recordings
+      - ./db:/app/db
+    restart: unless-stopped
