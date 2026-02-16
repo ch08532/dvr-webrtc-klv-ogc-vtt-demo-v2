@@ -718,10 +718,10 @@ playlist.m3u8
 app.delete("/sources/:streamId", async (req, res) => {
   const streamId = req.params.streamId;
   const state = currentSourceState(streamId);
-  if (state === "stopping") {
+  if (state === "starting" || state === "stopping") {
     return res.status(409).json({
       ok: false,
-      error: `source ${streamId} is currently stopping; stop is not allowed`,
+      error: `source ${streamId} is currently ${state}; stop is not allowed`,
       state: getSourceRuntime(streamId)
     });
   }

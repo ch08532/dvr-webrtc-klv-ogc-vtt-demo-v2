@@ -50,7 +50,7 @@ function App() {
 
   const videoRef = useRef(null);
   const liveVideoRef = useRef(null);
-  const wsRef = useRef(null);
+  const wsWorkerRef = useRef(null);
   const vttHookedRef = useRef(false);
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
@@ -92,7 +92,7 @@ function App() {
   })();
 
   const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping'].includes(streamRuntime?.state);
-  const isStopBlockedByState = ['stopping', 'stopped'].includes(streamRuntime?.state);
+  const isStopBlockedByState = ['starting', 'stopping', 'stopped'].includes(streamRuntime?.state);
   const canStartSource = !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
 
@@ -104,13 +104,14 @@ function App() {
     return { color: 'green', label: 'Media Flowing' };
   })();
 
-  const refreshStreamState = async (targetStreamId = streamId) => {
+  const refreshStreamState = async (targetStreamId = streamId, { updateStatus = false } = {}) => {
     if (!targetStreamId) return;
     const result = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
     if (result?.streamId) {
       setStreamRuntime(result);
       if (result.running) setAutoAttachOnDvr(true);
       if (!result.running) setAutoAttachOnDvr(false);
+      if (updateStatus) setStatus(JSON.stringify(result, null, 2));
     }
   };
 
@@ -494,6 +495,9 @@ function App() {
   const parseStatusPayload = (value) => {
     if (value == null) return { entries: [], text: '' };
     if (typeof value === 'object') {
+      if (Array.isArray(value)) {
+        return { entries: [], text: JSON.stringify(value, null, 2) };
+      }
       return { entries: Object.entries(value), text: '' };
     }
 
@@ -503,9 +507,10 @@ function App() {
 
     try {
       const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object') {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return { entries: Object.entries(parsed), text: '' };
       }
+      return { entries: [], text: JSON.stringify(parsed, null, 2) };
     } catch {
       // Fallback to plain text status.
     }
@@ -594,33 +599,35 @@ function App() {
   };
 
   const connectWs = () => {
-    if (wsRef.current && (wsRef.current.readyState === 0 || wsRef.current.readyState === 1)) return;
+    if (!wsWorkerRef.current) {
+      const worker = new Worker(new URL('./workers/klv_ws_worker.js', import.meta.url), { type: 'module' });
+      worker.onmessage = (event) => {
+        const msg = event.data || {};
+        if (msg.type === 'st0601') {
+          if (activeTabRef.current !== 'live-klv') return;
+          if (!streamRuntimeRef.current?.running) return;
+          showOverlay({ mode: "live-ws", ...(msg.payload || {}) }, 'live-klv');
+        }
+      };
+      worker.onerror = (event) => {
+        setStatus(`KLV WS worker error: ${String(event?.message || 'unknown')}`);
+      };
+      wsWorkerRef.current = worker;
+    }
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    wsRef.current = new WebSocket(`${wsProto}://${location.host}/ws`);
-    wsRef.current.onopen = () => subscribeWs();
-    wsRef.current.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      if (activeTabRef.current !== 'live-klv') return;
-      if (!streamRuntimeRef.current?.running) return;
-      if (msg.type === "st0601") showOverlay({ mode: "live-ws", ...msg }, 'live-klv');
-    };
+    wsWorkerRef.current.postMessage({ type: 'connect', url: `${wsProto}://${location.host}/ws` });
   };
 
   const subscribeWs = () => {
-    if (!wsRef.current || wsRef.current.readyState !== 1) return;
-    wsRef.current.send(JSON.stringify({ type: "subscribe", streamId, mode: "live" }));
+    if (!wsWorkerRef.current) return;
+    wsWorkerRef.current.postMessage({ type: 'subscribe', streamId, mode: 'live' });
   };
 
   const disconnectWs = () => {
-    if (!wsRef.current) return;
-    try {
-      if (wsRef.current.readyState === 1) {
-        wsRef.current.send(JSON.stringify({ type: "subscribe", streamId: null, mode: "live" }));
-      }
-    } catch {}
-    try { wsRef.current.close(); } catch {}
-    wsRef.current = null;
+    if (!wsWorkerRef.current) return;
+    try { wsWorkerRef.current.postMessage({ type: 'disconnect' }); } catch {}
+    try { wsWorkerRef.current.terminate(); } catch {}
+    wsWorkerRef.current = null;
   };
 
   const attachHlsDvr = (streamId, retryCount = 0) => {
@@ -862,7 +869,7 @@ function App() {
 
   useEffect(() => {
     refreshSources({ silent: true }).catch(() => {});
-    refreshStreamState(streamId).catch(() => {});
+    refreshStreamState(streamId, { updateStatus: true }).catch(() => {});
 
     const timer = setInterval(() => {
       refreshSources({ silent: true }).catch(() => {});
@@ -1077,7 +1084,7 @@ function App() {
                     ))}
                   </Stack>
                 ) : (
-                  <Text size="sm" c="dimmed" mt="xs">
+                  <Text size="sm" mt="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
                     {statusParsed.text || 'No status yet.'}
                   </Text>
                 )}
