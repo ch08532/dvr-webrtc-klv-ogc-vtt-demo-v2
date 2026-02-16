@@ -14,7 +14,7 @@ function App() {
   const [inputUrl, setInputUrl] = useState('udp://239.1.2.3:5000');
   const [mode, setMode] = useState('xcode-any');
   const [dvrSeconds, setDvrSeconds] = useState(600);
-  const [hlsSegmentSeconds, setHlsSegmentSeconds] = useState(1);
+  const [hlsSegmentSeconds, setHlsSegmentSeconds] = useState(5);
   const [maxCuesPerSecond, setMaxCuesPerSecond] = useState(10);
   const [minCueDurSec, setMinCueDurSec] = useState(0.10);
   const [maxCueDurSec, setMaxCueDurSec] = useState(0.50);
@@ -24,6 +24,15 @@ function App() {
   const [activeTab, setActiveTab] = useState('dvr');
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [liveStatus, setLiveStatus] = useState('Idle');
+  const [webrtcDiag, setWebrtcDiag] = useState({
+    consumerId: null,
+    producerScore: null,
+    consumerScore: null,
+    currentLayers: null,
+    error: null
+  });
+  const [startRequestInFlight, setStartRequestInFlight] = useState(false);
+  const [stopRequestInFlight, setStopRequestInFlight] = useState(false);
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
 
@@ -37,6 +46,8 @@ function App() {
   const webrtcRetryTokenRef = useRef(0);
   const webrtcTransportRef = useRef(null);
   const webrtcConsumerRef = useRef(null);
+  const webrtcMediaStreamRef = useRef(null);
+  const webrtcStreamIdRef = useRef(null);
 
   const api = async (url, opts) => {
     const res = await fetch(url, opts);
@@ -51,6 +62,19 @@ function App() {
     if (state === 'error') return 'red';
     return 'gray';
   };
+
+  const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping'].includes(streamRuntime?.state);
+  const isStopBlockedByState = ['stopping', 'stopped'].includes(streamRuntime?.state);
+  const canStartSource = !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
+  const canStopSource = !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
+
+  const webrtcBadge = (() => {
+    if (webrtcDiag.error) return { color: 'red', label: 'Diag Error' };
+    if (!webrtcDiag.consumerId) return { color: 'gray', label: 'No Stats' };
+    if ((webrtcDiag.producerScore ?? 0) <= 0) return { color: 'red', label: 'No Producer Media' };
+    if ((webrtcDiag.consumerScore ?? 0) <= 0) return { color: 'orange', label: 'No Consumer Media' };
+    return { color: 'green', label: 'Media Flowing' };
+  })();
 
   const refreshStreamState = async (targetStreamId = streamId) => {
     if (!targetStreamId) return;
@@ -69,11 +93,19 @@ function App() {
     }
   };
 
-  const probeHlsMaster = async (targetStreamId) => {
-    const url = `/hls/${encodeURIComponent(targetStreamId)}/master.m3u8?_=${Date.now()}`;
+  const probeHlsReady = async (targetStreamId) => {
+    const root = `/hls/${encodeURIComponent(targetStreamId)}`;
+    const token = Date.now();
+    const masterUrl = `${root}/master.m3u8?_=${token}`;
+    const mediaUrl = `${root}/playlist.m3u8?_=${token}`;
     try {
-      const res = await fetch(url, { cache: 'no-store' });
-      return res.ok;
+      const [masterRes, mediaRes] = await Promise.all([
+        fetch(masterUrl, { cache: 'no-store' }),
+        fetch(mediaUrl, { cache: 'no-store' })
+      ]);
+      if (!masterRes.ok || !mediaRes.ok) return false;
+      const mediaTxt = await mediaRes.text();
+      return mediaTxt.includes('#EXTM3U');
     } catch {
       return false;
     }
@@ -91,7 +123,31 @@ function App() {
     try { webrtcTransportRef.current?.close?.(); } catch {}
     webrtcConsumerRef.current = null;
     webrtcTransportRef.current = null;
+    webrtcMediaStreamRef.current = null;
+    webrtcStreamIdRef.current = null;
     if (liveVideoRef.current) liveVideoRef.current.srcObject = null;
+  };
+
+  const hasActiveWebRtcSession = (targetStreamId) => {
+    const transport = webrtcTransportRef.current;
+    const consumer = webrtcConsumerRef.current;
+    if (!transport || !consumer) return false;
+    if (webrtcStreamIdRef.current !== targetStreamId) return false;
+    if (transport.closed || consumer.closed) return false;
+    if (transport.connectionState && transport.connectionState !== 'connected') return false;
+    if (!consumer.track || consumer.track.readyState !== 'live') return false;
+    return true;
+  };
+
+  const reattachWebRtcStream = () => {
+    if (!liveVideoRef.current || !webrtcMediaStreamRef.current) return;
+    if (liveVideoRef.current.srcObject !== webrtcMediaStreamRef.current) {
+      liveVideoRef.current.srcObject = webrtcMediaStreamRef.current;
+    }
+    liveVideoRef.current.autoplay = true;
+    liveVideoRef.current.muted = true;
+    liveVideoRef.current.playsInline = true;
+    liveVideoRef.current.play().catch(() => {});
   };
 
   const startLiveWebRtc = async (targetStreamId) => {
@@ -133,7 +189,7 @@ function App() {
     });
 
     recvTransport.on('connectionstatechange', (state) => {
-      if (state === 'connected') setLiveStatus('Playing');
+      if (state === 'connected') setLiveStatus('Connected (waiting for video)...');
       else if (state === 'failed') {
         setLiveStatus('Connection failed. Reconnecting...');
         setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
@@ -172,64 +228,136 @@ function App() {
       setLiveStatus('Producer closed. Reconnecting...');
       setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
     });
+    consumer.track.onended = () => {
+      setLiveStatus('Track ended. Reconnecting...');
+      setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
+    };
+    consumer.track.onunmute = () => {
+      setLiveStatus('Receiving video...');
+    };
 
     const stream = new MediaStream([consumer.track]);
+    webrtcMediaStreamRef.current = stream;
+    webrtcStreamIdRef.current = targetStreamId;
     if (liveVideoRef.current) {
-      liveVideoRef.current.srcObject = stream;
-      await liveVideoRef.current.play().catch(() => {});
+      const videoEl = liveVideoRef.current;
+      videoEl.srcObject = stream;
+      videoEl.autoplay = true;
+      videoEl.muted = true;
+      videoEl.playsInline = true;
+
+      const playResult = await videoEl.play().catch(() => null);
+      if (playResult == null && videoEl.paused) {
+        setLiveStatus('Tap video to start playback');
+        return;
+      }
+
+      await new Promise((resolve, reject) => {
+        let done = false;
+        let frameCbId = null;
+        const finish = (ok, error = null) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          videoEl.removeEventListener('playing', onPlaying);
+          videoEl.removeEventListener('timeupdate', onTimeUpdate);
+          videoEl.removeEventListener('loadeddata', onLoadedData);
+          if (frameCbId != null && typeof videoEl.cancelVideoFrameCallback === 'function') {
+            try { videoEl.cancelVideoFrameCallback(frameCbId); } catch {}
+          }
+          if (ok) resolve();
+          else reject(error || new Error('No WebRTC video frames received'));
+        };
+
+        const onPlaying = () => finish(true);
+        const onTimeUpdate = () => {
+          if (videoEl.currentTime > 0) finish(true);
+        };
+        const onLoadedData = () => {
+          if (videoEl.readyState >= 2) finish(true);
+        };
+
+        const timer = setTimeout(() => {
+          finish(false, new Error('WebRTC connected but no video frames yet'));
+        }, 8000);
+
+        videoEl.addEventListener('playing', onPlaying);
+        videoEl.addEventListener('timeupdate', onTimeUpdate);
+        videoEl.addEventListener('loadeddata', onLoadedData);
+
+        if (typeof videoEl.requestVideoFrameCallback === 'function') {
+          frameCbId = videoEl.requestVideoFrameCallback(() => finish(true));
+        }
+      });
+
+      setLiveStatus('Playing');
     }
-    setLiveStatus('Playing');
   };
 
   const startSource = async () => {
+    if (!canStartSource) return;
+    setStartRequestInFlight(true);
     setStreamRuntime({ streamId, state: 'starting', running: false, lastError: null });
-    const result = await api("/sources", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        streamId,
-        inputUrl,
-        mode,
-        dvrSeconds,
-        hlsSegmentSeconds,
-        vttSegmentSeconds: hlsSegmentSeconds,
-        maxCuesPerSecond,
-        minCueDurSec,
-        maxCueDurSec,
-        purgeBeforeStart
-      })
-    });
-    setStatus(JSON.stringify(result, null, 2));
-    await refreshStreamState(streamId);
-    await refreshSources({ silent: true });
+    try {
+      const result = await api("/sources", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          streamId,
+          inputUrl,
+          mode,
+          dvrSeconds,
+          hlsSegmentSeconds,
+          vttSegmentSeconds: hlsSegmentSeconds,
+          maxCuesPerSecond,
+          minCueDurSec,
+          maxCueDurSec,
+          purgeBeforeStart
+        })
+      });
+      setStatus(JSON.stringify(result, null, 2));
+      if (result?.state?.streamId) setStreamRuntime(result.state);
+      await refreshStreamState(streamId);
+      await refreshSources({ silent: true });
 
-    if (result?.ok) {
-      setAutoAttachOnDvr(true);
-    }
+      if (result?.ok) {
+        setAutoAttachOnDvr(true);
+      }
 
-    // Start probing for HLS and attach as soon as playlist is available.
-    if (result?.ok && activeTab === 'dvr') {
-      startHlsAutoAttach(streamId);
-    }
-    if (result?.ok && activeTab === 'live-webrtc') {
-      startWebRtcAutoAttach(streamId);
+      // Start probing for HLS and attach as soon as playlist is available.
+      if (result?.ok && activeTab === 'dvr') {
+        startHlsAutoAttach(streamId);
+      }
+      if (result?.ok && activeTab === 'live-webrtc') {
+        startWebRtcAutoAttach(streamId);
+      }
+    } finally {
+      setStartRequestInFlight(false);
     }
   };
 
   const stopSource = async () => {
-    const result = await api(`/sources/${encodeURIComponent(streamId)}`, { method: "DELETE" });
-    setStatus(JSON.stringify(result, null, 2));
-    setAutoAttachOnDvr(false);
-    clearHlsRetryLoop();
-    clearWebRtcRetryLoop();
-    if (window.player) {
-      window.player.dispose();
-      window.player = null;
+    if (!canStopSource) return;
+    setStopRequestInFlight(true);
+    setStreamRuntime((prev) => ({ ...prev, streamId, state: 'stopping', running: false, ingestRunning: false }));
+    try {
+      const result = await api(`/sources/${encodeURIComponent(streamId)}`, { method: "DELETE" });
+      setStatus(JSON.stringify(result, null, 2));
+      if (result?.state?.streamId) setStreamRuntime(result.state);
+      setAutoAttachOnDvr(false);
+      clearHlsRetryLoop();
+      clearWebRtcRetryLoop();
+      if (window.player) {
+        window.player.dispose();
+        window.player = null;
+      }
+      cleanupWebRtcPlayback();
+      setLiveStatus('Stopped');
+      await refreshStreamState(streamId);
+      await refreshSources({ silent: true });
+    } finally {
+      setStopRequestInFlight(false);
     }
-    cleanupWebRtcPlayback();
-    setLiveStatus('Stopped');
-    await refreshStreamState(streamId);
-    await refreshSources({ silent: true });
   };
 
   const refreshSources = async ({ silent = false } = {}) => {
@@ -238,13 +366,37 @@ function App() {
     if (!silent) setStatus(JSON.stringify(result, null, 2));
   };
 
+  const refreshWebRtcDebug = async (targetStreamId = streamId) => {
+    if (!targetStreamId) return;
+    const result = await api('/webrtc/debug');
+    if (!result?.ok || !result?.snapshot) {
+      setWebrtcDiag((prev) => ({
+        ...prev,
+        error: result?.error || 'debug unavailable'
+      }));
+      return;
+    }
+
+    const consumers = Array.isArray(result.snapshot.consumers) ? result.snapshot.consumers : [];
+    const c = consumers.find((x) => x.streamId === targetStreamId) || null;
+
+    setWebrtcDiag({
+      consumerId: c?.consumerId || null,
+      producerScore: Number.isFinite(c?.score?.producerScore) ? c.score.producerScore : null,
+      consumerScore: Number.isFinite(c?.score?.score) ? c.score.score : null,
+      currentLayers: c?.currentLayers ?? null,
+      error: null
+    });
+  };
+
   const showOverlay = (obj) => {
     setOverlay(JSON.stringify(obj, null, 2));
   };
 
   const connectWs = () => {
     if (wsRef.current && (wsRef.current.readyState === 0 || wsRef.current.readyState === 1)) return;
-    wsRef.current = new WebSocket(`ws://${location.hostname}:8081`);
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    wsRef.current = new WebSocket(`${wsProto}://${location.host}/ws`);
     wsRef.current.onopen = () => subscribeWs();
     wsRef.current.onmessage = (ev) => {
       let msg;
@@ -265,8 +417,14 @@ function App() {
 
     vttHookedRef.current = false;
 
-    // Dispose existing player
-    if (window.player) {
+    // Reuse existing player on tab switches if source is unchanged.
+    if (window.player && !window.player.isDisposed?.()) {
+      const currentSrc = String(window.player.currentSrc?.() || "");
+      if (currentSrc.includes(`/hls/${encodeURIComponent(streamId)}/master.m3u8`)) {
+        window.player.play().catch(() => {});
+        hookVttOverlaySoon();
+        return;
+      }
       window.player.dispose();
       window.player = null;
     }
@@ -370,7 +528,7 @@ function App() {
       if (token !== hlsRetryTokenRef.current) return;
       if (activeTab !== 'dvr') return;
 
-      const available = await probeHlsMaster(targetStreamId);
+      const available = await probeHlsReady(targetStreamId);
       if (token !== hlsRetryTokenRef.current) return;
 
       if (available) {
@@ -392,6 +550,11 @@ function App() {
     const run = async () => {
       if (token !== webrtcRetryTokenRef.current) return;
       if (activeTab !== 'live-webrtc') return;
+      if (hasActiveWebRtcSession(targetStreamId)) {
+        reattachWebRtcStream();
+        setLiveStatus('Playing');
+        return;
+      }
 
       attempts += 1;
       const runtime = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
@@ -418,19 +581,29 @@ function App() {
     if (activeTab === 'dvr') {
       // Keep probing until HLS appears, then attach, but only after user started a source.
       if (autoAttachOnDvr) {
-        setTimeout(() => startHlsAutoAttach(streamId), 0);
+        if (window.player && !window.player.isDisposed?.()) {
+          window.player.play().catch(() => {});
+          hookVttOverlaySoon();
+        } else {
+          setTimeout(() => startHlsAutoAttach(streamId), 0);
+        }
       }
       clearWebRtcRetryLoop();
-      cleanupWebRtcPlayback();
     } else if (activeTab === 'live-klv') {
       clearHlsRetryLoop();
+      try { window.player?.pause?.(); } catch {}
       clearWebRtcRetryLoop();
-      cleanupWebRtcPlayback();
       connectWs();
       subscribeWs();
     } else if (activeTab === 'live-webrtc') {
       clearHlsRetryLoop();
-      startWebRtcAutoAttach(streamId);
+      try { window.player?.pause?.(); } catch {}
+      if (hasActiveWebRtcSession(streamId)) {
+        reattachWebRtcStream();
+        setLiveStatus('Playing');
+      } else {
+        startWebRtcAutoAttach(streamId);
+      }
     }
   }, [activeTab, streamId, autoAttachOnDvr]);
 
@@ -456,6 +629,15 @@ function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'live-webrtc') return;
+    refreshWebRtcDebug(streamId).catch(() => {});
+    const timer = setInterval(() => {
+      refreshWebRtcDebug(streamId).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [activeTab, streamId]);
 
   return (
     <MantineProvider theme={theme}>
@@ -497,11 +679,9 @@ function App() {
                 onChange={(event) => setPurgeBeforeStart(event.currentTarget.checked)}
               />
               <Group mt="md">
-                <Button onClick={startSource}>Start Source</Button>
-                <Button onClick={stopSource} color="red">Stop Source</Button>
-                <Button onClick={refreshSources} variant="outline">Refresh</Button>
-                <Button variant="light" onClick={() => startHlsAutoAttach(streamId)}>Reconnect HLS</Button>
-                <Button variant="light" onClick={() => startWebRtcAutoAttach(streamId)}>Reconnect WebRTC</Button>
+                <Button onClick={startSource} disabled={!canStartSource}>Start Source</Button>
+                <Button onClick={stopSource} color="red" disabled={!canStopSource}>Stop Source</Button>
+                <Button onClick={refreshSources} variant="outline" disabled={startRequestInFlight || stopRequestInFlight}>Refresh</Button>
               </Group>
 
               <Group mt="md" align="center">
@@ -552,8 +732,14 @@ function App() {
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
                   <Text>Live video via WebRTC</Text>
-                  <Text size="sm" c="dimmed">Status: {liveStatus}</Text>
-                  <video ref={liveVideoRef} controls muted playsInline style={{ width: '100%', maxHeight: '400px' }}></video>
+                  <Group gap="xs" mb="xs">
+                    <Text size="sm" c="dimmed">Status: {liveStatus}</Text>
+                    <Badge color={webrtcBadge.color} variant="light">{webrtcBadge.label}</Badge>
+                  </Group>
+                  <Text size="xs" c="dimmed" mb="xs">
+                    producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | layers: {webrtcDiag.currentLayers ? JSON.stringify(webrtcDiag.currentLayers) : 'n/a'}
+                  </Text>
+                  <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-klv" pt="xs">

@@ -4,6 +4,9 @@ import { createServiceLogger, serializeError } from "./service_logger.js";
 import { buildVideoArgs } from "./ffmpeg_video.js";
 
 const log = createServiceLogger("hls_recorder");
+const TRANSIENT_INPUT_WARNING_RE = /Invalid frame dimensions 0x0\./i;
+const STOP_TERM_WAIT_MS = Number(process.env.FFMPEG_STOP_TERM_WAIT_MS || 1500);
+const STOP_KILL_WAIT_MS = Number(process.env.FFMPEG_STOP_KILL_WAIT_MS || 1500);
 
 function normalizeMode(mode) {
   if (!mode || mode === "auto") return "xcode-any";
@@ -14,6 +17,23 @@ function normalizeSegmentSeconds(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 1;
   return n;
+}
+
+function waitForExit(proc, timeoutMs) {
+  if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      proc.off("exit", onExit);
+      resolve(ok);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    proc.once("exit", onExit);
+  });
 }
 
 export function startHlsRecorder({ streamId, inputUrl, outDir, dvrSeconds, hlsSegmentSeconds, mode, requestId }) {
@@ -62,10 +82,15 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, dvrSeconds, hlsSe
     cwd: outDir,
     stdio: ["ignore", "ignore", "pipe"]
   });
+  proc._intentionalStop = false;
 
   proc.stderr.on("data", (chunk) => {
     const lines = chunk.toString().split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
     for (const line of lines) {
+      if (TRANSIENT_INPUT_WARNING_RE.test(line)) {
+        log.debug("ffmpeg_stderr_transient", { requestId, streamId, line });
+        continue;
+      }
       log.warn("ffmpeg_stderr", { requestId, streamId, line });
     }
   });
@@ -75,6 +100,11 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, dvrSeconds, hlsSe
   });
 
   proc.on("exit", (code, signal) => {
+    const intentional = proc._intentionalStop === true;
+    if (intentional && (signal === "SIGTERM" || signal === "SIGKILL")) {
+      log.info("exit_stopped", { requestId, streamId, code, signal });
+      return;
+    }
     const event = code === 0 ? "exit_clean" : "exit_unexpected";
     const level = code === 0 ? "info" : "warn";
     log[level](event, { requestId, streamId, code, signal });
@@ -85,7 +115,17 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, dvrSeconds, hlsSe
 
 export async function stopHlsRecorder(hls) {
   if (!hls?.proc) return;
+  if (hls.proc.exitCode != null || hls.proc.killed) return;
+  hls.proc._intentionalStop = true;
   log.info("stop_requested", { requestId: hls.requestId, streamId: hls.streamId });
   try { hls.proc.kill("SIGTERM"); } catch {}
-  setTimeout(() => { try { hls.proc.kill("SIGKILL"); } catch {} }, 1200);
+  const stoppedOnTerm = await waitForExit(hls.proc, STOP_TERM_WAIT_MS);
+  if (stoppedOnTerm) return;
+
+  log.warn("stop_escalating", { requestId: hls.requestId, streamId: hls.streamId, signal: "SIGKILL" });
+  try { hls.proc.kill("SIGKILL"); } catch {}
+  const stoppedOnKill = await waitForExit(hls.proc, STOP_KILL_WAIT_MS);
+  if (!stoppedOnKill) {
+    log.warn("stop_timeout", { requestId: hls.requestId, streamId: hls.streamId });
+  }
 }

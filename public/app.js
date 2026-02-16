@@ -20,7 +20,7 @@ const tabLive = document.getElementById("tabLive");
 const tabDvr = document.getElementById("tabDvr");
 const tabLiveKlv = document.getElementById("tabLiveKlv");
 
-const WS_URL = `ws://${location.hostname}:8081`;
+const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
 let ws = null;
 let hls = null;

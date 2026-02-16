@@ -23,6 +23,11 @@ function get(db, sql, params = []) {
     db.get(sql, params, (err, row) => err ? reject(err) : resolve(row));
   });
 }
+function closeDb(db) {
+  return new Promise((resolve, reject) => {
+    db.close((err) => err ? reject(err) : resolve());
+  });
+}
 
 export class SqliteKlvStore {
   constructor({ dbPath }) {
@@ -34,6 +39,9 @@ export class SqliteKlvStore {
   async init() {
     log.info("init_start", { dbPath: this.dbPath });
     this.db = await openDb(this.dbPath);
+    await run(this.db, `PRAGMA journal_mode=WAL;`);
+    await run(this.db, `PRAGMA synchronous=NORMAL;`);
+    await run(this.db, `PRAGMA busy_timeout=5000;`);
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS klv_events (
         stream_id TEXT NOT NULL,
@@ -93,5 +101,16 @@ export class SqliteKlvStore {
         log.error("retention_error", { error: serializeError(error) });
       }
     }, 30_000);
+  }
+
+  async close() {
+    if (this._retentionTimer) {
+      clearInterval(this._retentionTimer);
+      this._retentionTimer = null;
+    }
+    if (!this.db) return;
+    const db = this.db;
+    this.db = null;
+    await closeDb(db);
   }
 }

@@ -73,10 +73,6 @@ export function buildVideoArgs(mode) {
     "-keyint_min", gop
   );
 
-  if (encoder === "h264_nvenc") {
-    videoArgs.push("-sc_threshold", "0");
-  }
-
   return {
     inputArgs,
     videoArgs,

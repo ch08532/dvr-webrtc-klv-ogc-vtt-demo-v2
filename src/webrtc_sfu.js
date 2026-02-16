@@ -12,6 +12,13 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       kind: "video",
       mimeType: "video/H264",
       clockRate: 90000,
+      rtcpFeedback: [
+        { type: "nack" },
+        { type: "nack", parameter: "pli" },
+        { type: "ccm", parameter: "fir" },
+        { type: "transport-cc" },
+        { type: "goog-remb" }
+      ],
       parameters: {
         "packetization-mode": 1,
         "profile-level-id": "42e01f",
@@ -24,6 +31,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
   const webRtcTransports = new Map();        // id -> transport
   const ingestPlainTransports = new Map();   // streamId -> plain transport
   const ingestProducers = new Map();         // streamId -> producer
+  const consumers = new Map();               // consumerId -> { consumer, streamId, transportId }
 
   function routerRtpCapabilities() {
     return router.rtpCapabilities;
@@ -45,6 +53,22 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       port: plain.tuple.localPort,
       rtcpPort: plain.rtcpTuple.localPort
     });
+
+    plain.on("tuple", (tuple) => {
+      log.debug("ingest_tuple", { streamId, tuple });
+    });
+    plain.on("rtcptuple", (rtcpTuple) => {
+      log.debug("ingest_rtcp_tuple", { streamId, rtcpTuple });
+    });
+    plain.on("trace", (trace) => {
+      log.debug("ingest_trace", { streamId, trace });
+    });
+    plain.on("close", () => {
+      log.info("ingest_transport_closed", { streamId });
+    });
+    try {
+      await plain.enableTraceEvent(["probation", "bwe"]);
+    } catch {}
   }
 
   function ingestInfo(streamId) {
@@ -72,6 +96,23 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     const producer = await plain.produce({ kind: "video", rtpParameters });
     ingestProducers.set(streamId, producer);
     log.info("producer_set", { streamId, producerId: producer.id });
+
+    producer.on("score", (score) => {
+      log.debug("producer_score", { streamId, producerId: producer.id, score });
+    });
+    producer.on("trace", (trace) => {
+      log.debug("producer_trace", { streamId, producerId: producer.id, trace });
+    });
+    producer.on("transportclose", () => {
+      log.info("producer_transport_closed", { streamId, producerId: producer.id });
+    });
+    producer.on("close", () => {
+      log.info("producer_closed", { streamId, producerId: producer.id });
+    });
+    try {
+      await producer.enableTraceEvent(["rtp", "pli", "fir", "nack", "keyframe"]);
+    } catch {}
+
     return producer.id;
   }
 
@@ -79,6 +120,13 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     const p = ingestProducers.get(streamId);
     if (p) { try { p.close(); } catch {} }
     ingestProducers.delete(streamId);
+
+    for (const [consumerId, entry] of consumers.entries()) {
+      if (entry.streamId !== streamId) continue;
+      try { entry.consumer.close(); } catch {}
+      consumers.delete(consumerId);
+      log.info("consumer_closed_on_ingest_close", { streamId, consumerId, transportId: entry.transportId });
+    }
 
     const t = ingestPlainTransports.get(streamId);
     if (t) { try { t.close(); } catch {} }
@@ -95,7 +143,11 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     });
 
     webRtcTransports.set(transport.id, transport);
-    log.debug("webrtc_transport_created", { transportId: transport.id });
+    log.debug("webrtc_transport_created", {
+      transportId: transport.id,
+      iceCandidates: transport.iceCandidates?.length ?? 0,
+      hasDtlsParameters: !!transport.dtlsParameters
+    });
 
     transport.on("dtlsstatechange", (state) => {
       log.debug("dtls_state_change", { transportId: transport.id, state });
@@ -110,6 +162,17 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       log.debug("ice_state_change", { transportId: transport.id, state });
     });
 
+    transport.on("iceselectedtuplechange", (tuple) => {
+      log.debug("ice_selected_tuple_change", { transportId: transport.id, tuple });
+    });
+
+    transport.on("trace", (trace) => {
+      log.debug("webrtc_transport_trace", { transportId: transport.id, trace });
+    });
+    try {
+      await transport.enableTraceEvent(["probation", "bwe"]);
+    } catch {}
+
     return {
       transportId: transport.id,
       iceParameters: transport.iceParameters,
@@ -122,7 +185,12 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     const t = webRtcTransports.get(transportId);
     if (!t) throw new Error("transport not found");
     await t.connect({ dtlsParameters });
-    log.info("webrtc_transport_connected", { transportId });
+    log.info("webrtc_transport_connected", {
+      transportId,
+      dtlsState: t.dtlsState,
+      iceState: t.iceState,
+      selectedTuple: t.iceSelectedTuple ?? null
+    });
   }
 
   async function consume(streamId, transportId, rtpCapabilities) {
@@ -142,20 +210,107 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       paused: false
     });
     log.info("consumer_created", { streamId, transportId, consumerId: consumer.id, producerId: producer.id });
+    consumers.set(consumer.id, { consumer, streamId, transportId });
+    log.debug("consumer_rtp_parameters", {
+      streamId,
+      transportId,
+      consumerId: consumer.id,
+      encodings: consumer.rtpParameters?.encodings?.length ?? 0,
+      codecs: consumer.rtpParameters?.codecs?.length ?? 0
+    });
+    try {
+      await consumer.requestKeyFrame();
+      log.debug("consumer_keyframe_requested", { streamId, transportId, consumerId: consumer.id });
+    } catch (error) {
+      log.warn("consumer_keyframe_request_failed", {
+        streamId,
+        transportId,
+        consumerId: consumer.id,
+        error: String(error?.message || error)
+      });
+    }
 
     consumer.on("transportclose", () => {
       log.info("consumer_transport_closed", { consumerId: consumer.id, streamId, transportId });
+      consumers.delete(consumer.id);
     });
 
     consumer.on("producerclose", () => {
       log.info("consumer_producer_closed", { consumerId: consumer.id, streamId, producerId: producer.id });
+      consumers.delete(consumer.id);
     });
+    consumer.on("score", (score) => {
+      log.debug("consumer_score", { consumerId: consumer.id, streamId, transportId, score });
+    });
+    consumer.on("layerschange", (layers) => {
+      log.debug("consumer_layers_change", { consumerId: consumer.id, streamId, transportId, layers });
+    });
+    consumer.on("trace", (trace) => {
+      log.debug("consumer_trace", { consumerId: consumer.id, streamId, transportId, trace });
+    });
+    try {
+      await consumer.enableTraceEvent(["rtp", "pli", "fir", "nack", "keyframe"]);
+    } catch {}
 
     return {
       consumerId: consumer.id,
       producerId: producer.id,
       kind: consumer.kind,
       rtpParameters: consumer.rtpParameters
+    };
+  }
+
+  function debugSnapshot() {
+    const ingest = [];
+    for (const [streamId, plain] of ingestPlainTransports.entries()) {
+      const producer = ingestProducers.get(streamId);
+      ingest.push({
+        streamId,
+        plainTransport: {
+          id: plain.id,
+          tuple: plain.tuple ?? null,
+          rtcpTuple: plain.rtcpTuple ?? null
+        },
+        producer: producer ? {
+          id: producer.id,
+          paused: !!producer.paused,
+          score: producer.score ?? null
+        } : null
+      });
+    }
+
+    const transports = [];
+    for (const [transportId, transport] of webRtcTransports.entries()) {
+      transports.push({
+        transportId,
+        iceState: transport.iceState,
+        dtlsState: transport.dtlsState,
+        selectedTuple: transport.iceSelectedTuple ?? null
+      });
+    }
+
+    const consumersOut = [];
+    for (const [consumerId, entry] of consumers.entries()) {
+      consumersOut.push({
+        consumerId,
+        streamId: entry.streamId,
+        transportId: entry.transportId,
+        kind: entry.consumer.kind,
+        paused: !!entry.consumer.paused,
+        producerPaused: !!entry.consumer.producerPaused,
+        score: entry.consumer.score ?? null,
+        currentLayers: entry.consumer.currentLayers ?? null
+      });
+    }
+
+    return {
+      workerPid: worker.pid,
+      ingestCount: ingest.length,
+      transportCount: transports.length,
+      consumerCount: consumersOut.length,
+      ingest,
+      transports,
+      consumers: consumersOut
     };
   }
 
@@ -167,6 +322,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     closeIngest,
     createWebRtcTransport,
     connectWebRtcTransport,
-    consume
+    consume,
+    debugSnapshot
   };
 }

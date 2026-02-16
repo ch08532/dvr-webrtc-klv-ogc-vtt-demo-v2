@@ -2,16 +2,15 @@ import express from "express";
 import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { WebSocketServer } from "ws";
 
-import { createWebRtcSfu } from "./src/webrtc_sfu.js";
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
-import { startFfmpegRtpIngest, stopFfmpegRtpIngest } from "./src/ffmpeg_rtp_ingest.js";
-import { startKlvIngest, stopKlvIngest } from "./src/klv/klv_ts_parser.js";
+import { startKlvStreamWorker, stopKlvStreamWorker } from "./src/klv_stream_worker_client.js";
+import { startSfuWorkerClient } from "./src/sfu_worker_client.js";
 import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
 import { registerOgcMovingFeaturesRoutes } from "./src/ogc_moving_features.js";
-import { SegmentedVttWriter } from "./src/vtt_segmenter.js";
-import { readHlsPdtWindowMs } from "./src/hls_window.js";
+import { getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
 import {
   createServiceLogger,
   newRequestId,
@@ -19,8 +18,10 @@ import {
   serializeError
 } from "./src/service_logger.js";
 
-const HTTP_PORT = 8090;
-const WS_PORT = 8081;
+const REQUESTED_HTTP_PORT = Number(process.env.HTTP_PORT || 8090);
+const HTTP_PORT_EXPLICIT = process.env.HTTP_PORT != null;
+const HTTP_PORT_SCAN_RANGE = Math.max(0, Number(process.env.HTTP_PORT_SCAN_RANGE || 20));
+const WS_PATH = process.env.WS_PATH || "/ws";
 const WEBRTC_ANNOUNCED_IP = process.env.WEBRTC_ANNOUNCED_IP || "127.0.0.1";
 const log = createServiceLogger("server");
 
@@ -54,18 +55,12 @@ app.use((req, res, next) => {
   });
 });
 const server = http.createServer(app);
+let httpPort = REQUESTED_HTTP_PORT;
 
 // ---------- Storage ----------
 const store = new SqliteKlvStore({ dbPath: path.join(DB_DIR, "klv.sqlite") });
 await store.init();
 store.startRetentionJob({ maxAgeMs: 2 * 60 * 60 * 1000 }); // keep 2h (demo)
-
-// ---------- WebRTC SFU ----------
-const sfu = await createWebRtcSfu({
-  announcedIp: WEBRTC_ANNOUNCED_IP,
-  rtcMinPort: 40000,
-  rtcMaxPort: 49999
-});
 
 // ---------- Sources ----------
 /**
@@ -73,9 +68,8 @@ const sfu = await createWebRtcSfu({
  * {
  *   streamId, inputUrl, mode, dvrSeconds, vttSegmentSeconds,
  *   hlsSegmentSeconds,
- *   hls, klv,
- *   vtt, vttWindowTimer,
- *   webrtc: { ingestProc, producerId }
+ *   hls, klvWorker,
+ *   webrtc: { ingestRunning, producerId }
  * }
  */
 const sources = new Map();
@@ -93,6 +87,31 @@ function normalizeSegmentSeconds(value, fallback = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
+}
+
+async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
+  const segSec = normalizeSegmentSeconds(segmentSeconds, 1);
+  const segMs = Math.max(1, Math.round(segSec * 1000));
+  const nowMs = Date.now();
+  const segNo = Math.floor(nowMs / segMs);
+  const segStartMs = segNo * segMs;
+  const segFile = `meta_${segNo}.vtt`;
+
+  const subtitlePlaylistPath = path.join(outDir, "subtitles.m3u8");
+  const segPath = path.join(outDir, segFile);
+
+  const targetDuration = Math.max(1, Math.ceil(segSec));
+  const playlist = `#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:${targetDuration}
+#EXT-X-MEDIA-SEQUENCE:${segNo}
+#EXT-X-PROGRAM-DATE-TIME:${new Date(segStartMs).toISOString()}
+#EXTINF:${segSec.toFixed(3)},
+${segFile}
+`;
+
+  await fs.promises.writeFile(segPath, "WEBVTT\n\n");
+  await fs.promises.writeFile(subtitlePlaylistPath, playlist);
 }
 
 function setSourceState(streamId, patch) {
@@ -113,13 +132,20 @@ function setSourceState(streamId, patch) {
   return next;
 }
 
+function currentSourceState(streamId) {
+  const tracked = sourceStates.get(streamId);
+  if (tracked?.state) return tracked.state;
+  if (sources.has(streamId)) return "running";
+  return "stopped";
+}
+
 async function purgeSourceArtifacts(streamId) {
   const outDir = path.join(RECORD_ROOT, streamId);
   const sdpFile = path.join(DB_DIR, `${streamId}.sdp`);
 
-  try { fs.rmSync(outDir, { recursive: true, force: true }); } catch {}
-  fs.mkdirSync(outDir, { recursive: true });
-  try { fs.rmSync(sdpFile, { force: true }); } catch {}
+  try { await fs.promises.rm(outDir, { recursive: true, force: true }); } catch {}
+  await fs.promises.mkdir(outDir, { recursive: true });
+  try { await fs.promises.rm(sdpFile, { force: true }); } catch {}
 
   const deletedEvents = await store.purgeStream(streamId);
   return { outDir, sdpFile, deletedEvents };
@@ -140,8 +166,8 @@ function getSourceRuntime(streamId) {
   }
 
   const hlsRunning = isProcessRunning(source.hls?.proc);
-  const klvRunning = !!source.klv?.input && !source.klv.input.destroyed;
-  const ingestRunning = isProcessRunning(source.webrtc?.ingestProc?.proc);
+  const klvRunning = isProcessRunning(source.klvWorker?.proc);
+  const ingestRunning = !!source.webrtc?.ingestRunning;
   const running = hlsRunning;
 
   let state = tracked?.state || "running";
@@ -167,43 +193,40 @@ function getSourceRuntime(streamId) {
   };
 }
 
-function normalizeDecodedTimestamp(decoded) {
-  const nowMs = Date.now();
-  const ingestMs = nowMs;
-  const ingestMicros = (BigInt(ingestMs) * 1000n).toString();
+// ---------- SFU worker ----------
+const sfuClient = await startSfuWorkerClient({
+  config: {
+    announcedIp: WEBRTC_ANNOUNCED_IP,
+    rtcMinPort: 40000,
+    rtcMaxPort: 49999
+  },
+  onEvent: (event) => {
+    if (event?.type !== "event") return;
+    if (event.event !== "ingest_exit") return;
+    if (!event.streamId) return;
 
-  let videoClockUnixMicros = null;
-  let videoClockIso = null;
-  if (decoded?.timestampUnixMicros != null) {
-    try {
-      videoClockUnixMicros = String(decoded.timestampUnixMicros);
-      const ms = Number(BigInt(videoClockUnixMicros) / 1000n);
-      if (Number.isFinite(ms)) videoClockIso = new Date(ms).toISOString();
-    } catch {
-      videoClockUnixMicros = String(decoded.timestampUnixMicros);
-      videoClockIso = null;
+    const source = sources.get(event.streamId);
+    if (!source) return;
+    if (source.webrtc) {
+      source.webrtc.ingestRunning = false;
+      source.webrtc.producerId = null;
     }
-  }
 
-  return {
-    decoded: {
-      ...decoded,
-      // Keep ingest wall clock as primary time axis for storage/overlay alignment.
-      timestampUnixMicros: ingestMicros,
-      timestampIso: new Date(ingestMs).toISOString(),
-      ingestTimestampUnixMicros: ingestMicros,
-      ingestTimestampIso: new Date(ingestMs).toISOString(),
-      videoClockTimestampUnixMicros: videoClockUnixMicros,
-      videoClockTimestampIso: videoClockIso
-    },
-    klvUnixMs: ingestMs,
-    timeSource: "ingest_wall_clock"
-  };
-}
+    if (event.intentional) return;
+    setSourceState(event.streamId, {
+      state: "degraded",
+      running: true,
+      ingestRunning: false,
+      lastError: `sfu_ingest exited (code=${String(event.code)}, signal=${String(event.signal)})`
+    });
+  }
+});
 
 // ---------- WebSocket for LIVE KLV (optional) ----------
-const wss = new WebSocketServer({ port: WS_PORT });
-console.log(`[ws]  ws://localhost:${WS_PORT}`);
+const wss = new WebSocketServer({ server, path: WS_PATH });
+wss.on("error", (error) => {
+  log.error("ws_server_error", { error: serializeError(error) });
+});
 
 function wsBroadcastLive(streamId, decoded) {
   const msg = JSON.stringify({ type: "st0601", streamId, ...decoded });
@@ -243,13 +266,17 @@ app.use("/hls", express.static(RECORD_ROOT, {
     res.setHeader("Cache-Control", "no-cache");
   }
 }));
+// Prevent SPA fallback from returning index.html for missing HLS artifacts.
+app.use("/hls", (_req, res) => {
+  res.status(404).type("text/plain").send("hls artifact not found");
+});
 
 // ---------- OGC Moving Features subset ----------
 registerOgcMovingFeaturesRoutes(app, { sources, store });
 
 // ---------- API: sources ----------
 app.get("/sources", (req, res) => {
-  const list = [...sources.values()].map(s => ({
+  const list = [...sources.values()].map((s) => ({
     streamId: s.streamId,
     inputUrl: s.inputUrl,
     mode: s.mode,
@@ -260,6 +287,22 @@ app.get("/sources", (req, res) => {
     webrtcReady: !!s.webrtc?.producerId,
     ...getSourceRuntime(s.streamId)
   }));
+
+  for (const [streamId, tracked] of sourceStates.entries()) {
+    if (sources.has(streamId)) continue;
+    if (tracked?.state !== "starting" && tracked?.state !== "stopping") continue;
+    list.push({
+      streamId,
+      inputUrl: tracked?.inputUrl || null,
+      mode: tracked?.mode || null,
+      dvrSeconds: tracked?.dvrSeconds || null,
+      hlsSegmentSeconds: tracked?.hlsSegmentSeconds || null,
+      vttSegmentSeconds: tracked?.vttSegmentSeconds || null,
+      hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
+      webrtcReady: false,
+      ...getSourceRuntime(streamId)
+    });
+  }
   res.json(list);
 });
 
@@ -270,11 +313,9 @@ app.get("/sources/:streamId/state", (req, res) => {
 app.post("/sources", async (req, res) => {
   let requestedStreamId = null;
   let hls = null;
-  let klv = null;
-  let vtt = null;
-  let vttWindowTimer = null;
-  let ingestProc = null;
-  let createdInSfu = false;
+  let klvWorker = null;
+  let startedSfuIngest = false;
+  let producerId = null;
   let purgeResult = null;
 
   try {
@@ -299,9 +340,33 @@ app.post("/sources", async (req, res) => {
     );
 
     if (!streamId || !inputUrl) throw new Error("streamId and inputUrl required");
-    if (sources.has(streamId)) throw new Error("streamId already exists");
+    if (sources.has(streamId)) {
+      return res.status(409).json({
+        ok: false,
+        error: `source ${streamId} already exists`,
+        state: getSourceRuntime(streamId)
+      });
+    }
+    const currentState = currentSourceState(streamId);
+    if (currentState === "starting" || currentState === "running" || currentState === "degraded" || currentState === "stopping") {
+      return res.status(409).json({
+        ok: false,
+        error: `source ${streamId} is currently ${currentState}; start is not allowed`,
+        state: getSourceRuntime(streamId)
+      });
+    }
+
+    setSourceState(streamId, {
+      state: "starting",
+      running: false,
+      ingestRunning: false,
+      inputUrl,
+      stage: "initializing",
+      lastError: null
+    });
 
     if (purgeBeforeStart) {
+      setSourceState(streamId, { state: "starting", stage: "purging" });
       purgeResult = await purgeSourceArtifacts(streamId);
       log.info("source_purge_complete", {
         streamId,
@@ -309,13 +374,6 @@ app.post("/sources", async (req, res) => {
         outDir: purgeResult.outDir
       });
     }
-
-    setSourceState(streamId, {
-      state: "starting",
-      running: false,
-      inputUrl,
-      lastError: null
-    });
 
     log.info("source_create_start", {
       streamId,
@@ -328,7 +386,7 @@ app.post("/sources", async (req, res) => {
     });
 
     const outDir = path.join(RECORD_ROOT, streamId);
-    fs.mkdirSync(outDir, { recursive: true });
+    await fs.promises.mkdir(outDir, { recursive: true });
 
     // 1) DVR recorder (LL-HLS fMP4) — provides PROGRAM-DATE-TIME timestamps
     hls = startHlsRecorder({
@@ -341,30 +399,11 @@ app.post("/sources", async (req, res) => {
       requestId: req.requestId
     });
     setSourceState(streamId, { state: "starting", stage: "hls_started" });
-    const playlistPath = path.join(outDir, "playlist.m3u8");
-
-    // 2) Segmented WebVTT sidecar track (default 5s segments, configurable)
-    vtt = new SegmentedVttWriter({
-  outDir,
-  segmentSeconds: effectiveSegmentSeconds,
-  dvrSeconds,
-
-  // Variable-rate VTT tuning
-  maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
-  minCueDurSec: Number(minCueDurSec) || 0.10,
-  maxCueDurSec: Number(maxCueDurSec) || 0.50
-});
-
-    // Keep subtitle window aligned to the current DVR window of the video playlist
-    vttWindowTimer = setInterval(() => {
-      const w = readHlsPdtWindowMs(playlistPath);
-      if (!w) return;
-      vtt.setWindow(w.firstMs, w.lastMs);
-    }, 500);
 
     // Write master playlist referencing subtitles + video
     const masterPath = path.join(outDir, "master.m3u8");
-    fs.writeFileSync(masterPath, `#EXTM3U
+    await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
+    await fs.promises.writeFile(masterPath, `#EXTM3U
 #EXT-X-VERSION:7
 
 #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="meta",NAME="KLV",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="subtitles.m3u8"
@@ -373,41 +412,51 @@ app.post("/sources", async (req, res) => {
 playlist.m3u8
 `);
 
-    // 3) KLV ingest (PAT/PMT KLVA PID preferred, fallback scan)
-    klv = await startKlvIngest({
+    // 2) KLV ingest + DB/VTT sidecar in dedicated worker process
+    klvWorker = await startKlvStreamWorker({
       streamId,
       inputUrl,
+      outDir,
+      dvrSeconds: Number(dvrSeconds) || 600,
+      segmentSeconds: effectiveSegmentSeconds,
+      maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
+      minCueDurSec: Number(minCueDurSec) || 0.10,
+      maxCueDurSec: Number(maxCueDurSec) || 0.50,
+      dbPath: path.join(DB_DIR, "klv.sqlite"),
       requestId: req.requestId,
-      onDecoded: async (decoded) => {
-        const normalized = normalizeDecodedTimestamp(decoded);
-        await store.add(streamId, normalized.decoded);
-
-        // Add to segmented VTT (for DVR overlay)
-        vtt.addKlv({ klvUnixMs: normalized.klvUnixMs, payload: normalized.decoded });
-
-        // Optional: live KLV WS channel
-        wsBroadcastLive(streamId, normalized.decoded);
-
+      onDecoded: ({ decoded, klvUnixMs, timeSource }) => {
+        wsBroadcastLive(streamId, decoded);
         setSourceState(streamId, {
-          lastKlvMs: normalized.klvUnixMs,
-          lastKlvIso: new Date(normalized.klvUnixMs).toISOString(),
-          klvTimeSource: normalized.timeSource
+          lastKlvMs: klvUnixMs,
+          lastKlvIso: new Date(klvUnixMs).toISOString(),
+          klvTimeSource: timeSource
+        });
+      },
+      onError: (error) => {
+        if (!sources.has(streamId)) return;
+        setSourceState(streamId, {
+          state: "degraded",
+          running: true,
+          lastError: `klv_worker error: ${String(error?.message || error)}`
         });
       }
     });
     setSourceState(streamId, { state: "starting", stage: "klv_started" });
 
-    // 4) WebRTC ingest path
-    await sfu.ensureIngest(streamId);
-    createdInSfu = true;
-    ingestProc = await startFfmpegRtpIngest({
-      inputUrl,
-      sfu,
+    // 3) WebRTC ingest path (delegated to SFU worker process)
+    const ingest = await sfuClient.startIngest({
       streamId,
+      inputUrl,
       mode,
       requestId: req.requestId
     });
-    setSourceState(streamId, { state: "starting", stage: "ingest_ready" });
+    startedSfuIngest = true;
+    producerId = ingest.producerId;
+    setSourceState(streamId, {
+      state: "starting",
+      stage: "ingest_ready",
+      ingestRunning: true
+    });
 
     sources.set(streamId, {
       streamId, inputUrl, mode,
@@ -417,12 +466,14 @@ playlist.m3u8
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
       minCueDurSec: Number(minCueDurSec) || 0.10,
       maxCueDurSec: Number(maxCueDurSec) || 0.50,
-      hls, klv, vtt, vttWindowTimer,
-      webrtc: { ingestProc, producerId: ingestProc.producerId }
+      hls, klvWorker,
+      webrtc: { ingestRunning: true, producerId }
     });
 
     const onWorkerExit = (service, code, signal) => {
       if (!sources.has(streamId)) return;
+      const currentState = currentSourceState(streamId);
+      if (currentState === "stopping" || currentState === "stopped") return;
       const hardDown = service === "hls_recorder";
       setSourceState(streamId, {
         state: hardDown ? "error" : "degraded",
@@ -431,26 +482,24 @@ playlist.m3u8
       });
     };
     hls.proc?.once("exit", (code, signal) => onWorkerExit("hls_recorder", code, signal));
-    ingestProc.proc?.once("exit", (code, signal) => onWorkerExit("ffmpeg_rtp_ingest", code, signal));
-    klv.input?.once("error", (err) => {
-      if (!sources.has(streamId)) return;
-      setSourceState(streamId, {
-        state: "degraded",
-        running: true,
-        lastError: `klv_ingest error: ${String(err?.message || err)}`
-      });
+    klvWorker.proc?.once("exit", (code, signal) => onWorkerExit("klv_worker", code, signal));
+
+    setSourceState(streamId, {
+      state: "running",
+      running: true,
+      stage: null,
+      ingestRunning: true,
+      lastError: null
     });
 
-    setSourceState(streamId, { state: "running", running: true, stage: null, lastError: null });
-
-    log.info("source_create_success", { streamId, producerId: ingestProc.producerId });
+    log.info("source_create_success", { streamId, producerId });
 
     res.json({
       ok: true,
       streamId,
       hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
       subtitlesUrl: `/hls/${streamId}/subtitles.m3u8`,
-      webrtc: { producerId: ingestProc.producerId },
+      webrtc: { producerId },
       purge: {
         enabled: !!purgeBeforeStart,
         deletedEvents: purgeResult?.deletedEvents ?? 0
@@ -458,13 +507,10 @@ playlist.m3u8
       state: getSourceRuntime(streamId)
     });
   } catch (e) {
-    if (vttWindowTimer) clearInterval(vttWindowTimer);
-    try { await vtt?.flushNow(); } catch {}
-    await stopKlvIngest(klv);
+    if (klvWorker) await stopKlvStreamWorker(klvWorker);
     await stopHlsRecorder(hls);
-    if (ingestProc) await stopFfmpegRtpIngest(ingestProc);
-    if (createdInSfu && requestedStreamId) {
-      try { await sfu.closeIngest(requestedStreamId); } catch {}
+    if (startedSfuIngest && requestedStreamId) {
+      try { await sfuClient.stopIngest(requestedStreamId); } catch {}
     }
 
     if (requestedStreamId) {
@@ -472,6 +518,7 @@ playlist.m3u8
       setSourceState(requestedStreamId, {
         state: "error",
         running: false,
+        ingestRunning: false,
         stage: null,
         lastError: String(e?.message || e)
       });
@@ -484,23 +531,26 @@ playlist.m3u8
 
 app.delete("/sources/:streamId", async (req, res) => {
   const streamId = req.params.streamId;
+  const state = currentSourceState(streamId);
+  if (state === "stopping") {
+    return res.status(409).json({
+      ok: false,
+      error: `source ${streamId} is currently stopping; stop is not allowed`,
+      state: getSourceRuntime(streamId)
+    });
+  }
   const s = sources.get(streamId);
-  if (!s) return res.json({ ok: false, error: "not found" });
+  if (!s) return res.status(404).json({ ok: false, error: "not found", state: getSourceRuntime(streamId) });
 
   log.info("source_delete_start", { streamId });
-  setSourceState(streamId, { state: "stopping", running: false, stage: null });
+  setSourceState(streamId, { state: "stopping", running: false, ingestRunning: false, stage: "teardown" });
   sources.delete(streamId);
 
-  if (s.vttWindowTimer) clearInterval(s.vttWindowTimer);
-  try { await s.vtt?.flushNow(); } catch {}
-
-  await stopKlvIngest(s.klv);
+  await stopKlvStreamWorker(s.klvWorker);
   await stopHlsRecorder(s.hls);
+  await sfuClient.stopIngest(streamId);
 
-  if (s.webrtc?.ingestProc) await stopFfmpegRtpIngest(s.webrtc.ingestProc);
-  await sfu.closeIngest(streamId);
-
-  setSourceState(streamId, { state: "stopped", running: false, stage: null, lastError: null });
+  setSourceState(streamId, { state: "stopped", running: false, ingestRunning: false, stage: null, lastError: null });
   log.info("source_delete_success", { streamId });
   res.json({ ok: true });
 });
@@ -518,13 +568,19 @@ app.get("/streams/:streamId/klv", async (req, res) => {
 });
 
 // ---------- WebRTC signaling ----------
-app.get("/webrtc/rtpCapabilities", (req, res) => {
-  res.json(sfu.routerRtpCapabilities());
+app.get("/webrtc/rtpCapabilities", async (req, res) => {
+  try {
+    const caps = await sfuClient.routerRtpCapabilities();
+    res.json(caps);
+  } catch (e) {
+    log.error("webrtc_rtp_capabilities_error", { error: serializeError(e) });
+    res.status(500).json({ ok: false, error: "failed to fetch rtp capabilities" });
+  }
 });
 
 app.post("/webrtc/createTransport", async (req, res) => {
   try {
-    const t = await sfu.createWebRtcTransport();
+    const t = await sfuClient.createWebRtcTransport();
     res.json(t);
   } catch (e) {
     log.error("webrtc_create_transport_error", { error: serializeError(e) });
@@ -535,7 +591,7 @@ app.post("/webrtc/createTransport", async (req, res) => {
 app.post("/webrtc/connectTransport", async (req, res) => {
   const { transportId, dtlsParameters } = req.body || {};
   try {
-    await sfu.connectWebRtcTransport(transportId, dtlsParameters);
+    await sfuClient.connectWebRtcTransport(transportId, dtlsParameters);
     res.json({ ok: true });
   } catch (e) {
     log.error("webrtc_connect_transport_error", { transportId, error: serializeError(e) });
@@ -553,7 +609,7 @@ app.post("/webrtc/consume", async (req, res) => {
 
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        out = await sfu.consume(streamId, transportId, rtpCapabilities);
+        out = await sfuClient.consume(streamId, transportId, rtpCapabilities);
         break;
       } catch (e) {
         lastError = e;
@@ -563,7 +619,12 @@ app.post("/webrtc/consume", async (req, res) => {
     }
 
     if (!out) {
-      log.warn("webrtc_consume_wait_timeout", { streamId, transportId, attempts: maxAttempts });
+      log.warn("webrtc_consume_wait_timeout", {
+        streamId,
+        transportId,
+        attempts: maxAttempts,
+        lastError: String(lastError?.message || lastError || "")
+      });
       return res.status(503).json({ ok: false, retryable: true, error: "producer not ready" });
     }
 
@@ -574,13 +635,160 @@ app.post("/webrtc/consume", async (req, res) => {
   }
 });
 
+app.get("/webrtc/debug", async (req, res) => {
+  try {
+    const snapshot = await sfuClient.debugSnapshot();
+    res.json({
+      ok: true,
+      timestampIso: new Date().toISOString(),
+      snapshot
+    });
+  } catch (e) {
+    log.error("webrtc_debug_error", { error: serializeError(e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Runtime metrics / health ----------
+app.get("/metrics/runtime", async (req, res) => {
+  const runtime = getRuntimeMetricsSnapshot();
+  let sfuHealth = null;
+  let sfuError = null;
+  try {
+    sfuHealth = await sfuClient.health();
+  } catch (e) {
+    sfuError = String(e?.message || e);
+  }
+
+  const klvWorkers = [...sources.values()].map((s) => ({
+    streamId: s.streamId,
+    pid: s.klvWorker?.proc?.pid ?? null,
+    connected: !!s.klvWorker?.proc?.connected,
+    running: isProcessRunning(s.klvWorker?.proc),
+    exitCode: s.klvWorker?.proc?.exitCode ?? null
+  }));
+
+  res.json({
+    ...runtime,
+    server: {
+      httpPort,
+      wsPath: WS_PATH,
+      activeSources: sources.size,
+      statesTracked: sourceStates.size
+    },
+    workers: {
+      sfu: sfuError ? { ok: false, error: sfuError } : { ok: true, ...sfuHealth },
+      klv: klvWorkers
+    }
+  });
+});
+
+app.get("/healthz", async (req, res) => {
+  const runtime = getRuntimeMetricsSnapshot();
+  const degradedOrError = [...sourceStates.values()]
+    .filter((s) => s.state === "degraded" || s.state === "error")
+    .length;
+
+  let sfuOk = true;
+  let sfuInfo = null;
+  let sfuError = null;
+  try {
+    sfuInfo = await sfuClient.health();
+  } catch (e) {
+    sfuOk = false;
+    sfuError = String(e?.message || e);
+  }
+
+  const ok = sfuOk;
+  res.status(ok ? 200 : 503).json({
+    ok,
+    timestampIso: new Date().toISOString(),
+    activeSources: sources.size,
+    degradedOrErrorSources: degradedOrError,
+    eventLoopLagP99Ms: runtime.process.eventLoopLagMs.p99,
+    sfu: sfuOk ? {
+      ok: true,
+      pid: sfuInfo?.pid ?? null,
+      ingestCount: sfuInfo?.ingestCount ?? 0
+    } : {
+      ok: false,
+      error: sfuError
+    }
+  });
+});
+
 // ---------- SPA fallback ----------
 app.get("*", (req, res) => {
   res.sendFile(path.resolve("./public/index.html"));
 });
 
-server.listen(HTTP_PORT, () => {
-  console.log(`[http] http://localhost:${HTTP_PORT}`);
-  console.log(`[ui]   http://localhost:${HTTP_PORT}/`);
-  console.log(`[ogc]  http://localhost:${HTTP_PORT}/ogc/collections`);
+async function isPortAvailable(port) {
+  return await new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => {
+      probe.close(() => resolve(true));
+    });
+    probe.listen(port);
+  });
+}
+
+async function chooseHttpPort() {
+  if (HTTP_PORT_EXPLICIT) return REQUESTED_HTTP_PORT;
+
+  for (let p = REQUESTED_HTTP_PORT; p <= REQUESTED_HTTP_PORT + HTTP_PORT_SCAN_RANGE; p++) {
+    if (await isPortAvailable(p)) return p;
+  }
+
+  throw new Error(
+    `No available HTTP port in range ${REQUESTED_HTTP_PORT}-${REQUESTED_HTTP_PORT + HTTP_PORT_SCAN_RANGE}`
+  );
+}
+
+const selectedPort = await chooseHttpPort();
+if (selectedPort !== REQUESTED_HTTP_PORT) {
+  log.warn("http_port_auto_selected", {
+    requestedPort: REQUESTED_HTTP_PORT,
+    selectedPort
+  });
+}
+httpPort = selectedPort;
+
+server.on("error", (error) => {
+  log.error("http_server_error", { error: serializeError(error), port: httpPort });
+  process.exit(1);
 });
+
+server.listen(httpPort, () => {
+  console.log(`[http] http://localhost:${httpPort}`);
+  console.log(`[ui]   http://localhost:${httpPort}/`);
+  console.log(`[ws]   ws://localhost:${httpPort}${WS_PATH}`);
+  console.log(`[ogc]  http://localhost:${httpPort}/ogc/collections`);
+});
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info("shutdown_start", { signal });
+
+  const entries = [...sources.entries()];
+  for (const [streamId, s] of entries) {
+    sources.delete(streamId);
+    try { await stopKlvStreamWorker(s.klvWorker); } catch {}
+    try { await stopHlsRecorder(s.hls); } catch {}
+    try { await sfuClient.stopIngest(streamId); } catch {}
+  }
+
+  try { await sfuClient.close(); } catch {}
+  try { await store.close(); } catch {}
+  try { wss.close(); } catch {}
+  try {
+    await new Promise((resolve) => server.close(() => resolve()));
+  } catch {}
+
+  process.exit(0);
+}
+
+process.on("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(1)); });
+process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
