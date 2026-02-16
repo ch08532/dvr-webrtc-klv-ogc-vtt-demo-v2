@@ -61,6 +61,7 @@ function App() {
   const webrtcMediaStreamRef = useRef(null);
   const webrtcStreamIdRef = useRef(null);
   const activeTabRef = useRef(activeTab);
+  const streamIdRef = useRef(streamId);
   const streamRuntimeRef = useRef(streamRuntime);
 
   const api = async (url, opts) => {
@@ -411,10 +412,6 @@ function App() {
       if (result?.ok && activeTab === 'live-webrtc') {
         startWebRtcAutoAttach(streamId);
       }
-      if (result?.ok && activeTab === 'live-klv') {
-        connectWs();
-        subscribeWs();
-      }
     } finally {
       setStartRequestInFlight(false);
     }
@@ -604,9 +601,20 @@ function App() {
       worker.onmessage = (event) => {
         const msg = event.data || {};
         if (msg.type === 'st0601') {
-          if (activeTabRef.current !== 'live-klv') return;
-          if (!streamRuntimeRef.current?.running) return;
-          showOverlay({ mode: "live-ws", ...(msg.payload || {}) }, 'live-klv');
+          if (activeTabRef.current !== 'live-webrtc') return;
+          const state = streamRuntimeRef.current?.state;
+          if (state === 'stopped' || state === 'stopping') return;
+          const payloadStreamId = msg.payload?.streamId;
+          if (payloadStreamId && payloadStreamId !== streamIdRef.current) return;
+          showOverlay({ mode: "live-ws", ...(msg.payload || {}) }, 'live-webrtc');
+          return;
+        }
+        if (msg.type === 'ws_error') {
+          setStatus(`KLV WS worker error: ${String(msg.error || 'socket error')}`);
+          return;
+        }
+        if (msg.type === 'ws_close') {
+          setStatus(`KLV WS disconnected (code=${String(msg.code ?? 'n/a')})`);
         }
       };
       worker.onerror = (event) => {
@@ -826,15 +834,11 @@ function App() {
         }
       }
       clearWebRtcRetryLoop();
-    } else if (activeTab === 'live-klv') {
-      clearHlsRetryLoop();
-      try { window.player?.pause?.(); } catch {}
-      clearWebRtcRetryLoop();
-      connectWs();
-      subscribeWs();
     } else if (activeTab === 'live-webrtc') {
       clearHlsRetryLoop();
       try { window.player?.pause?.(); } catch {}
+      connectWs();
+      subscribeWs();
       if (hasActiveWebRtcSession(streamId)) {
         reattachWebRtcStream();
         setLiveStatus('Playing');
@@ -847,14 +851,18 @@ function App() {
   useEffect(() => {
     activeTabRef.current = activeTab;
     setOverlayData(null);
-    if (activeTab !== 'live-klv') {
+    if (activeTab !== 'live-webrtc') {
       disconnectWs();
     }
   }, [activeTab]);
 
   useEffect(() => {
+    streamIdRef.current = streamId;
+  }, [streamId]);
+
+  useEffect(() => {
     streamRuntimeRef.current = streamRuntime;
-    if (activeTab === 'live-klv' && !streamRuntime?.running) {
+    if (activeTab === 'live-webrtc' && (streamRuntime?.state === 'stopped' || streamRuntime?.state === 'stopping')) {
       setOverlayData(null);
     }
   }, [streamRuntime, activeTab]);
@@ -913,7 +921,10 @@ function App() {
     return () => clearInterval(timer);
   }, [activeTab, streamId]);
 
-  const overlayEntries = overlayData && typeof overlayData === 'object'
+  const dvrOverlayEntries = overlayData?.mode === 'dvr-vtt'
+    ? Object.entries(overlayData)
+    : [];
+  const liveKlvOverlayEntries = overlayData?.mode === 'live-ws'
     ? Object.entries(overlayData)
     : [];
   const statusParsed = parseStatusPayload(status);
@@ -990,7 +1001,6 @@ function App() {
               <Group mt="md">
                 <Button onClick={startSource} disabled={!canStartSource}>Start Source</Button>
                 <Button onClick={stopSource} color="red" disabled={!canStopSource}>Stop Source</Button>
-                <Button onClick={refreshSources} variant="outline" disabled={startRequestInFlight || stopRequestInFlight}>Refresh</Button>
               </Group>
 
               <Group mt="md" align="center">
@@ -1031,87 +1041,110 @@ function App() {
                 <Tabs.List>
                   <Tabs.Tab value="dvr">DVR (HLS)</Tabs.Tab>
                   <Tabs.Tab value="live-webrtc">Live (WebRTC)</Tabs.Tab>
-                  <Tabs.Tab value="live-klv">Live KLV (WS)</Tabs.Tab>
                 </Tabs.List>
 
                 <Tabs.Panel value="dvr" pt="xs">
                   <Text>DVR HLS playback with VTT overlay</Text>
-                  <video ref={videoRef} id="video-player" className="video-js" controls muted playsInline style={{ width: '100%', maxHeight: '400px' }}></video>
-                  {activeTab === 'dvr' && hlsMediaLoaded ? (
-                    <Group mt="xs">
-                      <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
-                      <Button variant="light" onClick={() => seekHlsBySeconds(-15)}>Rewind 15s</Button>
-                      <Button variant="light" onClick={toggleHlsPlayPause}>Pause / Play</Button>
-                      <Button variant="light" onClick={() => seekHlsBySeconds(15)}>FF 15s</Button>
-                      <Button variant="light" onClick={seekHlsToEnd}>Go To End</Button>
-                    </Group>
-                  ) : null}
+                  <Group mt="xs" align="flex-start" grow wrap="wrap">
+                    <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
+                      <video ref={videoRef} id="video-player" className="video-js" controls muted playsInline style={{ width: '100%', maxHeight: '400px' }}></video>
+                      {activeTab === 'dvr' && hlsMediaLoaded ? (
+                        <Group mt="xs">
+                          <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
+                          <Button variant="light" onClick={() => seekHlsBySeconds(-15)}>Rewind 15s</Button>
+                          <Button variant="light" onClick={toggleHlsPlayPause}>Pause / Play</Button>
+                          <Button variant="light" onClick={() => seekHlsBySeconds(15)}>FF 15s</Button>
+                          <Button variant="light" onClick={seekHlsToEnd}>Go To End</Button>
+                        </Group>
+                      ) : null}
+                    </Paper>
+                    <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
+                      <Text size="sm" fw={600}>VTT Overlay</Text>
+                      {dvrOverlayEntries.length ? (
+                        <Stack gap={4} mt="xs">
+                          {dvrOverlayEntries.map(([key, value]) => (
+                            <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                              <Text size="xs" fw={600}>{key}</Text>
+                              <Text
+                                size="xs"
+                                style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                              >
+                                {formatOverlayValue(value)}
+                              </Text>
+                            </Group>
+                          ))}
+                        </Stack>
+                      ) : (
+                        <Text size="sm" c="dimmed" mt="xs">
+                          No VTT overlay data yet.
+                        </Text>
+                      )}
+                    </Paper>
+                  </Group>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
                   <Text>Live video via WebRTC</Text>
-                  <Group gap="xs" mb="xs">
-                    <Text size="sm" c="dimmed">Status: {liveStatus}</Text>
-                    <Badge color={webrtcBadge.color} variant="light">{webrtcBadge.label}</Badge>
+                  <Group mt="xs" align="flex-start" grow wrap="wrap">
+                    <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
+                      <Group gap="xs" mb="xs">
+                        <Text size="sm" c="dimmed">Status: {liveStatus}</Text>
+                        <Badge color={webrtcBadge.color} variant="light">{webrtcBadge.label}</Badge>
+                      </Group>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | layers: {webrtcDiag.currentLayers ? JSON.stringify(webrtcDiag.currentLayers) : 'n/a'}
+                      </Text>
+                      <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
+                    </Paper>
+                    <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
+                      <Text size="sm" fw={600}>Live KLV Overlay</Text>
+                      {liveKlvOverlayEntries.length ? (
+                        <Stack gap={4} mt="xs">
+                          {liveKlvOverlayEntries.map(([key, value]) => (
+                            <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                              <Text size="xs" fw={600}>{key}</Text>
+                              <Text
+                                size="xs"
+                                style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                              >
+                                {formatOverlayValue(value)}
+                              </Text>
+                            </Group>
+                          ))}
+                        </Stack>
+                      ) : (
+                        <Text size="sm" c="dimmed" mt="xs">
+                          No live KLV overlay data yet.
+                        </Text>
+                      )}
+                    </Paper>
                   </Group>
-                  <Text size="xs" c="dimmed" mb="xs">
-                    producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | layers: {webrtcDiag.currentLayers ? JSON.stringify(webrtcDiag.currentLayers) : 'n/a'}
-                  </Text>
-                  <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
-                </Tabs.Panel>
-
-                <Tabs.Panel value="live-klv" pt="xs">
-                  <Text>Live KLV via WebSocket</Text>
                 </Tabs.Panel>
               </Tabs>
             </Paper>
 
-            <Group grow>
-              <Paper shadow="xs" p="md">
-                <Text size="lg" fw={500}>Status</Text>
-                {statusParsed.entries.length ? (
-                  <Stack gap={4} mt="xs">
-                    {statusParsed.entries.map(([key, value]) => (
-                      <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
-                        <Text size="xs" fw={600}>{key}</Text>
-                        <Text
-                          size="xs"
-                          style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
-                        >
-                          {formatOverlayValue(value)}
-                        </Text>
-                      </Group>
-                    ))}
-                  </Stack>
-                ) : (
-                  <Text size="sm" mt="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                    {statusParsed.text || 'No status yet.'}
-                  </Text>
-                )}
-              </Paper>
-              <Paper shadow="xs" p="md">
-                <Text size="lg" fw={500}>Overlay</Text>
-                {overlayEntries.length ? (
-                  <Stack gap={4} mt="xs">
-                    {overlayEntries.map(([key, value]) => (
-                      <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
-                        <Text size="xs" fw={600}>{key}</Text>
-                        <Text
-                          size="xs"
-                          style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
-                        >
-                          {formatOverlayValue(value)}
-                        </Text>
-                      </Group>
-                    ))}
-                  </Stack>
-                ) : (
-                  <Text size="sm" c="dimmed" mt="xs">
-                    No overlay data for this tab.
-                  </Text>
-                )}
-              </Paper>
-            </Group>
+            <Paper shadow="xs" p="md">
+              <Text size="lg" fw={500}>Status</Text>
+              {statusParsed.entries.length ? (
+                <Stack gap={4} mt="xs">
+                  {statusParsed.entries.map(([key, value]) => (
+                    <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                      <Text size="xs" fw={600}>{key}</Text>
+                      <Text
+                        size="xs"
+                        style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                      >
+                        {formatOverlayValue(value)}
+                      </Text>
+                    </Group>
+                  ))}
+                </Stack>
+              ) : (
+                <Text size="sm" mt="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                  {statusParsed.text || 'No status yet.'}
+                </Text>
+              )}
+            </Paper>
           </Stack>
         </AppShell.Main>
       </AppShell>
