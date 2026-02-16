@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, JsonInput, Badge, Switch } from '@mantine/core';
+import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 
 const theme = createTheme({
@@ -19,10 +19,22 @@ function App() {
   const [minCueDurSec, setMinCueDurSec] = useState(0.10);
   const [maxCueDurSec, setMaxCueDurSec] = useState(0.50);
   const [purgeBeforeStart, setPurgeBeforeStart] = useState(true);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [inputProbe, setInputProbe] = useState({
+    phase: 'idle',
+    available: null,
+    indicator: null,
+    container: null,
+    video: null,
+    klv: null,
+    error: null,
+    testedAt: null
+  });
   const [status, setStatus] = useState('Ready. Start Source, then choose Live or DVR. DVR overlay is from segmented WebVTT.');
-  const [overlay, setOverlay] = useState('');
+  const [overlayData, setOverlayData] = useState(null);
   const [activeTab, setActiveTab] = useState('dvr');
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
+  const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [liveStatus, setLiveStatus] = useState('Idle');
   const [webrtcDiag, setWebrtcDiag] = useState({
     consumerId: null,
@@ -48,6 +60,8 @@ function App() {
   const webrtcConsumerRef = useRef(null);
   const webrtcMediaStreamRef = useRef(null);
   const webrtcStreamIdRef = useRef(null);
+  const activeTabRef = useRef(activeTab);
+  const streamRuntimeRef = useRef(streamRuntime);
 
   const api = async (url, opts) => {
     const res = await fetch(url, opts);
@@ -62,6 +76,20 @@ function App() {
     if (state === 'error') return 'red';
     return 'gray';
   };
+
+  const probeBadgeColor = (() => {
+    if (inputProbe.phase === 'testing') return 'yellow';
+    if (inputProbe.indicator === 'green') return 'green';
+    if (inputProbe.indicator === 'red') return 'red';
+    return 'gray';
+  })();
+
+  const probeBadgeLabel = (() => {
+    if (inputProbe.phase === 'testing') return 'Testing...';
+    if (inputProbe.indicator === 'green') return 'Video Found';
+    if (inputProbe.indicator === 'red') return 'No Video';
+    return 'Not Tested';
+  })();
 
   const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping'].includes(streamRuntime?.state);
   const isStopBlockedByState = ['stopping', 'stopped'].includes(streamRuntime?.state);
@@ -83,6 +111,56 @@ function App() {
       setStreamRuntime(result);
       if (result.running) setAutoAttachOnDvr(true);
       if (!result.running) setAutoAttachOnDvr(false);
+    }
+  };
+
+  const testInputFeed = async () => {
+    const targetUrl = String(inputUrl || '').trim();
+    if (!targetUrl) return;
+
+    setInputProbe((prev) => ({
+      ...prev,
+      phase: 'testing',
+      available: null,
+      indicator: null,
+      container: null,
+      video: null,
+      klv: null,
+      error: null
+    }));
+
+    try {
+      const result = await api('/probe/input', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inputUrl: targetUrl })
+      });
+
+      if (!result?.ok) {
+        throw new Error(result?.error || 'Probe failed');
+      }
+
+      setInputProbe({
+        phase: 'done',
+        available: !!result.available,
+        indicator: result.indicator || (result.available ? 'green' : 'red'),
+        container: result.container || null,
+        video: result.video || null,
+        klv: result.klv || null,
+        error: result.error || null,
+        testedAt: result.testedAt || new Date().toISOString()
+      });
+    } catch (error) {
+      setInputProbe({
+        phase: 'done',
+        available: false,
+        indicator: 'red',
+        container: null,
+        video: null,
+        klv: null,
+        error: String(error?.message || error),
+        testedAt: new Date().toISOString()
+      });
     }
   };
 
@@ -297,6 +375,7 @@ function App() {
   const startSource = async () => {
     if (!canStartSource) return;
     setStartRequestInFlight(true);
+    setHlsMediaLoaded(false);
     setStreamRuntime({ streamId, state: 'starting', running: false, lastError: null });
     try {
       const result = await api("/sources", {
@@ -331,6 +410,10 @@ function App() {
       if (result?.ok && activeTab === 'live-webrtc') {
         startWebRtcAutoAttach(streamId);
       }
+      if (result?.ok && activeTab === 'live-klv') {
+        connectWs();
+        subscribeWs();
+      }
     } finally {
       setStartRequestInFlight(false);
     }
@@ -339,6 +422,8 @@ function App() {
   const stopSource = async () => {
     if (!canStopSource) return;
     setStopRequestInFlight(true);
+    setOverlayData(null);
+    disconnectWs();
     setStreamRuntime((prev) => ({ ...prev, streamId, state: 'stopping', running: false, ingestRunning: false }));
     try {
       const result = await api(`/sources/${encodeURIComponent(streamId)}`, { method: "DELETE" });
@@ -351,6 +436,7 @@ function App() {
         window.player.dispose();
         window.player = null;
       }
+      setHlsMediaLoaded(false);
       cleanupWebRtcPlayback();
       setLiveStatus('Stopped');
       await refreshStreamState(streamId);
@@ -389,8 +475,122 @@ function App() {
     });
   };
 
-  const showOverlay = (obj) => {
-    setOverlay(JSON.stringify(obj, null, 2));
+  const showOverlay = (obj, scopeTab = null) => {
+    if (scopeTab && activeTabRef.current !== scopeTab) return;
+    setOverlayData(obj);
+  };
+
+  const formatOverlayValue = (value) => {
+    if (value == null) return 'null';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  };
+
+  const parseStatusPayload = (value) => {
+    if (value == null) return { entries: [], text: '' };
+    if (typeof value === 'object') {
+      return { entries: Object.entries(value), text: '' };
+    }
+
+    const asText = String(value);
+    const trimmed = asText.trim();
+    if (!trimmed) return { entries: [], text: '' };
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object') {
+        return { entries: Object.entries(parsed), text: '' };
+      }
+    } catch {
+      // Fallback to plain text status.
+    }
+
+    return { entries: [], text: asText };
+  };
+
+  const getActiveHlsPlayer = () => {
+    if (!window.player || window.player.isDisposed?.()) return null;
+    return window.player;
+  };
+
+  const hasLoadedHlsMedia = (player) => {
+    if (!player || player.isDisposed?.()) return false;
+    const readyState = Number(player.readyState?.());
+    if (Number.isFinite(readyState) && readyState >= 1) return true;
+    const seekable = player.seekable?.();
+    return !!seekable && seekable.length > 0;
+  };
+
+  const getHlsSeekBounds = (player) => {
+    const seekable = player.seekable?.();
+    if (seekable && seekable.length > 0) {
+      return {
+        start: Number(seekable.start(0)),
+        end: Number(seekable.end(seekable.length - 1))
+      };
+    }
+
+    const duration = Number(player.duration?.());
+    const current = Number(player.currentTime?.() || 0);
+    const fallbackEnd = Number.isFinite(duration) ? duration : Math.max(0, current);
+    return { start: 0, end: fallbackEnd };
+  };
+
+  const clampToBounds = (value, start, end) => {
+    if (!Number.isFinite(value)) return start;
+    if (value < start) return start;
+    if (value > end) return end;
+    return value;
+  };
+
+  const seekHlsBySeconds = (deltaSeconds) => {
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus("HLS player is not ready.");
+      return;
+    }
+    const { start, end } = getHlsSeekBounds(player);
+    const current = Number(player.currentTime?.() || start);
+    const target = clampToBounds(current + deltaSeconds, start, end);
+    player.currentTime(target);
+  };
+
+  const seekHlsToStart = () => {
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus("HLS player is not ready.");
+      return;
+    }
+    const { start } = getHlsSeekBounds(player);
+    player.currentTime(start);
+  };
+
+  const seekHlsToEnd = () => {
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus("HLS player is not ready.");
+      return;
+    }
+    const { end } = getHlsSeekBounds(player);
+    player.currentTime(end);
+  };
+
+  const toggleHlsPlayPause = () => {
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus("HLS player is not ready.");
+      return;
+    }
+    if (player.paused?.()) {
+      player.play().catch(() => {});
+    } else {
+      player.pause?.();
+    }
   };
 
   const connectWs = () => {
@@ -401,7 +601,9 @@ function App() {
     wsRef.current.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type === "st0601") showOverlay({ mode: "live-ws", ...msg });
+      if (activeTabRef.current !== 'live-klv') return;
+      if (!streamRuntimeRef.current?.running) return;
+      if (msg.type === "st0601") showOverlay({ mode: "live-ws", ...msg }, 'live-klv');
     };
   };
 
@@ -410,10 +612,22 @@ function App() {
     wsRef.current.send(JSON.stringify({ type: "subscribe", streamId, mode: "live" }));
   };
 
+  const disconnectWs = () => {
+    if (!wsRef.current) return;
+    try {
+      if (wsRef.current.readyState === 1) {
+        wsRef.current.send(JSON.stringify({ type: "subscribe", streamId: null, mode: "live" }));
+      }
+    } catch {}
+    try { wsRef.current.close(); } catch {}
+    wsRef.current = null;
+  };
+
   const attachHlsDvr = (streamId, retryCount = 0) => {
     const maxRetries = 50; // Stop after 50 retries (~5 seconds)
 
     const url = `/hls/${encodeURIComponent(streamId)}/master.m3u8`;
+    setHlsMediaLoaded(false);
 
     vttHookedRef.current = false;
 
@@ -421,12 +635,14 @@ function App() {
     if (window.player && !window.player.isDisposed?.()) {
       const currentSrc = String(window.player.currentSrc?.() || "");
       if (currentSrc.includes(`/hls/${encodeURIComponent(streamId)}/master.m3u8`)) {
+        setHlsMediaLoaded(hasLoadedHlsMedia(window.player));
         window.player.play().catch(() => {});
         hookVttOverlaySoon();
         return;
       }
       window.player.dispose();
       window.player = null;
+      setHlsMediaLoaded(false);
     }
 
     // Check if element exists and is in DOM
@@ -448,6 +664,11 @@ function App() {
       }
 
       window.player = window.videojs(videoRef.current, {
+        controls: true,
+        liveui: true,
+        controlBar: {
+          progressControl: true
+        },
         html5: {
           hls: {
             overrideNative: !window.videojs.browser.IS_SAFARI
@@ -459,8 +680,17 @@ function App() {
         src: url,
         type: 'application/x-mpegURL'
       });
+      setHlsMediaLoaded(false);
+
+      window.player.on('loadedmetadata', () => setHlsMediaLoaded(true));
+      window.player.on('canplay', () => setHlsMediaLoaded(true));
+      window.player.on('playing', () => setHlsMediaLoaded(true));
+      window.player.on('loadstart', () => setHlsMediaLoaded(false));
+      window.player.on('emptied', () => setHlsMediaLoaded(false));
+      window.player.on('dispose', () => setHlsMediaLoaded(false));
 
       window.player.on('error', () => {
+        setHlsMediaLoaded(false);
         // If the playlist is not yet ready, keep retrying in the background.
         startHlsAutoAttach(streamId);
       });
@@ -510,9 +740,9 @@ function App() {
       const cue = cues[cues.length - 1];
       try {
         const obj = JSON.parse(cue.text);
-        showOverlay({ mode: "dvr-vtt", ...obj });
+        showOverlay({ mode: "dvr-vtt", ...obj }, 'dvr');
       } catch {
-        showOverlay({ mode: "dvr-vtt", raw: cue.text });
+        showOverlay({ mode: "dvr-vtt", raw: cue.text }, 'dvr');
       }
     };
 
@@ -608,6 +838,29 @@ function App() {
   }, [activeTab, streamId, autoAttachOnDvr]);
 
   useEffect(() => {
+    activeTabRef.current = activeTab;
+    setOverlayData(null);
+    if (activeTab !== 'live-klv') {
+      disconnectWs();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    streamRuntimeRef.current = streamRuntime;
+    if (activeTab === 'live-klv' && !streamRuntime?.running) {
+      setOverlayData(null);
+    }
+  }, [streamRuntime, activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'dvr') {
+      setHlsMediaLoaded(false);
+      return;
+    }
+    setHlsMediaLoaded(hasLoadedHlsMedia(window.player));
+  }, [activeTab]);
+
+  useEffect(() => {
     refreshSources({ silent: true }).catch(() => {});
     refreshStreamState(streamId).catch(() => {});
 
@@ -619,9 +872,23 @@ function App() {
   }, [streamId]);
 
   useEffect(() => {
+    setInputProbe({
+      phase: 'idle',
+      available: null,
+      indicator: null,
+      container: null,
+      video: null,
+      klv: null,
+      error: null,
+      testedAt: null
+    });
+  }, [inputUrl]);
+
+  useEffect(() => {
     return () => {
       clearHlsRetryLoop();
       clearWebRtcRetryLoop();
+      disconnectWs();
       cleanupWebRtcPlayback();
       if (window.player) {
         window.player.dispose();
@@ -639,39 +906,74 @@ function App() {
     return () => clearInterval(timer);
   }, [activeTab, streamId]);
 
+  const overlayEntries = overlayData && typeof overlayData === 'object'
+    ? Object.entries(overlayData)
+    : [];
+  const statusParsed = parseStatusPayload(status);
+
   return (
     <MantineProvider theme={theme}>
       <AppShell
         header={{ height: 60 }}
-        navbar={{ width: 300, breakpoint: 'sm' }}
         padding="md"
       >
         <AppShell.Header>
           <Text size="lg" fw={700} p="md">DVR + WebRTC + KLV Demo</Text>
         </AppShell.Header>
 
-        <AppShell.Navbar p="md">
-          <Text>Navigation</Text>
-        </AppShell.Navbar>
-
         <AppShell.Main>
           <Stack spacing="md">
             <Paper shadow="xs" p="md">
               <Text size="lg" fw={500}>Start Source</Text>
-              <Group grow>
-                <TextInput label="Stream ID" value={streamId} onChange={(e) => setStreamId(e.target.value)} />
-                <TextInput label="Input URL" value={inputUrl} onChange={(e) => setInputUrl(e.target.value)} />
+              <Group mt="xs" align="end" wrap="nowrap">
+                <TextInput
+                  style={{ flex: 1 }}
+                  label="Stream ID"
+                  value={streamId}
+                  onChange={(e) => setStreamId(e.target.value)}
+                />
+                <TextInput
+                  style={{ flex: 1 }}
+                  label="Input URL"
+                  value={inputUrl}
+                  onChange={(e) => setInputUrl(e.target.value)}
+                />
+                <Button
+                  onClick={testInputFeed}
+                  loading={inputProbe.phase === 'testing'}
+                  disabled={!String(inputUrl || '').trim()}
+                >
+                  Test Feed
+                </Button>
+                <Badge color={probeBadgeColor} variant="filled">{probeBadgeLabel}</Badge>
               </Group>
-              <Group grow>
-                <TextInput label="Mode" value={mode} onChange={(e) => setMode(e.target.value)} />
-                <NumberInput label="DVR Seconds" value={dvrSeconds} onChange={setDvrSeconds} />
-                <NumberInput label="HLS/VTT Segment Seconds" value={hlsSegmentSeconds} onChange={setHlsSegmentSeconds} min={0.25} step={0.25} />
+              {(inputProbe.container || inputProbe.video || inputProbe.klv || inputProbe.error) ? (
+                <Text size="xs" mt="xs" c={inputProbe.error ? 'red' : 'dimmed'}>
+                  {inputProbe.error
+                    ? `Probe error: ${inputProbe.error}`
+                    : `container: ${inputProbe.container?.longName || inputProbe.container?.name || 'unknown'} | video codec: ${inputProbe.video?.codecLongName || inputProbe.video?.codec || 'unknown'}${inputProbe.video?.width && inputProbe.video?.height ? ` | ${inputProbe.video.width}x${inputProbe.video.height}` : ''}${Number.isFinite(inputProbe.video?.fps) ? ` | ${inputProbe.video.fps} fps` : ''} | klv: ${inputProbe.klv?.available ? (inputProbe.klv?.confidence === 'high' ? 'detected' : 'possible (data stream found)') : 'not detected'}`}
+                </Text>
+              ) : null}
+              <Group mt="sm">
+                <Button
+                  variant="subtle"
+                  onClick={() => setShowAdvancedSettings((prev) => !prev)}
+                >
+                  {showAdvancedSettings ? 'Hide Advanced Settings' : 'Show Advanced Settings'}
+                </Button>
               </Group>
-              <Group grow>
-                <NumberInput label="Max Cues/Sec" value={maxCuesPerSecond} onChange={setMaxCuesPerSecond} />
-                <NumberInput label="Min Cue Dur Sec" value={minCueDurSec} onChange={setMinCueDurSec} step={0.01} precision={2} />
-                <NumberInput label="Max Cue Dur Sec" value={maxCueDurSec} onChange={setMaxCueDurSec} step={0.01} precision={2} />
-              </Group>
+              <Collapse in={showAdvancedSettings}>
+                <Group grow mt="xs">
+                  <TextInput label="Mode" value={mode} onChange={(e) => setMode(e.target.value)} />
+                  <NumberInput label="DVR Seconds" value={dvrSeconds} onChange={setDvrSeconds} />
+                  <NumberInput label="HLS/VTT Segment Seconds" value={hlsSegmentSeconds} onChange={setHlsSegmentSeconds} min={0.25} step={0.25} />
+                </Group>
+                <Group grow mt="xs">
+                  <NumberInput label="Max Cues/Sec" value={maxCuesPerSecond} onChange={setMaxCuesPerSecond} />
+                  <NumberInput label="Min Cue Dur Sec" value={minCueDurSec} onChange={setMinCueDurSec} step={0.01} precision={2} />
+                  <NumberInput label="Max Cue Dur Sec" value={maxCueDurSec} onChange={setMaxCueDurSec} step={0.01} precision={2} />
+                </Group>
+              </Collapse>
               <Switch
                 mt="sm"
                 label="Purge existing recordings and KLV data before start"
@@ -728,6 +1030,15 @@ function App() {
                 <Tabs.Panel value="dvr" pt="xs">
                   <Text>DVR HLS playback with VTT overlay</Text>
                   <video ref={videoRef} id="video-player" className="video-js" controls muted playsInline style={{ width: '100%', maxHeight: '400px' }}></video>
+                  {activeTab === 'dvr' && hlsMediaLoaded ? (
+                    <Group mt="xs">
+                      <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
+                      <Button variant="light" onClick={() => seekHlsBySeconds(-15)}>Rewind 15s</Button>
+                      <Button variant="light" onClick={toggleHlsPlayPause}>Pause / Play</Button>
+                      <Button variant="light" onClick={() => seekHlsBySeconds(15)}>FF 15s</Button>
+                      <Button variant="light" onClick={seekHlsToEnd}>Go To End</Button>
+                    </Group>
+                  ) : null}
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
@@ -751,11 +1062,47 @@ function App() {
             <Group grow>
               <Paper shadow="xs" p="md">
                 <Text size="lg" fw={500}>Status</Text>
-                <JsonInput value={status} readOnly />
+                {statusParsed.entries.length ? (
+                  <Stack gap={4} mt="xs">
+                    {statusParsed.entries.map(([key, value]) => (
+                      <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                        <Text size="xs" fw={600}>{key}</Text>
+                        <Text
+                          size="xs"
+                          style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                        >
+                          {formatOverlayValue(value)}
+                        </Text>
+                      </Group>
+                    ))}
+                  </Stack>
+                ) : (
+                  <Text size="sm" c="dimmed" mt="xs">
+                    {statusParsed.text || 'No status yet.'}
+                  </Text>
+                )}
               </Paper>
               <Paper shadow="xs" p="md">
                 <Text size="lg" fw={500}>Overlay</Text>
-                <JsonInput value={overlay} readOnly />
+                {overlayEntries.length ? (
+                  <Stack gap={4} mt="xs">
+                    {overlayEntries.map(([key, value]) => (
+                      <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                        <Text size="xs" fw={600}>{key}</Text>
+                        <Text
+                          size="xs"
+                          style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                        >
+                          {formatOverlayValue(value)}
+                        </Text>
+                      </Group>
+                    ))}
+                  </Stack>
+                ) : (
+                  <Text size="sm" c="dimmed" mt="xs">
+                    No overlay data for this tab.
+                  </Text>
+                )}
               </Paper>
             </Group>
           </Stack>

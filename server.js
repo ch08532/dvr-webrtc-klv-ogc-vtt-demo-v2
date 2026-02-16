@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import { spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
 
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
@@ -23,6 +24,8 @@ const HTTP_PORT_EXPLICIT = process.env.HTTP_PORT != null;
 const HTTP_PORT_SCAN_RANGE = Math.max(0, Number(process.env.HTTP_PORT_SCAN_RANGE || 20));
 const WS_PATH = process.env.WS_PATH || "/ws";
 const WEBRTC_ANNOUNCED_IP = process.env.WEBRTC_ANNOUNCED_IP || "127.0.0.1";
+const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
+const INPUT_PROBE_TIMEOUT_MS = Math.max(1000, Number(process.env.INPUT_PROBE_TIMEOUT_MS || 7000));
 const log = createServiceLogger("server");
 
 const RECORD_ROOT = path.resolve("./recordings");
@@ -87,6 +90,134 @@ function normalizeSegmentSeconds(value, fallback = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
+}
+
+function parseFrameRate(rateText) {
+  if (!rateText || typeof rateText !== "string") return null;
+  const [numText, denText] = rateText.split("/");
+  const num = Number(numText);
+  const den = Number(denText);
+  if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return null;
+  const value = num / den;
+  if (!Number.isFinite(value)) return null;
+  return Number(value.toFixed(3));
+}
+
+function normalizeProbePayload(ffprobeJson, inputUrl) {
+  const format = ffprobeJson && typeof ffprobeJson === "object" ? ffprobeJson.format : null;
+  const streams = Array.isArray(ffprobeJson?.streams) ? ffprobeJson.streams : [];
+  const firstVideo = streams.find((s) => s && s.codec_type === "video") || null;
+  const dataStreams = streams.filter((s) => s && s.codec_type === "data");
+  const explicitKlvStreams = dataStreams.filter((s) => {
+    const text = [
+      s.codec_name,
+      s.codec_long_name,
+      s.codec_tag_string,
+      s.codec_tag,
+      s.profile,
+      s?.tags ? JSON.stringify(s.tags) : null
+    ].filter(Boolean).join(" ").toLowerCase();
+    return text.includes("klv")
+      || text.includes("misb")
+      || text.includes("smpte 336")
+      || text.includes("st 336");
+  });
+  const fps = firstVideo ? (parseFrameRate(firstVideo.avg_frame_rate) ?? parseFrameRate(firstVideo.r_frame_rate)) : null;
+
+  const container = format ? {
+    name: format.format_name || null,
+    longName: format.format_long_name || null
+  } : null;
+
+  const video = firstVideo ? {
+    codec: firstVideo.codec_name || null,
+    codecLongName: firstVideo.codec_long_name || null,
+    width: Number.isFinite(Number(firstVideo.width)) ? Number(firstVideo.width) : null,
+    height: Number.isFinite(Number(firstVideo.height)) ? Number(firstVideo.height) : null,
+    fps
+  } : null;
+
+  const klvCandidates = explicitKlvStreams.length ? explicitKlvStreams : dataStreams;
+  const klv = {
+    available: klvCandidates.length > 0,
+    confidence: explicitKlvStreams.length ? "high" : (dataStreams.length ? "possible" : "none"),
+    streamCount: klvCandidates.length,
+    streams: klvCandidates.slice(0, 3).map((s) => ({
+      index: Number.isFinite(Number(s.index)) ? Number(s.index) : null,
+      codec: s.codec_name || null,
+      codecLongName: s.codec_long_name || null,
+      codecTag: s.codec_tag_string || null
+    }))
+  };
+
+  return {
+    inputUrl,
+    hasVideo: !!firstVideo,
+    container,
+    video,
+    klv,
+    streamCount: streams.length
+  };
+}
+
+async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT_MS } = {}) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-v", "error",
+      "-print_format", "json",
+      "-show_format",
+      "-show_streams",
+      "-show_entries", "format=format_name,format_long_name:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,avg_frame_rate,r_frame_rate,profile:stream_tags",
+      "-analyzeduration", "3000000",
+      "-probesize", "5000000",
+      "-read_intervals", "%+3",
+      inputUrl
+    ];
+
+    const proc = spawn(FFPROBE_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+
+    const finish = (err, value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch {}
+      finish(new Error(`ffprobe timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    proc.stdout.on("data", (buf) => {
+      stdout += buf.toString();
+    });
+
+    proc.stderr.on("data", (buf) => {
+      stderr += buf.toString();
+    });
+
+    proc.on("error", (error) => {
+      finish(error);
+    });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        const msg = stderr.trim() || `ffprobe exited with code ${String(code)}`;
+        finish(new Error(msg));
+        return;
+      }
+      try {
+        const parsed = stdout.trim() ? JSON.parse(stdout) : {};
+        finish(null, normalizeProbePayload(parsed, inputUrl));
+      } catch (error) {
+        finish(new Error(`ffprobe returned invalid JSON: ${String(error?.message || error)}`));
+      }
+    });
+  });
 }
 
 async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
@@ -273,6 +404,61 @@ app.use("/hls", (_req, res) => {
 
 // ---------- OGC Moving Features subset ----------
 registerOgcMovingFeaturesRoutes(app, { sources, store });
+
+// ---------- API: input probe ----------
+app.post("/probe/input", async (req, res) => {
+  const inputUrl = typeof req.body?.inputUrl === "string" ? req.body.inputUrl.trim() : "";
+  if (!inputUrl) {
+    return res.status(400).json({ ok: false, error: "inputUrl required" });
+  }
+
+  try {
+    const probe = await probeInputWithFfprobe(inputUrl);
+    const available = probe.hasVideo;
+    log.info("input_probe_result", {
+      inputUrl,
+      available,
+      klvAvailable: !!probe.klv?.available,
+      klvConfidence: probe.klv?.confidence || "none",
+      container: probe.container?.name || null,
+      codec: probe.video?.codec || null,
+      width: probe.video?.width ?? null,
+      height: probe.video?.height ?? null,
+      fps: probe.video?.fps ?? null
+    });
+
+    return res.json({
+      ok: true,
+      available,
+      indicator: available ? "green" : "red",
+      reason: available ? "video_stream_found" : "video_stream_not_found",
+      inputUrl: probe.inputUrl,
+      container: probe.container,
+      video: probe.video,
+      klv: probe.klv,
+      streamCount: probe.streamCount,
+      testedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    const message = String(error?.message || error);
+    log.warn("input_probe_error", { inputUrl, error: serializeError(error) });
+    return res.json({
+      ok: true,
+      available: false,
+      indicator: "red",
+      reason: "probe_failed",
+      inputUrl,
+      error: message,
+      klv: {
+        available: false,
+        confidence: "none",
+        streamCount: 0,
+        streams: []
+      },
+      testedAt: new Date().toISOString()
+    });
+  }
+});
 
 // ---------- API: sources ----------
 app.get("/sources", (req, res) => {
