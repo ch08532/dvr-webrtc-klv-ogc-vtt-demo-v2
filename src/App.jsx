@@ -59,6 +59,7 @@ function App() {
   const [sourcesList, setSourcesList] = useState([]);
 
   const videoRef = useRef(null);
+  const dvrVideoHostRef = useRef(null);
   const liveVideoRef = useRef(null);
   const wsWorkerRef = useRef(null);
   const vttHookedRef = useRef(false);
@@ -154,10 +155,7 @@ function App() {
     clearWebRtcRetryLoop();
     disconnectWs();
     cleanupWebRtcPlayback();
-    if (window.player) {
-      try { window.player.dispose(); } catch {}
-      window.player = null;
-    }
+    clearDvrPlayerInstance();
   };
 
   const api = async (url, opts) => {
@@ -304,6 +302,19 @@ function App() {
       clearTimeout(hlsRetryTimerRef.current);
       hlsRetryTimerRef.current = null;
     }
+  };
+
+  const clearDvrPlayerInstance = () => {
+    if (window.player && !window.player.isDisposed?.()) {
+      try { window.player.dispose(); } catch {}
+    }
+    window.player = null;
+    if (dvrVideoHostRef.current) {
+      try { dvrVideoHostRef.current.innerHTML = ""; } catch {}
+    }
+    videoRef.current = null;
+    setHlsMediaLoaded(false);
+    vttHookedRef.current = false;
   };
 
   const probeHlsReady = async (targetStreamId) => {
@@ -600,11 +611,7 @@ function App() {
       setAutoAttachOnDvr(false);
       clearHlsRetryLoop();
       clearWebRtcRetryLoop();
-      if (window.player) {
-        window.player.dispose();
-        window.player = null;
-      }
-      setHlsMediaLoaded(false);
+      clearDvrPlayerInstance();
       setDvrStatus('Stopped');
       setDvrDiag({
         currentSrc: null,
@@ -946,13 +953,12 @@ function App() {
         hookVttOverlaySoon();
         return;
       }
-      window.player.dispose();
-      window.player = null;
-      setHlsMediaLoaded(false);
+      clearDvrPlayerInstance();
     }
 
-    // Check if element exists and is in DOM
-    if (!videoRef.current || !document.contains(videoRef.current)) {
+    // Check if host exists and is in DOM
+    const hostEl = dvrVideoHostRef.current;
+    if (!hostEl || !document.contains(hostEl)) {
       if (retryCount < maxRetries) {
         console.warn(`Video element not ready, retrying in 100ms (${retryCount + 1}/${maxRetries})`);
         setTimeout(() => attachHlsDvr(streamId, retryCount + 1), 100);
@@ -967,6 +973,20 @@ function App() {
       if (typeof window.videojs !== 'function') {
         setStatus('Video.js is not loaded. Check script includes in index.html.');
         return;
+      }
+
+      if (!videoRef.current || !hostEl.contains(videoRef.current)) {
+        hostEl.innerHTML = "";
+        const videoEl = document.createElement("video");
+        videoEl.id = "video-player";
+        videoEl.className = "video-js";
+        videoEl.controls = true;
+        videoEl.muted = true;
+        videoEl.playsInline = true;
+        videoEl.style.width = "100%";
+        videoEl.style.maxHeight = "400px";
+        hostEl.appendChild(videoEl);
+        videoRef.current = videoEl;
       }
 
       window.player = window.videojs(videoRef.current, {
@@ -1327,10 +1347,7 @@ function App() {
       clearOfflinePollLoop();
       disconnectWs();
       cleanupWebRtcPlayback();
-      if (window.player) {
-        window.player.dispose();
-        window.player = null;
-      }
+      clearDvrPlayerInstance();
     };
   }, []);
 
@@ -1497,7 +1514,7 @@ function App() {
                       {dvrDiag.error ? (
                         <Text size="xs" c="red" mb="xs">error: {dvrDiag.error}</Text>
                       ) : null}
-                      <video ref={videoRef} id="video-player" className="video-js" controls muted playsInline style={{ width: '100%', maxHeight: '400px' }}></video>
+                      <div ref={dvrVideoHostRef} style={{ width: '100%', minHeight: '180px' }} />
                       {activeTab === 'dvr' && hlsMediaLoaded ? (
                         <Group mt="xs">
                           <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
