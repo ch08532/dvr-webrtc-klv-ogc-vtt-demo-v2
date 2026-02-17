@@ -232,11 +232,11 @@ async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
 
   const targetDuration = Math.max(1, Math.ceil(segSec));
   const playlist = `#EXTM3U
-#EXT-X-VERSION:7
+#EXT-X-VERSION:6
 #EXT-X-TARGETDURATION:${targetDuration}
 #EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:VOD
 `;
-
   await fs.promises.writeFile(subtitlePlaylistPath, playlist);
 }
 
@@ -580,11 +580,10 @@ app.post("/sources", async (req, res) => {
     const masterPath = path.join(outDir, "master.m3u8");
     await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
     await fs.promises.writeFile(masterPath, `#EXTM3U
-#EXT-X-VERSION:7
-
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="meta",NAME="KLV",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="subtitles.m3u8"
-
-#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="avc1.42e01f",SUBTITLES="meta"
+#EXT-X-VERSION:6
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="KLV",AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subtitles.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="avc1.42e01f,wvtt",SUBTITLES="subs",CLOSED-CAPTIONS=NONE
 playlist.m3u8
 `);
 

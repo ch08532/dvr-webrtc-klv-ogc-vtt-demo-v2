@@ -2,3 +2,8 @@
   margin: 0 auto;
   text-align: left;
 }
+
+/* Keep subtitle tracks active for cue parsing, but do not render captions over video. */
+.video-js .vjs-text-track-display {
+  display: none !important;
+}

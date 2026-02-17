@@ -214,7 +214,7 @@ export class SegmentedVttWriter {
     const target = Math.ceil(this.segSec);
 
     let txt = `#EXTM3U
-#EXT-X-VERSION:7
+#EXT-X-VERSION:6
 #EXT-X-TARGETDURATION:${target}
 #EXT-X-MEDIA-SEQUENCE:${firstSegNo}
 `;

@@ -61,6 +61,12 @@ function App() {
   const liveVideoRef = useRef(null);
   const wsWorkerRef = useRef(null);
   const vttHookedRef = useRef(false);
+  const vttTrackRef = useRef(null);
+  const vttTrackCueListenerRef = useRef(null);
+  const vttTrackListListenersRef = useRef([]);
+  const vttPollTimerRef = useRef(null);
+  const vttLastCueSignatureRef = useRef(null);
+  const vttDiscoverTimerRef = useRef(null);
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
   const webrtcRetryTimerRef = useRef(null);
@@ -302,7 +308,49 @@ function App() {
     }
   };
 
+  const clearVttPollLoop = () => {
+    if (vttPollTimerRef.current) {
+      clearInterval(vttPollTimerRef.current);
+      vttPollTimerRef.current = null;
+    }
+  };
+
+  const clearVttDiscoverLoop = () => {
+    if (vttDiscoverTimerRef.current) {
+      clearInterval(vttDiscoverTimerRef.current);
+      vttDiscoverTimerRef.current = null;
+    }
+  };
+
+  const clearVttTrackListListeners = () => {
+    for (const item of vttTrackListListenersRef.current) {
+      try { item.list.removeEventListener('addtrack', item.onTrackListChange); } catch {}
+      try { item.list.removeEventListener('removetrack', item.onTrackListChange); } catch {}
+      try { item.list.removeEventListener('change', item.onTrackListChange); } catch {}
+    }
+    vttTrackListListenersRef.current = [];
+  };
+
+  const clearVttTrackBinding = () => {
+    if (vttTrackRef.current && vttTrackCueListenerRef.current) {
+      try { vttTrackRef.current.removeEventListener('cuechange', vttTrackCueListenerRef.current); } catch {}
+      try { vttTrackRef.current.oncuechange = null; } catch {}
+    }
+    vttTrackRef.current = null;
+    vttTrackCueListenerRef.current = null;
+    vttLastCueSignatureRef.current = null;
+    vttHookedRef.current = false;
+  };
+
+  const clearVttOverlayHooks = () => {
+    clearVttDiscoverLoop();
+    clearVttPollLoop();
+    clearVttTrackListListeners();
+    clearVttTrackBinding();
+  };
+
   const clearDvrPlayerInstance = () => {
+    clearVttOverlayHooks();
     if (window.player && !window.player.isDisposed?.()) {
       try { window.player.dispose(); } catch {}
     }
@@ -313,6 +361,23 @@ function App() {
     videoRef.current = null;
     setHlsMediaLoaded(false);
     vttHookedRef.current = false;
+  };
+
+  const hideTracks = (trackList) => {
+    if (!trackList || !Number.isFinite(Number(trackList.length)) || trackList.length <= 0) return;
+    for (let i = 0; i < trackList.length; i++) {
+      const textTrack = trackList[i];
+      if (!textTrack) continue;
+      const kind = String(textTrack.kind || "").toLowerCase();
+      if (kind !== "subtitles" && kind !== "captions") continue;
+      try { textTrack.mode = 'hidden'; } catch {}
+    }
+  };
+
+  const forceHideCaptionTracks = (player = null) => {
+    const p = player || window.player;
+    const trackLists = [videoRef.current?.textTracks, p?.textTracks?.(), p?.remoteTextTracks?.()].filter(Boolean);
+    for (const list of trackLists) hideTracks(list);
   };
 
   const probeHlsReady = async (targetStreamId) => {
@@ -941,6 +1006,7 @@ function App() {
     if (window.player && !window.player.isDisposed?.()) {
       const currentSrc = String(window.player.currentSrc?.() || "");
       if (currentSrc.includes(`/hls/${encodeURIComponent(streamId)}/master.m3u8`)) {
+        forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(hasLoadedHlsMedia(window.player));
         setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
         setDvrDiag((prev) => ({ ...prev, error: null }));
@@ -989,7 +1055,8 @@ function App() {
         controls: true,
         liveui: true,
         controlBar: {
-          progressControl: true
+          progressControl: true,
+          subsCapsButton: false
         },
         html5: {
           hls: {
@@ -1006,17 +1073,20 @@ function App() {
       setDvrStatus('Loading playlist...');
 
       window.player.on('loadstart', () => {
+        forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(false);
         setDvrStatus('Loading playlist...');
         setDvrDiag((prev) => ({ ...prev, error: null }));
         refreshDvrPlaybackInfo(window.player);
       });
       window.player.on('loadedmetadata', () => {
+        forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(window.player);
       });
       window.player.on('canplay', () => {
+        forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(window.player);
@@ -1068,6 +1138,7 @@ function App() {
       });
 
       window.player.ready(() => {
+        forceHideCaptionTracks(window.player);
         window.player.play().catch(() => {});
         refreshDvrPlaybackInfo(window.player);
         hookVttOverlaySoon();
@@ -1080,49 +1151,141 @@ function App() {
   };
 
   const hookVttOverlaySoon = () => {
-    const tries = 12;
-    let n = 0;
-
-    const t = setInterval(() => {
-      n++;
+    const run = () => {
+      if (activeTabRef.current !== 'dvr') return;
       if (tryHookVttTrack()) {
-        clearInterval(t);
-      } else if (n >= tries) {
-        clearInterval(t);
+        clearVttDiscoverLoop();
       }
-    }, 400);
+    };
+
+    run();
+    if (vttDiscoverTimerRef.current) return;
+    vttDiscoverTimerRef.current = setInterval(run, 500);
   };
 
   const tryHookVttTrack = () => {
-    if (vttHookedRef.current) return true;
+    const player = window.player;
+    if (!player || player.isDisposed?.()) return false;
+    if (vttHookedRef.current && vttTrackRef.current) return true;
 
-    const tracks = window.player ? window.player.textTracks() : [];
-    if (!tracks || !tracks.length) return false;
-
-    let metaTrack = null;
-    for (let i = 0; i < tracks.length; i++) {
-      if (tracks[i].label === "KLV" || tracks[i].language === "en") {
-        metaTrack = tracks[i];
-        break;
+    const listToArray = (list) => {
+      const out = [];
+      if (!list || !Number.isFinite(Number(list.length))) return out;
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i];
+        if (t) out.push(t);
       }
-    }
-    if (!metaTrack) return false;
+      return out;
+    };
 
-    metaTrack.mode = "hidden";
-    metaTrack.oncuechange = () => {
-      const cues = metaTrack.activeCues;
-      if (!cues || !cues.length) return;
+    const scoreTrack = (track) => {
+      const label = String(track?.label || '').toLowerCase();
+      const kind = String(track?.kind || '').toLowerCase();
+      const language = String(track?.language || '').toLowerCase();
+      const isKlvLabel = /\bklv\b/.test(label);
+      const isSubtitleKind = kind === 'subtitles' || kind === 'captions';
+      if (!isSubtitleKind) return -1000;
+      let score = 100;
+      if (isKlvLabel) score += 300;
+      if (label.includes('stanag') || label.includes('misb')) score += 120;
+      if (language === 'en') score += 10;
+      return score;
+    };
+
+    const parseCueIntoOverlay = (track) => {
+      const cues = track?.activeCues;
+      if (!cues || !cues.length) return false;
       const cue = cues[cues.length - 1];
+      if (!cue) return false;
+      const cueSignature = `${Number(cue.startTime)}|${Number(cue.endTime)}|${String(cue.text || '')}`;
+      if (vttLastCueSignatureRef.current === cueSignature) return true;
+      vttLastCueSignatureRef.current = cueSignature;
       try {
         const obj = JSON.parse(cue.text);
         showOverlay({ mode: "dvr-vtt", ...obj }, 'dvr');
       } catch {
         showOverlay({ mode: "dvr-vtt", raw: cue.text }, 'dvr');
       }
+      return true;
     };
 
-    vttHookedRef.current = true;
-    return true;
+    const updateDisplayData = (track) => {
+      return parseCueIntoOverlay(track);
+    };
+
+    const handleCueChange = (event) => {
+      const track = event?.target || vttTrackRef.current;
+      if (!track) return;
+      updateDisplayData(track);
+    };
+
+    const bindTrack = (track) => {
+      if (!track) return false;
+
+      if (vttTrackRef.current !== track) {
+        clearVttTrackBinding();
+      }
+
+      if (vttTrackRef.current !== track) {
+        // Keep KLV subtitle track off by default in Video.js.
+        try { track.mode = 'hidden'; } catch {}
+        setStatus(`Bound DVR text track: label=${String(track.label || 'n/a')} kind=${String(track.kind || 'n/a')} language=${String(track.language || 'n/a')}`);
+        const onCueChange = (event) => {
+          handleCueChange(event);
+        };
+        try { track.addEventListener('cuechange', onCueChange); } catch {}
+        try { track.oncuechange = onCueChange; } catch {}
+        vttTrackRef.current = track;
+        vttTrackCueListenerRef.current = onCueChange;
+      }
+
+      vttHookedRef.current = true;
+      updateDisplayData(track);
+      return true;
+    };
+
+    const allTracks = [];
+    const seenTracks = new Set();
+    const nativeTrackList = videoRef.current?.textTracks || null;
+    const trackLists = [nativeTrackList, player.textTracks?.(), player.remoteTextTracks?.()].filter(Boolean);
+    for (const list of trackLists) {
+      for (const track of listToArray(list)) {
+        if (seenTracks.has(track)) continue;
+        seenTracks.add(track);
+        allTracks.push(track);
+      }
+    }
+    if (!allTracks.length) return false;
+
+    allTracks.sort((a, b) => scoreTrack(b) - scoreTrack(a));
+    const best = allTracks[0];
+    if (!best || scoreTrack(best) < 0) return false;
+
+    clearVttTrackListListeners();
+    const onTrackListChange = () => {
+      forceHideCaptionTracks(player);
+      vttHookedRef.current = false;
+      tryHookVttTrack();
+    };
+    for (const list of trackLists) {
+      try { list.addEventListener('addtrack', onTrackListChange); } catch {}
+      try { list.addEventListener('removetrack', onTrackListChange); } catch {}
+      try { list.addEventListener('change', onTrackListChange); } catch {}
+      vttTrackListListenersRef.current.push({ list, onTrackListChange });
+    }
+
+    if (!vttPollTimerRef.current) {
+      vttPollTimerRef.current = setInterval(() => {
+        if (activeTabRef.current !== 'dvr') return;
+        if (vttTrackRef.current) {
+          updateDisplayData(vttTrackRef.current);
+          return;
+        }
+        tryHookVttTrack();
+      }, 250);
+    }
+
+    return bindTrack(best);
   };
 
   const startHlsAutoAttach = (targetStreamId) => {
@@ -1209,6 +1372,7 @@ function App() {
       // Keep probing until HLS appears, then attach, but only after user started a source.
       if (autoAttachOnDvr) {
         if (window.player && !window.player.isDisposed?.()) {
+          forceHideCaptionTracks(window.player);
           window.player.play().catch(() => {});
           hookVttOverlaySoon();
         } else {

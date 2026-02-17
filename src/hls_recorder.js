@@ -81,7 +81,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-f", "hls",
     "-hls_time", String(segmentSeconds),
     "-hls_list_size", String(listSize),
-    "-hls_flags", buildHlsFlags(),
+    //"-hls_flags", buildHlsFlags(),
     "-hls_segment_type", "mpegts",
     "-hls_segment_filename", segmentFilename,
     playlist

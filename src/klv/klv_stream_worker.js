@@ -36,7 +36,9 @@ function parseVideoPlaylist(playlistPath) {
     let mediaSequence = 0;
     let targetDurationSec = 1;
     let currentPdtMs = null;
+    let currentPdtRaw = null;
     let currentDurSec = null;
+    let currentDurRaw = null;
 
     for (const line of lines) {
       if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
@@ -50,13 +52,17 @@ function parseVideoPlaylist(playlistPath) {
         continue;
       }
       if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME:")) {
-        const parsed = Date.parse(line.slice("#EXT-X-PROGRAM-DATE-TIME:".length).trim());
+        const raw = line.slice("#EXT-X-PROGRAM-DATE-TIME:".length).trim();
+        const parsed = Date.parse(raw);
         currentPdtMs = Number.isFinite(parsed) ? parsed : null;
+        currentPdtRaw = raw;
         continue;
       }
       if (line.startsWith("#EXTINF:")) {
-        const n = Number(line.slice("#EXTINF:".length).split(",")[0]);
+        const raw = line.slice("#EXTINF:".length).split(",")[0].trim();
+        const n = Number(raw);
         currentDurSec = Number.isFinite(n) && n > 0 ? n : null;
+        currentDurRaw = raw;
         continue;
       }
       if (line.startsWith("#")) continue;
@@ -66,10 +72,14 @@ function parseVideoPlaylist(playlistPath) {
         uri: line,
         sequence: mediaSequence + index,
         pdtMs: currentPdtMs,
-        durationSec: currentDurSec ?? targetDurationSec
+        pdtRaw: currentPdtRaw,
+        durationSec: currentDurSec ?? targetDurationSec,
+        durationRaw: currentDurRaw
       });
       currentPdtMs = null;
+      currentPdtRaw = null;
       currentDurSec = null;
+      currentDurRaw = null;
     }
 
     return { entries, mediaSequence, targetDurationSec };
@@ -105,18 +115,19 @@ function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entri
   const seq = published.length ? published[0].entry.sequence : mediaSequence;
 
   let txt = `#EXTM3U
-#EXT-X-VERSION:7
+#EXT-X-VERSION:6
 #EXT-X-TARGETDURATION:${target}
 #EXT-X-MEDIA-SEQUENCE:${seq}
+#EXT-X-PLAYLIST-TYPE:VOD
 `;
 
   for (const { entry, vttFile } of published) {
     const dur = Number(entry.durationSec);
     const durationSec = Number.isFinite(dur) && dur > 0 ? dur : target;
-    if (Number.isFinite(entry.pdtMs)) {
-      txt += `#EXT-X-PROGRAM-DATE-TIME:${new Date(entry.pdtMs).toISOString()}\n`;
-    }
-    txt += `#EXTINF:${durationSec.toFixed(3)},\n`;
+    const durationText = typeof entry.durationRaw === "string" && entry.durationRaw.length
+      ? entry.durationRaw
+      : durationSec.toFixed(3);
+    txt += `#EXTINF:${durationText},\n`;
     txt += `${vttFile}\n`;
   }
 
