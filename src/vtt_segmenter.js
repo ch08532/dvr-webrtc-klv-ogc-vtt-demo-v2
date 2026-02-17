@@ -34,7 +34,6 @@ export class SegmentedVttWriter {
   constructor({
     outDir,
     segmentSeconds = 5,
-    dvrSeconds = 600,
     subtitlePlaylistName = "subtitles.m3u8",
     filePrefix = "meta_",
     maxExtraSegments = 3,
@@ -48,7 +47,6 @@ export class SegmentedVttWriter {
     this.outDir = outDir;
     this.segSec = Number(segmentSeconds);
     this.segMs = Math.round(this.segSec * 1000);
-    this.dvrSeconds = Number(dvrSeconds);
 
     this.subtitlePlaylistPath = path.join(outDir, subtitlePlaylistName);
     this.filePrefix = filePrefix;
@@ -175,6 +173,9 @@ export class SegmentedVttWriter {
       // Closed segments are written once; after that avoid rewriting
       if (this._closed.has(segNo) && fs.existsSync(filePath)) {
         seg.dirty = false;
+        // Free in-memory closed segments; file content is already persisted.
+        this._segments.delete(segNo);
+        this._closed.delete(segNo);
         continue;
       }
 
@@ -183,6 +184,12 @@ export class SegmentedVttWriter {
       let content = "WEBVTT\n\n";
       for (const c of seg.cues) content += c;
       fs.writeFileSync(filePath, content);
+
+      if (this._closed.has(segNo)) {
+        // Once a closed segment is written, keep only the on-disk file.
+        this._segments.delete(segNo);
+        this._closed.delete(segNo);
+      }
     }
 
     this._writeSubtitlePlaylist();

@@ -13,7 +13,6 @@ function App() {
   const [streamId, setStreamId] = useState('stream1');
   const [inputUrl, setInputUrl] = useState('udp://239.1.2.3:5000');
   const [mode, setMode] = useState('xcode-any');
-  const [dvrSeconds, setDvrSeconds] = useState(600);
   const [hlsSegmentSeconds, setHlsSegmentSeconds] = useState(5);
   const [maxCuesPerSecond, setMaxCuesPerSecond] = useState(10);
   const [minCueDurSec, setMinCueDurSec] = useState(0.10);
@@ -559,7 +558,6 @@ function App() {
           streamId,
           inputUrl,
           mode,
-          dvrSeconds,
           hlsSegmentSeconds,
           vttSegmentSeconds: hlsSegmentSeconds,
           maxCuesPerSecond,
@@ -1437,7 +1435,6 @@ function App() {
               <Collapse in={showAdvancedSettings}>
                 <Group grow mt="xs">
                   <TextInput label="Mode" value={mode} onChange={(e) => setMode(e.target.value)} />
-                  <NumberInput label="DVR Seconds" value={dvrSeconds} onChange={setDvrSeconds} />
                   <NumberInput label="HLS/VTT Segment Seconds" value={hlsSegmentSeconds} onChange={setHlsSegmentSeconds} min={0.25} step={0.25} />
                 </Group>
                 <Group grow mt="xs">

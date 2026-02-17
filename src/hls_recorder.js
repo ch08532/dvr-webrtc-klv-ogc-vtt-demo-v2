@@ -19,6 +19,11 @@ function normalizeSegmentSeconds(value) {
   return n;
 }
 
+function buildHlsFlags() {
+  // independent_segments + temp_file avoids clients reading partial/incomplete segments.
+  return "append_list+program_date_time+independent_segments+temp_file";
+}
+
 function waitForExit(proc, timeoutMs) {
   if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -36,46 +41,70 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
-export function startHlsRecorder({ streamId, inputUrl, outDir, dvrSeconds, hlsSegmentSeconds, mode, requestId }) {
+export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId }) {
   const chosen = normalizeMode(mode);
   const videoProfile = buildVideoArgs(chosen);
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
 
-  // list_size ~= dvrSeconds / segmentSeconds => “DVR window”
-  const listSize = Math.max(3, Math.ceil(Number(dvrSeconds) / segmentSeconds));
+  // Keep the full history in the playlist.
+  const listSize = 0;
   const playlist = path.join(outDir, "playlist.m3u8");
 
   const base = [
     "-hide_banner", "-loglevel", "warning",
     "-fflags", "nobuffer", "-flags", "low_delay",
     ...videoProfile.inputArgs,
-    "-i", inputUrl,
-    "-an"
+    "-i", inputUrl
   ];
+
+  const copyMode = chosen === "copy-h264";
+  const mediaOut = copyMode
+    ? [
+      // Copy streams only when explicitly requested.
+      "-map", "0:v:0",
+      "-map", "0:a:0?",
+      "-c", "copy",
+      "-sn",
+      "-dn"
+    ]
+    : [
+      // Default path: re-encode video for stable hls_time segmentation.
+      "-map", "0:v:0",
+      "-an",
+      ...videoProfile.videoArgs,
+      "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`
+    ];
 
   const hls = [
     "-f", "hls",
     "-hls_time", String(segmentSeconds),
     "-hls_list_size", String(listSize),
-    "-hls_flags", "delete_segments+append_list+program_date_time",
+    "-hls_flags", buildHlsFlags(),
     "-hls_segment_type", "fmp4",
     "-hls_fmp4_init_filename", "init.mp4",
     playlist
   ];
 
-  const args = [...base, ...videoProfile.videoArgs, ...hls];
+  const args = [...base, ...mediaOut, ...hls];
+  if (copyMode) {
+    log.warn("segment_timing_unbounded_in_copy_mode", {
+      requestId,
+      streamId,
+      mode: chosen,
+      note: "copy-h264 may produce targetduration larger than hls_time due to source keyframe spacing"
+    });
+  }
   log.info("start", {
     requestId,
     streamId,
     inputUrl,
     mode: chosen,
-    dvrSeconds,
     hlsSegmentSeconds: segmentSeconds,
     outDir,
     listSize,
-    encoder: videoProfile.encoder,
-    usingGpu: videoProfile.usingGpu,
-    hwaccel: videoProfile.hwaccel
+    streamCopy: copyMode,
+    encoder: copyMode ? "copy" : videoProfile.encoder,
+    hlsFlags: buildHlsFlags()
   });
 
   const proc = spawn("ffmpeg", args, {

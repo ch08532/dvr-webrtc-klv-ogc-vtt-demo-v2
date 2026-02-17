@@ -75,7 +75,7 @@ store.startRetentionJob({ maxAgeMs: 2 * 60 * 60 * 1000 }); // keep 2h (demo)
 /**
  * sources map entry:
  * {
- *   streamId, inputUrl, mode, dvrSeconds, vttSegmentSeconds,
+ *   streamId, inputUrl, mode, vttSegmentSeconds,
  *   hlsSegmentSeconds,
  *   hls, klvWorker,
  *   webrtc: { ingestRunning, producerId }
@@ -472,7 +472,6 @@ app.get("/sources", (req, res) => {
     streamId: s.streamId,
     inputUrl: s.inputUrl,
     mode: s.mode,
-    dvrSeconds: s.dvrSeconds,
     hlsSegmentSeconds: s.hlsSegmentSeconds,
     vttSegmentSeconds: s.vttSegmentSeconds,
     hlsMasterUrl: `/hls/${s.streamId}/master.m3u8`,
@@ -487,7 +486,6 @@ app.get("/sources", (req, res) => {
       streamId,
       inputUrl: tracked?.inputUrl || null,
       mode: tracked?.mode || null,
-      dvrSeconds: tracked?.dvrSeconds || null,
       hlsSegmentSeconds: tracked?.hlsSegmentSeconds || null,
       vttSegmentSeconds: tracked?.vttSegmentSeconds || null,
       hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
@@ -515,7 +513,6 @@ app.post("/sources", async (req, res) => {
   streamId,
   inputUrl,
   mode = "xcode-any",
-  dvrSeconds = 600,
   hlsSegmentSeconds = 1,
   vttSegmentSeconds = 5,
   purgeBeforeStart = false,
@@ -571,7 +568,6 @@ app.post("/sources", async (req, res) => {
       streamId,
       inputUrl,
       mode,
-      dvrSeconds,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
       purgeBeforeStart
@@ -585,7 +581,6 @@ app.post("/sources", async (req, res) => {
       streamId,
       inputUrl,
       outDir,
-      dvrSeconds,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       mode,
       requestId: req.requestId
@@ -609,7 +604,6 @@ playlist.m3u8
       streamId,
       inputUrl,
       outDir,
-      dvrSeconds: Number(dvrSeconds) || 600,
       segmentSeconds: effectiveSegmentSeconds,
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
       minCueDurSec: Number(minCueDurSec) || 0.10,
@@ -652,7 +646,6 @@ playlist.m3u8
 
     sources.set(streamId, {
       streamId, inputUrl, mode,
-      dvrSeconds: Number(dvrSeconds) || 600,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,

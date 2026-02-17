@@ -55,7 +55,6 @@ async function start(message) {
     streamId,
     inputUrl,
     outDir,
-    dvrSeconds,
     segmentSeconds,
     maxCuesPerSecond,
     minCueDurSec,
@@ -73,7 +72,6 @@ async function start(message) {
   const vtt = new SegmentedVttWriter({
     outDir,
     segmentSeconds,
-    dvrSeconds,
     maxCuesPerSecond,
     minCueDurSec,
     maxCueDurSec
