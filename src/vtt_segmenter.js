@@ -140,9 +140,7 @@ export class SegmentedVttWriter {
     const lean = {
       timestampIso: payload.timestampIso,
       ingestTimestampIso: payload.ingestTimestampIso,
-      videoClockTimestampIso: payload.videoClockTimestampIso,
       ingestTimestampUnixMicros: payload.ingestTimestampUnixMicros,
-      videoClockTimestampUnixMicros: payload.videoClockTimestampUnixMicros,
       sensorLat: payload.sensorLat,
       sensorLon: payload.sensorLon,
       frameCenterLat: payload.frameCenterLat,

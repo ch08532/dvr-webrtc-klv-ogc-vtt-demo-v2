@@ -9,36 +9,38 @@ const log = createServiceLogger("klv_stream_worker");
 
 let runtime = null;
 
-function normalizeDecodedTimestamp(decoded) {
+function enrichDecodedTimestamp(decoded) {
   const nowMs = Date.now();
   const ingestMs = nowMs;
   const ingestMicros = (BigInt(ingestMs) * 1000n).toString();
+  const ingestIso = new Date(ingestMs).toISOString();
 
-  let videoClockUnixMicros = null;
-  let videoClockIso = null;
+  let sourceClockMs = null;
   if (decoded?.timestampUnixMicros != null) {
     try {
-      videoClockUnixMicros = String(decoded.timestampUnixMicros);
-      const ms = Number(BigInt(videoClockUnixMicros) / 1000n);
-      if (Number.isFinite(ms)) videoClockIso = new Date(ms).toISOString();
+      const micros = BigInt(decoded.timestampUnixMicros);
+      const ms = Number(micros / 1000n);
+      if (Number.isFinite(ms)) sourceClockMs = ms;
     } catch {
-      videoClockUnixMicros = String(decoded.timestampUnixMicros);
-      videoClockIso = null;
+      // preserve decoded timestamps as-is; fall back below if unusable
     }
   }
+  if (sourceClockMs == null && typeof decoded?.timestampIso === "string") {
+    const parsed = Date.parse(decoded.timestampIso);
+    if (Number.isFinite(parsed)) sourceClockMs = parsed;
+  }
+
+  const useSourceClock = sourceClockMs != null;
+  const eventMs = useSourceClock ? sourceClockMs : ingestMs;
 
   return {
     decoded: {
       ...decoded,
-      timestampUnixMicros: ingestMicros,
-      timestampIso: new Date(ingestMs).toISOString(),
       ingestTimestampUnixMicros: ingestMicros,
-      ingestTimestampIso: new Date(ingestMs).toISOString(),
-      videoClockTimestampUnixMicros: videoClockUnixMicros,
-      videoClockTimestampIso: videoClockIso
+      ingestTimestampIso: ingestIso
     },
-    klvUnixMs: ingestMs,
-    timeSource: "ingest_wall_clock"
+    klvUnixMs: eventMs,
+    timeSource: useSourceClock ? "source_timestamp" : "ingest_wall_clock"
   };
 }
 
@@ -89,15 +91,15 @@ async function start(message) {
     requestId,
     onDecoded: async (decoded) => {
       try {
-        const normalized = normalizeDecodedTimestamp(decoded);
-        await store.add(streamId, normalized.decoded);
-        vtt.addKlv({ klvUnixMs: normalized.klvUnixMs, payload: normalized.decoded });
+        const enriched = enrichDecodedTimestamp(decoded);
+        await store.add(streamId, enriched.decoded);
+        vtt.addKlv({ klvUnixMs: enriched.klvUnixMs, payload: enriched.decoded });
         send({
           type: "decoded",
           streamId,
-          decoded: normalized.decoded,
-          klvUnixMs: normalized.klvUnixMs,
-          timeSource: normalized.timeSource
+          decoded: enriched.decoded,
+          klvUnixMs: enriched.klvUnixMs,
+          timeSource: enriched.timeSource
         });
       } catch (error) {
         send({

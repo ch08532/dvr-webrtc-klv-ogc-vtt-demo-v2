@@ -70,16 +70,16 @@ export function decodeSt0601LocalSet(lsBuf) {
 
       case 18: if (v.length === 4) out.sensorRelAzDeg = mapUint32ToRange(v.readUInt32BE(0), 0, 360); break;
       case 19: if (v.length === 4) out.sensorRelElDeg = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
-      case 20: if (v.length === 4) out.sensorRelRollDeg = mapUint32ToRange(v.readUInt32BE(0), 0, 360); break;
+      case 20: if (v.length === 4) out.sensorRelRollDeg = mapUint32ToRange(v.readUInt32BE(0), -180, 180); break;
 
       case 21: if (v.length === 4) out.slantRangeM = mapUint32ToRange(v.readUInt32BE(0), 0, 5_000_000); break;
 
       case 23: if (v.length === 4) out.frameCenterLat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
       case 24: if (v.length === 4) out.frameCenterLon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
 
-      case 65: if (v.length === 4) out.platformHeadingDeg = mapUint32ToRange(v.readUInt32BE(0), 0, 360); break;
-      case 66: if (v.length === 2) out.platformPitchDeg = mapInt16ToRange(v.readInt16BE(0), -20, 20); break;
-      case 67: if (v.length === 2) out.platformRollDeg = mapInt16ToRange(v.readInt16BE(0), -50, 50); break;
+      case 5: if (v.length === 2) out.platformHeadingDeg = mapUint16ToRange(v.readUInt16BE(0), 0, 360); break;
+      case 6: if (v.length === 2) out.platformPitchDeg = mapInt16ToRange(v.readInt16BE(0), -20, 20); break;
+      case 7: if (v.length === 2) out.platformRollDeg = mapInt16ToRange(v.readInt16BE(0), -50, 50); break;
 
       default:
         break;

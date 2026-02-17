@@ -24,6 +24,47 @@ function berReadLength(buf, offset) {
   return { length: len, bytes: 1 + n };
 }
 
+function berOidReadTag(buf, offset) {
+  let tag = 0;
+  let i = offset;
+  while (i < buf.length) {
+    const b = buf[i++];
+    tag = (tag << 7) | (b & 0x7f);
+    if ((b & 0x80) === 0) return { tag, bytes: i - offset };
+  }
+  return null;
+}
+
+function validateSt0601Checksum(packetBuf, payloadBuf, payloadOffsetInPacket) {
+  let off = 0;
+  while (off < payloadBuf.length) {
+    const tagInfo = berOidReadTag(payloadBuf, off);
+    if (!tagInfo) return { present: false, valid: true };
+    off += tagInfo.bytes;
+
+    const lenInfo = berReadLength(payloadBuf, off);
+    if (!lenInfo) return { present: false, valid: true };
+    off += lenInfo.bytes;
+
+    const valueStart = off;
+    const valueEnd = valueStart + lenInfo.length;
+    if (valueEnd > payloadBuf.length) return { present: false, valid: true };
+
+    if (tagInfo.tag === 1 && lenInfo.length === 2) {
+      const expected = payloadBuf.readUInt16BE(valueStart);
+      const checksumValueEndInPacket = payloadOffsetInPacket + valueEnd;
+      let bcc = 0;
+      for (let i = 0; i < checksumValueEndInPacket - 2; i++) {
+        bcc = (bcc + (packetBuf[i] << (8 * ((i + 1) % 2)))) & 0xffff;
+      }
+      return { present: true, valid: bcc === expected, expected, actual: bcc };
+    }
+
+    off = valueEnd;
+  }
+  return { present: false, valid: true };
+}
+
 class TsPacketizer extends Transform {
   constructor() { super({ readableObjectMode: true }); this._buf = Buffer.alloc(0); }
   _transform(chunk, _enc, cb) {
@@ -84,24 +125,43 @@ function openInput(inputUrl) {
   return fs.createReadStream(inputUrl);
 }
 
-function scanForSt0601(buf, onDecoded) {
-  let idx = 0;
+function scanForSt0601(buf, onDecoded, context = {}) {
+  const { streamId, requestId, pid } = context;
+  let scanFrom = 0;
+
   while (true) {
-    idx = buf.indexOf(ST0601_KEY, idx);
-    if (idx === -1) return;
+    const idx = buf.indexOf(ST0601_KEY, scanFrom);
+    if (idx === -1) {
+      const keep = ST0601_KEY.length - 1;
+      return buf.subarray(Math.max(0, buf.length - keep));
+    }
 
-    const lenInfo = berReadLength(buf, idx + 16);
-    if (!lenInfo) return;
+    const lenInfo = berReadLength(buf, idx + ST0601_KEY.length);
+    if (!lenInfo) return buf.subarray(idx);
 
-    const v0 = idx + 16 + lenInfo.bytes;
+    const v0 = idx + ST0601_KEY.length + lenInfo.bytes;
     const v1 = v0 + lenInfo.length;
-    if (v1 > buf.length) return;
+    if (v1 > buf.length) return buf.subarray(idx);
 
+    const packet = buf.subarray(idx, v1);
     const value = buf.subarray(v0, v1);
+    const checksum = validateSt0601Checksum(packet, value, v0 - idx);
+    if (checksum.present && !checksum.valid) {
+      log.warn("st0601_checksum_invalid", {
+        requestId,
+        streamId,
+        pid,
+        expected: checksum.expected,
+        actual: checksum.actual
+      });
+      scanFrom = v1;
+      continue;
+    }
+
     const decoded = decodeSt0601LocalSet(value);
     if (Object.keys(decoded).length) onDecoded(decoded);
 
-    idx = v1;
+    scanFrom = v1;
   }
 }
 
@@ -120,8 +180,9 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
     const prev = rolling.get(pid) ?? Buffer.alloc(0);
     let buf = Buffer.concat([prev, payload]);
     if (buf.length > KEEP) buf = buf.subarray(buf.length - KEEP);
-    rolling.set(pid, buf);
-    return buf;
+    const remaining = scanForSt0601(buf, onDecoded, { streamId, requestId, pid });
+    rolling.set(pid, remaining);
+    return remaining;
   }
 
   input.pipe(packetizer);
@@ -165,11 +226,9 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
 
     if (klvPids?.size) {
       if (!klvPids.has(h.pid)) return;
-      const buf = append(h.pid, h.payload);
-      scanForSt0601(buf, onDecoded);
+      append(h.pid, h.payload);
     } else {
-      const buf = append(h.pid, h.payload);
-      scanForSt0601(buf, onDecoded);
+      append(h.pid, h.payload);
       if (rolling.size > 64) rolling.clear();
     }
   });
