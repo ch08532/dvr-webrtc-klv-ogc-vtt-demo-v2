@@ -512,7 +512,6 @@ app.post("/sources", async (req, res) => {
     const {
   streamId,
   inputUrl,
-  mode = "xcode-any",
   hlsSegmentSeconds = 1,
   vttSegmentSeconds = 5,
   purgeBeforeStart = false,
@@ -522,6 +521,7 @@ app.post("/sources", async (req, res) => {
   minCueDurSec = 0.10,
   maxCueDurSec = 0.50
 } = req.body || {};
+    const mode = "xcode-any";
     requestedStreamId = streamId;
     const effectiveSegmentSeconds = normalizeSegmentSeconds(
       hlsSegmentSeconds,

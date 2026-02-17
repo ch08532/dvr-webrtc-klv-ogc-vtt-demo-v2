@@ -47,13 +47,15 @@ function waitForExit(proc, timeoutMs) {
 }
 
 export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId }) {
-  const chosen = normalizeMode(mode);
+  const requestedMode = normalizeMode(mode);
+  const chosen = "xcode-any";
   const videoProfile = buildVideoArgs(chosen);
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
 
   // Keep the full history in the playlist.
   const listSize = 0;
   const playlist = path.join(outDir, "playlist.m3u8");
+  const segmentFilename = "playlist%d.ts";
 
   const base = [
     "-hide_banner", "-loglevel", "warning",
@@ -62,55 +64,38 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-i", inputUrl
   ];
 
-  const copyMode = chosen === "copy-h264";
-  const mediaOut = copyMode
-    ? [
-      // Copy streams only when explicitly requested.
-      "-map", "0:v:0",
-      "-map", "0:a:0?",
-      "-c", "copy",
-      // Do not start output with non-key video frames.
-      "-nocopyinkf",
-      "-sn",
-      "-dn"
-    ]
-    : [
-      // Default path: re-encode video for stable hls_time segmentation.
-      "-map", "0:v:0",
-      "-an",
-      ...videoProfile.videoArgs,
-      "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`
-    ];
+  const mediaOut = [
+    // Fixed encode path (mode is forced to xcode-any).
+    "-map", "0:v:0",
+    "-an",
+    ...videoProfile.videoArgs,
+    "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`
+  ];
 
   const hls = [
     "-f", "hls",
     "-hls_time", String(segmentSeconds),
     "-hls_list_size", String(listSize),
     "-hls_flags", buildHlsFlags(),
-    "-hls_segment_type", "fmp4",
-    "-hls_fmp4_init_filename", "init.mp4",
+    "-hls_segment_type", "mpegts",
+    "-hls_segment_filename", segmentFilename,
     playlist
   ];
 
   const args = [...base, ...mediaOut, ...hls];
-  if (copyMode) {
-    log.warn("segment_timing_unbounded_in_copy_mode", {
-      requestId,
-      streamId,
-      mode: chosen,
-      note: "copy-h264 may produce targetduration larger than hls_time due to source keyframe spacing"
-    });
-  }
   log.info("start", {
     requestId,
     streamId,
     inputUrl,
+    requestedMode,
     mode: chosen,
     hlsSegmentSeconds: segmentSeconds,
     outDir,
     listSize,
-    streamCopy: copyMode,
-    encoder: copyMode ? "copy" : videoProfile.encoder,
+    streamCopy: false,
+    encoder: videoProfile.encoder,
+    hlsSegmentType: "mpegts",
+    hlsSegmentFilename: segmentFilename,
     hlsFlags: buildHlsFlags()
   });
   log.info("ffmpeg_command", {
