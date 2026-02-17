@@ -24,6 +24,11 @@ function buildHlsFlags() {
   return "append_list+program_date_time+independent_segments+temp_file";
 }
 
+function formatCommand(cmd, args) {
+  const parts = [cmd, ...args].map((p) => JSON.stringify(String(p)));
+  return parts.join(" ");
+}
+
 function waitForExit(proc, timeoutMs) {
   if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -64,6 +69,8 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
       "-map", "0:v:0",
       "-map", "0:a:0?",
       "-c", "copy",
+      // Do not start output with non-key video frames.
+      "-nocopyinkf",
       "-sn",
       "-dn"
     ]
@@ -105,6 +112,13 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     streamCopy: copyMode,
     encoder: copyMode ? "copy" : videoProfile.encoder,
     hlsFlags: buildHlsFlags()
+  });
+  log.info("ffmpeg_command", {
+    requestId,
+    streamId,
+    cmd: "ffmpeg",
+    args,
+    command: formatCommand("ffmpeg", args)
   });
 
   const proc = spawn("ffmpeg", args, {
