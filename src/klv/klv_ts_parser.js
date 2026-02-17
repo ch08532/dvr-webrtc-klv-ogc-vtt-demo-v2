@@ -165,14 +165,9 @@ function scanForSt0601(buf, onDecoded, context = {}) {
   }
 }
 
-export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId }) {
-  log.info("start", { requestId, streamId, inputUrl });
-  const input = openInput(inputUrl);
-  const packetizer = new TsPacketizer();
-
+function createTsKlvPacketHandler({ streamId, requestId, onDecoded }) {
   let pmtPid = null;
   let klvPids = null;
-
   const rolling = new Map();
   const KEEP = 256 * 1024;
 
@@ -185,9 +180,7 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
     return remaining;
   }
 
-  input.pipe(packetizer);
-
-  packetizer.on("data", (pkt) => {
+  return (pkt) => {
     const h = parseTsHeader(pkt);
     if (!h || h.tei) return;
 
@@ -231,7 +224,17 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
       append(h.pid, h.payload);
       if (rolling.size > 64) rolling.clear();
     }
-  });
+  };
+}
+
+export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId }) {
+  log.info("start", { requestId, streamId, inputUrl });
+  const input = openInput(inputUrl);
+  const packetizer = new TsPacketizer();
+  const onPacket = createTsKlvPacketHandler({ streamId, requestId, onDecoded });
+
+  input.pipe(packetizer);
+  packetizer.on("data", onPacket);
 
   input.on("error", (error) => {
     log.error("input_error", { requestId, streamId, error: serializeError(error) });
@@ -242,6 +245,48 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
   });
 
   return { streamId, inputUrl, input, packetizer, requestId };
+}
+
+export async function extractKlvFromTsFile({ streamId, inputPath, requestId }) {
+  const decodedItems = [];
+  const input = fs.createReadStream(inputPath);
+  const packetizer = new TsPacketizer();
+  const onPacket = createTsKlvPacketHandler({
+    streamId,
+    requestId,
+    onDecoded: (decoded) => decodedItems.push(decoded)
+  });
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(decodedItems);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      input.off("error", fail);
+      packetizer.off("error", fail);
+      packetizer.off("data", onPacket);
+      packetizer.off("end", finish);
+      packetizer.off("close", finish);
+    };
+
+    input.on("error", fail);
+    packetizer.on("error", fail);
+    packetizer.on("data", onPacket);
+    packetizer.on("end", finish);
+    packetizer.on("close", finish);
+
+    input.pipe(packetizer);
+  });
 }
 
 export async function stopKlvIngest(handle) {

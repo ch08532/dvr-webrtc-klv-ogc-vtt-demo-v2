@@ -228,26 +228,15 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
 
 async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
   const segSec = normalizeSegmentSeconds(segmentSeconds, 1);
-  const segMs = Math.max(1, Math.round(segSec * 1000));
-  const nowMs = Date.now();
-  const segNo = Math.floor(nowMs / segMs);
-  const segStartMs = segNo * segMs;
-  const segFile = `meta_${segNo}.vtt`;
-
   const subtitlePlaylistPath = path.join(outDir, "subtitles.m3u8");
-  const segPath = path.join(outDir, segFile);
 
   const targetDuration = Math.max(1, Math.ceil(segSec));
   const playlist = `#EXTM3U
 #EXT-X-VERSION:7
 #EXT-X-TARGETDURATION:${targetDuration}
-#EXT-X-MEDIA-SEQUENCE:${segNo}
-#EXT-X-PROGRAM-DATE-TIME:${new Date(segStartMs).toISOString()}
-#EXTINF:${segSec.toFixed(3)},
-${segFile}
+#EXT-X-MEDIA-SEQUENCE:0
 `;
 
-  await fs.promises.writeFile(segPath, "WEBVTT\n\n");
   await fs.promises.writeFile(subtitlePlaylistPath, playlist);
 }
 
@@ -576,7 +565,7 @@ app.post("/sources", async (req, res) => {
     const outDir = path.join(RECORD_ROOT, streamId);
     await fs.promises.mkdir(outDir, { recursive: true });
 
-    // 1) DVR recorder (LL-HLS fMP4) — provides PROGRAM-DATE-TIME timestamps
+    // 1) DVR recorder (HLS MPEG-TS) — provides PROGRAM-DATE-TIME timestamps
     hls = startHlsRecorder({
       streamId,
       inputUrl,
