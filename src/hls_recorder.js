@@ -59,6 +59,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
 
   const base = [
     "-hide_banner", "-loglevel", "warning",
+    "-copy_unknown",
     "-fflags", "nobuffer", "-flags", "low_delay",
     ...videoProfile.inputArgs,
     "-i", inputUrl
@@ -66,9 +67,13 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
 
   const mediaOut = [
     // Fixed encode path (mode is forced to xcode-any).
+    // Include optional input data streams (e.g., KLV) into TS output.
     "-map", "0:v:0",
+    "-map", "0:d?",
     "-an",
+    "-sn",
     ...videoProfile.videoArgs,
+    "-c:d", "copy",
     "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`
   ];
 
@@ -94,6 +99,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     listSize,
     streamCopy: false,
     encoder: videoProfile.encoder,
+    mapDataStreams: true,
     hlsSegmentType: "mpegts",
     hlsSegmentFilename: segmentFilename,
     hlsFlags: buildHlsFlags()
