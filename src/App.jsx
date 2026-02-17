@@ -35,6 +35,15 @@ function App() {
   const [activeTab, setActiveTab] = useState('dvr');
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
+  const [dvrStatus, setDvrStatus] = useState('Idle');
+  const [dvrDiag, setDvrDiag] = useState({
+    currentSrc: null,
+    currentPlaylistUri: null,
+    currentPlaylistResolvedUri: null,
+    currentSegmentSequence: null,
+    currentSegmentUri: null,
+    error: null
+  });
   const [liveStatus, setLiveStatus] = useState('Idle');
   const [webrtcDiag, setWebrtcDiag] = useState({
     consumerId: null,
@@ -45,6 +54,7 @@ function App() {
   });
   const [startRequestInFlight, setStartRequestInFlight] = useState(false);
   const [stopRequestInFlight, setStopRequestInFlight] = useState(false);
+  const [serverOnline, setServerOnline] = useState(true);
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
 
@@ -63,11 +73,115 @@ function App() {
   const activeTabRef = useRef(activeTab);
   const streamIdRef = useRef(streamId);
   const streamRuntimeRef = useRef(streamRuntime);
+  const serverOnlineRef = useRef(serverOnline);
+  const offlinePollTimerRef = useRef(null);
+  const offlinePollTokenRef = useRef(0);
+
+  const clearOfflinePollLoop = () => {
+    if (offlinePollTimerRef.current) {
+      clearTimeout(offlinePollTimerRef.current);
+      offlinePollTimerRef.current = null;
+    }
+  };
+
+  const resetPlaybackStateAfterReconnect = () => {
+    setDvrDiag((prev) => ({
+      ...prev,
+      currentSrc: null,
+      currentPlaylistUri: null,
+      currentPlaylistResolvedUri: null,
+      currentSegmentSequence: null,
+      currentSegmentUri: null,
+      error: null
+    }));
+    setDvrStatus('No media');
+    setWebrtcDiag({
+      consumerId: null,
+      producerScore: null,
+      consumerScore: null,
+      currentLayers: null,
+      error: null
+    });
+    setLiveStatus('Not connected (start source)');
+  };
+
+  const markServerOnline = () => {
+    if (!serverOnlineRef.current) {
+      serverOnlineRef.current = true;
+      setServerOnline(true);
+      setStatus('Server connection restored.');
+      resetPlaybackStateAfterReconnect();
+    }
+  };
+
+  const markServerOffline = (error) => {
+    if (!serverOnlineRef.current) return;
+    serverOnlineRef.current = false;
+    setServerOnline(false);
+    setStatus(`Server offline. Retrying... (${String(error?.message || error || 'network error')})`);
+    setOverlayData(null);
+    setSourcesList([]);
+    setAutoAttachOnDvr(false);
+    setInputProbe((prev) => ({ ...prev, phase: 'idle', error: null }));
+    setStreamRuntime((prev) => ({
+      ...prev,
+      state: 'offline',
+      running: false,
+      hlsRunning: false,
+      klvRunning: false,
+      ingestRunning: false,
+      lastError: 'server offline'
+    }));
+    setWebrtcDiag({
+      consumerId: null,
+      producerScore: null,
+      consumerScore: null,
+      currentLayers: null,
+      error: 'server offline'
+    });
+    setDvrDiag({
+      currentSrc: null,
+      currentPlaylistUri: null,
+      currentPlaylistResolvedUri: null,
+      currentSegmentSequence: null,
+      currentSegmentUri: null,
+      error: 'server offline'
+    });
+    setHlsMediaLoaded(false);
+    setDvrStatus('Server offline. Retrying...');
+    setLiveStatus('Server offline. Retrying...');
+    clearHlsRetryLoop();
+    clearWebRtcRetryLoop();
+    disconnectWs();
+    cleanupWebRtcPlayback();
+    if (window.player) {
+      try { window.player.dispose(); } catch {}
+      window.player = null;
+    }
+  };
 
   const api = async (url, opts) => {
-    const res = await fetch(url, opts);
-    const text = await res.text();
-    try { return JSON.parse(text); } catch { return { raw: text, status: res.status }; }
+    try {
+      const res = await fetch(url, opts);
+      const urlText = String(url || '');
+      const isBackendApiPath = /^\/(sources|webrtc|streams|probe|metrics|healthz|ogc)(\/|$)/.test(urlText);
+      const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+      const hasBackendRequestId = !!res.headers.get('x-request-id');
+      const looksLikeBackendApi = hasBackendRequestId || contentType.includes('application/json');
+      const backendUnavailableStatus = res.status === 502 || res.status === 503 || res.status === 504;
+
+      if ((isBackendApiPath && !looksLikeBackendApi) || backendUnavailableStatus) {
+        const error = new Error(`Backend unavailable (HTTP ${res.status})`);
+        markServerOffline(error);
+        throw error;
+      }
+      markServerOnline();
+      const text = await res.text();
+      try { return JSON.parse(text); } catch { return { raw: text, status: res.status }; }
+    } catch (error) {
+      markServerOffline(error);
+      throw error;
+    }
   };
 
   const stateColor = (state) => {
@@ -75,6 +189,7 @@ function App() {
     if (state === 'degraded') return 'orange';
     if (state === 'starting' || state === 'stopping') return 'yellow';
     if (state === 'error') return 'red';
+    if (state === 'offline') return 'red';
     return 'gray';
   };
 
@@ -94,15 +209,33 @@ function App() {
 
   const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping'].includes(streamRuntime?.state);
   const isStopBlockedByState = ['starting', 'stopping', 'stopped'].includes(streamRuntime?.state);
-  const canStartSource = !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
-  const canStopSource = !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
+  const canStartSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
+  const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
 
   const webrtcBadge = (() => {
+    const statusText = String(liveStatus || '').toLowerCase();
+    if (!serverOnline) return { color: 'red', label: 'Server Offline' };
+    if (/reconnecting|failed|disconnected|closed|ended/.test(statusText)) {
+      return { color: 'red', label: 'Reconnecting' };
+    }
+    if (/connecting|waiting|retrying/.test(statusText)) {
+      return { color: 'yellow', label: 'Connecting' };
+    }
     if (webrtcDiag.error) return { color: 'red', label: 'Diag Error' };
     if (!webrtcDiag.consumerId) return { color: 'gray', label: 'No Stats' };
     if ((webrtcDiag.producerScore ?? 0) <= 0) return { color: 'red', label: 'No Producer Media' };
     if ((webrtcDiag.consumerScore ?? 0) <= 0) return { color: 'orange', label: 'No Consumer Media' };
     return { color: 'green', label: 'Media Flowing' };
+  })();
+
+  const dvrBadge = (() => {
+    if (dvrDiag.error) return { color: 'red', label: 'Playback Error' };
+    if (/playing/i.test(dvrStatus)) return { color: 'green', label: 'Media Flowing' };
+    if (/waiting|buffering|loading|connecting|seeking/i.test(dvrStatus)) return { color: 'yellow', label: 'Buffering' };
+    if (/paused/i.test(dvrStatus)) return { color: 'gray', label: 'Paused' };
+    if (/ended/i.test(dvrStatus)) return { color: 'orange', label: 'Ended' };
+    if (hlsMediaLoaded) return { color: 'green', label: 'Media Ready' };
+    return { color: 'gray', label: 'No Media' };
   })();
 
   const refreshStreamState = async (targetStreamId = streamId, { updateStatus = false } = {}) => {
@@ -208,6 +341,21 @@ function App() {
     if (liveVideoRef.current) liveVideoRef.current.srcObject = null;
   };
 
+  const clearWebRtcDiag = () => {
+    setWebrtcDiag({
+      consumerId: null,
+      producerScore: null,
+      consumerScore: null,
+      currentLayers: null,
+      error: null
+    });
+  };
+
+  const setLiveNotConnected = () => {
+    clearWebRtcDiag();
+    setLiveStatus('Not connected (start source)');
+  };
+
   const hasActiveWebRtcSession = (targetStreamId) => {
     const transport = webrtcTransportRef.current;
     const consumer = webrtcConsumerRef.current;
@@ -230,8 +378,24 @@ function App() {
     liveVideoRef.current.play().catch(() => {});
   };
 
+  const scheduleWebRtcReconnect = (targetStreamId, message, { transport = null, consumer = null } = {}) => {
+    if (!serverOnlineRef.current) return;
+    if (transport && webrtcTransportRef.current !== transport) return;
+    if (consumer && webrtcConsumerRef.current !== consumer) return;
+
+    clearWebRtcDiag();
+    setLiveStatus(message);
+    setTimeout(() => {
+      if (!serverOnlineRef.current) return;
+      if (transport && webrtcTransportRef.current !== transport) return;
+      if (consumer && webrtcConsumerRef.current !== consumer) return;
+      startWebRtcAutoAttach(targetStreamId);
+    }, 1000);
+  };
+
   const startLiveWebRtc = async (targetStreamId) => {
     cleanupWebRtcPlayback();
+    clearWebRtcDiag();
     setLiveStatus('Connecting...');
 
     const routerRtpCapabilities = await api('/webrtc/rtpCapabilities');
@@ -269,13 +433,12 @@ function App() {
     });
 
     recvTransport.on('connectionstatechange', (state) => {
+      if (webrtcTransportRef.current !== recvTransport) return;
       if (state === 'connected') setLiveStatus('Connected (waiting for video)...');
       else if (state === 'failed') {
-        setLiveStatus('Connection failed. Reconnecting...');
-        setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
+        scheduleWebRtcReconnect(targetStreamId, 'Connection failed. Reconnecting...', { transport: recvTransport });
       } else if (state === 'disconnected') {
-        setLiveStatus('Disconnected. Reconnecting...');
-        setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
+        scheduleWebRtcReconnect(targetStreamId, 'Disconnected. Reconnecting...', { transport: recvTransport });
       }
     });
 
@@ -301,18 +464,16 @@ function App() {
     });
     webrtcConsumerRef.current = consumer;
     consumer.on('transportclose', () => {
-      setLiveStatus('Transport closed. Reconnecting...');
-      setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
+      scheduleWebRtcReconnect(targetStreamId, 'Transport closed. Reconnecting...', { transport: recvTransport, consumer });
     });
     consumer.on('producerclose', () => {
-      setLiveStatus('Producer closed. Reconnecting...');
-      setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
+      scheduleWebRtcReconnect(targetStreamId, 'Producer closed. Reconnecting...', { transport: recvTransport, consumer });
     });
     consumer.track.onended = () => {
-      setLiveStatus('Track ended. Reconnecting...');
-      setTimeout(() => startWebRtcAutoAttach(targetStreamId), 1000);
+      scheduleWebRtcReconnect(targetStreamId, 'Track ended. Reconnecting...', { transport: recvTransport, consumer });
     };
     consumer.track.onunmute = () => {
+      if (webrtcConsumerRef.current !== consumer) return;
       setLiveStatus('Receiving video...');
     };
 
@@ -412,6 +573,15 @@ function App() {
       if (result?.ok && activeTab === 'live-webrtc') {
         startWebRtcAutoAttach(streamId);
       }
+    } catch (error) {
+      setStatus(`Start source failed: ${String(error?.message || error)}`);
+      setStreamRuntime((prev) => ({
+        ...prev,
+        streamId,
+        state: serverOnlineRef.current ? 'error' : 'offline',
+        running: false,
+        lastError: String(error?.message || error)
+      }));
     } finally {
       setStartRequestInFlight(false);
     }
@@ -435,10 +605,25 @@ function App() {
         window.player = null;
       }
       setHlsMediaLoaded(false);
+      setDvrStatus('Stopped');
+      setDvrDiag({
+        currentSrc: null,
+        currentPlaylistUri: null,
+        currentPlaylistResolvedUri: null,
+        currentSegmentSequence: null,
+        currentSegmentUri: null,
+        error: null
+      });
       cleanupWebRtcPlayback();
+      clearWebRtcDiag();
       setLiveStatus('Stopped');
       await refreshStreamState(streamId);
       await refreshSources({ silent: true });
+    } catch (error) {
+      setStatus(`Stop source failed: ${String(error?.message || error)}`);
+      if (!serverOnlineRef.current) {
+        setLiveNotConnected();
+      }
     } finally {
       setStopRequestInFlight(false);
     }
@@ -454,9 +639,23 @@ function App() {
     if (!targetStreamId) return;
     const result = await api('/webrtc/debug');
     if (!result?.ok || !result?.snapshot) {
+      const message = String(result?.error || 'debug unavailable');
+      if (/SFU client not initialized|SFU worker is not running/i.test(message)) {
+        setWebrtcDiag({
+          consumerId: null,
+          producerScore: null,
+          consumerScore: null,
+          currentLayers: null,
+          error: null
+        });
+        if (!hasActiveWebRtcSession(targetStreamId)) {
+          setLiveStatus('Waiting for SFU...');
+        }
+        return;
+      }
       setWebrtcDiag((prev) => ({
         ...prev,
-        error: result?.error || 'debug unavailable'
+        error: message
       }));
       return;
     }
@@ -595,6 +794,86 @@ function App() {
     }
   };
 
+  const getCurrentHlsPlaylistInfo = (player = null) => {
+    const p = player || getActiveHlsPlayer();
+    if (!p) {
+      return {
+        currentSrc: null,
+        currentPlaylistUri: null,
+        currentPlaylistResolvedUri: null,
+        currentSegmentSequence: null,
+        currentSegmentUri: null
+      };
+    }
+
+    let currentPlaylistUri = null;
+    let currentPlaylistResolvedUri = null;
+    let currentSegmentSequence = null;
+    let currentSegmentUri = null;
+    try {
+      const tech = p.tech?.({ IWillNotUseThisInPlugins: true });
+      const vhs = tech?.vhs || p.vhs || null;
+      const mediaPlaylist = vhs?.playlists?.media?.();
+      if (mediaPlaylist) {
+        currentPlaylistUri = mediaPlaylist.uri || mediaPlaylist.id || null;
+        currentPlaylistResolvedUri = mediaPlaylist.resolvedUri || null;
+
+        const segments = Array.isArray(mediaPlaylist.segments) ? mediaPlaylist.segments : null;
+        const mediaSequence = Number(mediaPlaylist.mediaSequence);
+        const currentTime = Number(p.currentTime?.());
+        const seekBounds = getHlsSeekBounds(p);
+        const playlistStart = Number(seekBounds?.start ?? 0);
+
+        if (segments?.length && Number.isFinite(currentTime) && Number.isFinite(playlistStart)) {
+          let offsetSec = currentTime - playlistStart;
+          if (!Number.isFinite(offsetSec) || offsetSec < 0) offsetSec = 0;
+
+          let cumulative = 0;
+          let segmentIdx = segments.length - 1;
+          for (let i = 0; i < segments.length; i++) {
+            const d = Number(segments[i]?.duration);
+            const dur = Number.isFinite(d) && d > 0 ? d : 0;
+            if (offsetSec < cumulative + dur || i === segments.length - 1) {
+              segmentIdx = i;
+              break;
+            }
+            cumulative += dur;
+          }
+
+          const segment = segments[segmentIdx] || null;
+          if (segment) {
+            currentSegmentUri = segment.uri || segment.resolvedUri || null;
+            currentSegmentSequence = Number.isFinite(mediaSequence)
+              ? mediaSequence + segmentIdx
+              : segmentIdx;
+          }
+        }
+      }
+    } catch {
+      // no-op, diagnostics are best-effort
+    }
+
+    return {
+      currentSrc: String(p.currentSrc?.() || "") || null,
+      currentPlaylistUri,
+      currentPlaylistResolvedUri,
+      currentSegmentSequence,
+      currentSegmentUri
+    };
+  };
+
+  const refreshDvrPlaybackInfo = (player = null) => {
+    const info = getCurrentHlsPlaylistInfo(player);
+    setDvrDiag((prev) => ({
+      ...prev,
+      currentSrc: info.currentSrc,
+      currentPlaylistUri: info.currentPlaylistUri,
+      currentPlaylistResolvedUri: info.currentPlaylistResolvedUri,
+      currentSegmentSequence: info.currentSegmentSequence,
+      currentSegmentUri: info.currentSegmentUri
+    }));
+  };
+
   const connectWs = () => {
     if (!wsWorkerRef.current) {
       const worker = new Worker(new URL('./workers/klv_ws_worker.js', import.meta.url), { type: 'module' });
@@ -643,6 +922,15 @@ function App() {
 
     const url = `/hls/${encodeURIComponent(streamId)}/master.m3u8`;
     setHlsMediaLoaded(false);
+    setDvrStatus('Connecting...');
+    setDvrDiag({
+      currentSrc: url,
+      currentPlaylistUri: null,
+      currentPlaylistResolvedUri: null,
+      currentSegmentSequence: null,
+      currentSegmentUri: null,
+      error: null
+    });
 
     vttHookedRef.current = false;
 
@@ -651,6 +939,9 @@ function App() {
       const currentSrc = String(window.player.currentSrc?.() || "");
       if (currentSrc.includes(`/hls/${encodeURIComponent(streamId)}/master.m3u8`)) {
         setHlsMediaLoaded(hasLoadedHlsMedia(window.player));
+        setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
+        setDvrDiag((prev) => ({ ...prev, error: null }));
+        refreshDvrPlaybackInfo(window.player);
         window.player.play().catch(() => {});
         hookVttOverlaySoon();
         return;
@@ -696,26 +987,79 @@ function App() {
         type: 'application/x-mpegURL'
       });
       setHlsMediaLoaded(false);
+      setDvrStatus('Loading playlist...');
 
-      window.player.on('loadedmetadata', () => setHlsMediaLoaded(true));
-      window.player.on('canplay', () => setHlsMediaLoaded(true));
-      window.player.on('playing', () => setHlsMediaLoaded(true));
-      window.player.on('loadstart', () => setHlsMediaLoaded(false));
-      window.player.on('emptied', () => setHlsMediaLoaded(false));
-      window.player.on('dispose', () => setHlsMediaLoaded(false));
+      window.player.on('loadstart', () => {
+        setHlsMediaLoaded(false);
+        setDvrStatus('Loading playlist...');
+        setDvrDiag((prev) => ({ ...prev, error: null }));
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('loadedmetadata', () => {
+        setHlsMediaLoaded(true);
+        setDvrStatus('Ready');
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('canplay', () => {
+        setHlsMediaLoaded(true);
+        setDvrStatus('Ready');
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('playing', () => {
+        setHlsMediaLoaded(true);
+        setDvrStatus('Playing');
+        setDvrDiag((prev) => ({ ...prev, error: null }));
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('waiting', () => {
+        setDvrStatus('Buffering...');
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('stalled', () => {
+        setDvrStatus('Buffering...');
+      });
+      window.player.on('seeking', () => {
+        setDvrStatus('Seeking...');
+      });
+      window.player.on('seeked', () => {
+        setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('pause', () => {
+        if (!window.player.ended?.()) setDvrStatus('Paused');
+      });
+      window.player.on('ended', () => {
+        setDvrStatus('Ended');
+      });
+      window.player.on('emptied', () => {
+        setHlsMediaLoaded(false);
+        setDvrStatus('Idle');
+      });
+      window.player.on('dispose', () => {
+        setHlsMediaLoaded(false);
+        setDvrStatus('Idle');
+      });
 
       window.player.on('error', () => {
         setHlsMediaLoaded(false);
+        const err = window.player?.error?.();
+        const msg = err?.message || `code=${String(err?.code || 'n/a')}`;
+        setDvrStatus('Playback error. Reconnecting...');
+        setDvrDiag((prev) => ({ ...prev, error: msg }));
+        refreshDvrPlaybackInfo(window.player);
         // If the playlist is not yet ready, keep retrying in the background.
         startHlsAutoAttach(streamId);
       });
 
       window.player.ready(() => {
         window.player.play().catch(() => {});
+        refreshDvrPlaybackInfo(window.player);
         hookVttOverlaySoon();
       });
     } catch (error) {
       console.error('Error initializing video.js player:', error);
+      setDvrStatus('Playback init failed');
+      setDvrDiag((prev) => ({ ...prev, error: String(error?.message || error) }));
     }
   };
 
@@ -766,15 +1110,19 @@ function App() {
   };
 
   const startHlsAutoAttach = (targetStreamId) => {
+    if (!serverOnlineRef.current) return;
     clearHlsRetryLoop();
     const token = ++hlsRetryTokenRef.current;
+    setDvrStatus('Waiting for HLS playlist...');
 
     const run = async () => {
       if (token !== hlsRetryTokenRef.current) return;
       if (activeTab !== 'dvr') return;
+      if (!serverOnlineRef.current) return;
 
       const available = await probeHlsReady(targetStreamId);
       if (token !== hlsRetryTokenRef.current) return;
+      if (!serverOnlineRef.current) return;
 
       if (available) {
         attachHlsDvr(targetStreamId);
@@ -788,6 +1136,7 @@ function App() {
   };
 
   const startWebRtcAutoAttach = (targetStreamId) => {
+    if (!serverOnlineRef.current) return;
     clearWebRtcRetryLoop();
     const token = ++webrtcRetryTokenRef.current;
     let attempts = 0;
@@ -795,6 +1144,7 @@ function App() {
     const run = async () => {
       if (token !== webrtcRetryTokenRef.current) return;
       if (activeTab !== 'live-webrtc') return;
+      if (!serverOnlineRef.current) return;
       if (hasActiveWebRtcSession(targetStreamId)) {
         reattachWebRtcStream();
         setLiveStatus('Playing');
@@ -802,27 +1152,43 @@ function App() {
       }
 
       attempts += 1;
-      const runtime = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
-      if (!runtime?.running || !runtime?.ingestRunning) {
-        setLiveStatus('Waiting for ingest producer...');
-        webrtcRetryTimerRef.current = setTimeout(run, 1000);
-        return;
-      }
-
       try {
+        const runtime = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
+        const state = String(runtime?.state || '');
+        const sourceStopped = state === 'stopped' || state === 'stopping' || state === 'error' || state === 'offline';
+
+        if (sourceStopped || (!runtime?.running && state !== 'starting')) {
+          setLiveNotConnected();
+          return;
+        }
+
+        if (!runtime?.running || !runtime?.ingestRunning) {
+          setLiveStatus('Waiting for ingest producer...');
+          webrtcRetryTimerRef.current = setTimeout(run, 1000);
+          return;
+        }
+
         await startLiveWebRtc(targetStreamId);
         return;
       } catch (error) {
+        if (!serverOnlineRef.current) {
+          setLiveNotConnected();
+          return;
+        }
         setLiveStatus(`Retrying... (${attempts})`);
+        webrtcRetryTimerRef.current = setTimeout(run, 1000);
       }
-
-      webrtcRetryTimerRef.current = setTimeout(run, 1000);
     };
 
     run();
   };
 
   useLayoutEffect(() => {
+    if (!serverOnline) {
+      clearHlsRetryLoop();
+      clearWebRtcRetryLoop();
+      return;
+    }
     if (activeTab === 'dvr') {
       // Keep probing until HLS appears, then attach, but only after user started a source.
       if (autoAttachOnDvr) {
@@ -843,10 +1209,16 @@ function App() {
         reattachWebRtcStream();
         setLiveStatus('Playing');
       } else {
+        const state = String(streamRuntimeRef.current?.state || '');
+        const running = !!streamRuntimeRef.current?.running;
+        if (state === 'stopped' || state === 'stopping' || state === 'error' || state === 'offline' || !running) {
+          setLiveNotConnected();
+          return;
+        }
         startWebRtcAutoAttach(streamId);
       }
     }
-  }, [activeTab, streamId, autoAttachOnDvr]);
+  }, [activeTab, streamId, autoAttachOnDvr, serverOnline]);
 
   useEffect(() => {
     activeTabRef.current = activeTab;
@@ -861,9 +1233,14 @@ function App() {
   }, [streamId]);
 
   useEffect(() => {
+    serverOnlineRef.current = serverOnline;
+  }, [serverOnline]);
+
+  useEffect(() => {
     streamRuntimeRef.current = streamRuntime;
     if (activeTab === 'live-webrtc' && (streamRuntime?.state === 'stopped' || streamRuntime?.state === 'stopping')) {
       setOverlayData(null);
+      setLiveNotConnected();
     }
   }, [streamRuntime, activeTab]);
 
@@ -876,6 +1253,15 @@ function App() {
   }, [activeTab]);
 
   useEffect(() => {
+    if (activeTab !== 'dvr') return;
+    refreshDvrPlaybackInfo(window.player);
+    const timer = setInterval(() => {
+      refreshDvrPlaybackInfo(window.player);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeTab, streamId, hlsMediaLoaded]);
+
+  useEffect(() => {
     refreshSources({ silent: true }).catch(() => {});
     refreshStreamState(streamId, { updateStatus: true }).catch(() => {});
 
@@ -885,6 +1271,41 @@ function App() {
     }, 2000);
     return () => clearInterval(timer);
   }, [streamId]);
+
+  useEffect(() => {
+    if (serverOnline) {
+      clearOfflinePollLoop();
+      return;
+    }
+
+    const token = ++offlinePollTokenRef.current;
+
+    const run = async () => {
+      if (token !== offlinePollTokenRef.current) return;
+      try {
+        const res = await fetch(`/sources?_=${Date.now()}`, { cache: 'no-store' });
+        const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+        const hasBackendRequestId = !!res.headers.get('x-request-id');
+        const looksLikeBackendApi = hasBackendRequestId || contentType.includes('application/json');
+        if (!res.ok || !looksLikeBackendApi) {
+          throw new Error(`health probe failed (HTTP ${res.status})`);
+        }
+        if (token !== offlinePollTokenRef.current) return;
+        setServerOnline(true);
+        await refreshSources({ silent: true });
+        await refreshStreamState(streamIdRef.current, { updateStatus: true });
+        return;
+      } catch {
+        // Keep polling while offline.
+      }
+
+      if (token !== offlinePollTokenRef.current) return;
+      offlinePollTimerRef.current = setTimeout(run, 2000);
+    };
+
+    run();
+    return () => clearOfflinePollLoop();
+  }, [serverOnline]);
 
   useEffect(() => {
     setInputProbe({
@@ -903,6 +1324,7 @@ function App() {
     return () => {
       clearHlsRetryLoop();
       clearWebRtcRetryLoop();
+      clearOfflinePollLoop();
       disconnectWs();
       cleanupWebRtcPlayback();
       if (window.player) {
@@ -914,12 +1336,14 @@ function App() {
 
   useEffect(() => {
     if (activeTab !== 'live-webrtc') return;
+    if (!serverOnline) return;
+    if (!streamRuntime?.running || !streamRuntime?.ingestRunning) return;
     refreshWebRtcDebug(streamId).catch(() => {});
     const timer = setInterval(() => {
       refreshWebRtcDebug(streamId).catch(() => {});
     }, 2000);
     return () => clearInterval(timer);
-  }, [activeTab, streamId]);
+  }, [activeTab, streamId, serverOnline, streamRuntime?.running, streamRuntime?.ingestRunning]);
 
   const dvrOverlayEntries = overlayData?.mode === 'dvr-vtt'
     ? Object.entries(overlayData)
@@ -936,11 +1360,24 @@ function App() {
         padding="md"
       >
         <AppShell.Header>
-          <Text size="lg" fw={700} p="md">DVR + WebRTC + KLV Demo</Text>
+          <Group justify="space-between" align="center" px="md" h="100%">
+            <Text size="lg" fw={700}>DVR + WebRTC + KLV Demo</Text>
+            <Badge color={serverOnline ? 'green' : 'red'} variant="filled">
+              {serverOnline ? 'Server Online' : 'Server Offline'}
+            </Badge>
+          </Group>
         </AppShell.Header>
 
         <AppShell.Main>
           <Stack spacing="md">
+            {!serverOnline ? (
+              <Paper shadow="xs" p="md" withBorder>
+                <Text size="sm" fw={600} c="red">Server is offline</Text>
+                <Text size="sm" c="dimmed">
+                  Cleared local playback state. Polling every 2 seconds until the server returns.
+                </Text>
+              </Paper>
+            ) : null}
             <Paper shadow="xs" p="md">
               <Text size="lg" fw={500}>Start Source</Text>
               <Group mt="xs" align="end" wrap="nowrap">
@@ -959,7 +1396,7 @@ function App() {
                 <Button
                   onClick={testInputFeed}
                   loading={inputProbe.phase === 'testing'}
-                  disabled={!String(inputUrl || '').trim()}
+                  disabled={!serverOnline || !String(inputUrl || '').trim()}
                 >
                   Test Feed
                 </Button>
@@ -1047,6 +1484,19 @@ function App() {
                   <Text>DVR HLS playback with VTT overlay</Text>
                   <Group mt="xs" align="flex-start" grow wrap="wrap">
                     <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
+                      <Group gap="xs" mb="xs">
+                        <Text size="sm" c="dimmed">Status: {dvrStatus}</Text>
+                        <Badge color={dvrBadge.color} variant="light">{dvrBadge.label}</Badge>
+                      </Group>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        source: {dvrDiag.currentSrc || 'n/a'} | playlist: {dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri || 'n/a'}
+                      </Text>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        segment: {dvrDiag.currentSegmentSequence != null ? dvrDiag.currentSegmentSequence : 'n/a'}{dvrDiag.currentSegmentUri ? ` (${dvrDiag.currentSegmentUri})` : ''}
+                      </Text>
+                      {dvrDiag.error ? (
+                        <Text size="xs" c="red" mb="xs">error: {dvrDiag.error}</Text>
+                      ) : null}
                       <video ref={videoRef} id="video-player" className="video-js" controls muted playsInline style={{ width: '100%', maxHeight: '400px' }}></video>
                       {activeTab === 'dvr' && hlsMediaLoaded ? (
                         <Group mt="xs">

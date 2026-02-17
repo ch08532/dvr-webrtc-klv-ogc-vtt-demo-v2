@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
@@ -26,6 +26,7 @@ const WS_PATH = process.env.WS_PATH || "/ws";
 const WEBRTC_ANNOUNCED_IP = process.env.WEBRTC_ANNOUNCED_IP || "127.0.0.1";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
 const INPUT_PROBE_TIMEOUT_MS = Math.max(1000, Number(process.env.INPUT_PROBE_TIMEOUT_MS || 7000));
+const SHUTDOWN_FORCE_EXIT_MS = Math.max(1000, Number(process.env.SHUTDOWN_FORCE_EXIT_MS || 10000));
 const log = createServiceLogger("server");
 
 const RECORD_ROOT = path.resolve("./recordings");
@@ -59,6 +60,11 @@ app.use((req, res, next) => {
 });
 const server = http.createServer(app);
 let httpPort = REQUESTED_HTTP_PORT;
+const httpSockets = new Set();
+server.on("connection", (socket) => {
+  httpSockets.add(socket);
+  socket.on("close", () => httpSockets.delete(socket));
+});
 
 // ---------- Storage ----------
 const store = new SqliteKlvStore({ dbPath: path.join(DB_DIR, "klv.sqlite") });
@@ -830,8 +836,13 @@ app.get("/webrtc/debug", async (req, res) => {
       snapshot
     });
   } catch (e) {
+    const message = String(e?.message || e);
+    if (message === "SFU client not initialized" || message === "SFU worker is not running") {
+      res.status(503).json({ ok: false, retryable: true, error: message });
+      return;
+    }
     log.error("webrtc_debug_error", { error: serializeError(e) });
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok: false, error: message });
   }
 });
 
@@ -953,28 +964,134 @@ server.listen(httpPort, () => {
 });
 
 let shuttingDown = false;
+let shutdownForceKillPids = new Set();
+
+function addPid(targetSet, pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  targetSet.add(pid);
+}
+
+function snapshotBackendChildPids() {
+  const pids = new Set();
+  try {
+    addPid(pids, sfuClient?.proc?.pid ?? null);
+  } catch {}
+  for (const source of sources.values()) {
+    addPid(pids, source?.hls?.proc?.pid ?? null);
+    addPid(pids, source?.klvWorker?.proc?.pid ?? null);
+  }
+  return pids;
+}
+
+function forceKillProcessTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    if (process.platform === "win32") {
+      const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+      return result.status === 0;
+    }
+    process.kill(pid, "SIGKILL");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function forceKillPidSet(pidSet, reason) {
+  if (!pidSet || !pidSet.size) return;
+  const attempted = [];
+  const killed = [];
+  for (const pid of pidSet) {
+    attempted.push(pid);
+    if (forceKillProcessTree(pid)) killed.push(pid);
+  }
+  log.warn("shutdown_force_kill_sweep", {
+    reason,
+    attemptedPids: attempted,
+    killedPids: killed
+  });
+}
+
 async function shutdown(signal) {
-  if (shuttingDown) return;
+  if (shuttingDown) {
+    log.warn("shutdown_already_in_progress", { signal });
+    forceKillPidSet(shutdownForceKillPids, "second_signal");
+    process.exit(1);
+    return;
+  }
   shuttingDown = true;
   log.info("shutdown_start", { signal });
+  shutdownForceKillPids = snapshotBackendChildPids();
+
+  const forceExitTimer = setTimeout(() => {
+    forceKillPidSet(shutdownForceKillPids, "shutdown_timeout");
+    log.error("shutdown_force_exit_timeout", { timeoutMs: SHUTDOWN_FORCE_EXIT_MS });
+    process.exit(1);
+  }, SHUTDOWN_FORCE_EXIT_MS);
+  forceExitTimer.unref?.();
+
+  const withTimeout = async (promise, label, timeoutMs = 3000) => {
+    let timeoutHandle = null;
+    try {
+      await Promise.race([
+        Promise.resolve(promise),
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs);
+          timeoutHandle.unref?.();
+        })
+      ]);
+    } catch (error) {
+      log.warn("shutdown_step_failed", { label, error: serializeError(error) });
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
+  };
+
+  // Stop accepting new HTTP connections early.
+  const closeServerPromise = new Promise((resolve) => {
+    try {
+      server.close(() => resolve());
+    } catch {
+      resolve();
+    }
+  });
+
+  // Close WS clients and listener.
+  try {
+    for (const client of wss.clients) {
+      try { client.terminate(); } catch {}
+    }
+  } catch {}
+  try { wss.close(); } catch {}
 
   const entries = [...sources.entries()];
-  for (const [streamId, s] of entries) {
+  await Promise.allSettled(entries.map(async ([streamId, s]) => {
     sources.delete(streamId);
-    try { await stopKlvStreamWorker(s.klvWorker); } catch {}
-    try { await stopHlsRecorder(s.hls); } catch {}
-    try { await sfuClient.stopIngest(streamId); } catch {}
+    addPid(shutdownForceKillPids, s?.hls?.proc?.pid ?? null);
+    addPid(shutdownForceKillPids, s?.klvWorker?.proc?.pid ?? null);
+    await withTimeout(stopKlvStreamWorker(s.klvWorker), `stopKlvStreamWorker(${streamId})`, 4000);
+    await withTimeout(stopHlsRecorder(s.hls), `stopHlsRecorder(${streamId})`, 4000);
+    await withTimeout(sfuClient.stopIngest(streamId), `sfuClient.stopIngest(${streamId})`, 4000);
+  }));
+
+  await withTimeout(sfuClient.close(), "sfuClient.close", 4000);
+  await withTimeout(store.close(), "store.close", 4000);
+
+  // Ensure no keep-alive sockets prevent server close callback.
+  for (const socket of httpSockets) {
+    try { socket.destroy(); } catch {}
   }
+  await withTimeout(closeServerPromise, "server.close", 4000);
 
-  try { await sfuClient.close(); } catch {}
-  try { await store.close(); } catch {}
-  try { wss.close(); } catch {}
-  try {
-    await new Promise((resolve) => server.close(() => resolve()));
-  } catch {}
+  // Final best-effort sweep in case descendants (e.g., ffmpeg) survived graceful stop.
+  for (const pid of snapshotBackendChildPids()) shutdownForceKillPids.add(pid);
+  forceKillPidSet(shutdownForceKillPids, "final_sweep");
 
+  clearTimeout(forceExitTimer);
+  shutdownForceKillPids = new Set();
   process.exit(0);
 }
 
 process.on("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(1)); });
 process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+process.on("SIGBREAK", () => { shutdown("SIGBREAK").catch(() => process.exit(1)); });
