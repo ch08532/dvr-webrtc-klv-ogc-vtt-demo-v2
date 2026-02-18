@@ -40,6 +40,7 @@ function App() {
     currentPlaylistResolvedUri: null,
     currentSegmentSequence: null,
     currentSegmentUri: null,
+    currentSubtitleUri: null,
     error: null
   });
   const [liveStatus, setLiveStatus] = useState('Idle');
@@ -97,6 +98,7 @@ function App() {
       currentPlaylistResolvedUri: null,
       currentSegmentSequence: null,
       currentSegmentUri: null,
+      currentSubtitleUri: null,
       error: null
     }));
     setDvrStatus('No media');
@@ -150,6 +152,7 @@ function App() {
       currentPlaylistResolvedUri: null,
       currentSegmentSequence: null,
       currentSegmentUri: null,
+      currentSubtitleUri: null,
       error: 'server offline'
     });
     setHlsMediaLoaded(false);
@@ -680,6 +683,7 @@ function App() {
         currentPlaylistResolvedUri: null,
         currentSegmentSequence: null,
         currentSegmentUri: null,
+        currentSubtitleUri: null,
         error: null
       });
       cleanupWebRtcPlayback();
@@ -863,6 +867,22 @@ function App() {
   };
 
   const getCurrentHlsPlaylistInfo = (player = null) => {
+    const subtitleUriForSegmentUri = (segmentUri) => {
+      const raw = String(segmentUri || '').trim();
+      if (!raw) return null;
+      const queryIndex = raw.search(/[?#]/);
+      const normalized = queryIndex >= 0 ? raw.slice(0, queryIndex) : raw;
+      if (!normalized) return null;
+      const slashIdx = normalized.lastIndexOf('/');
+      const dir = slashIdx >= 0 ? normalized.slice(0, slashIdx + 1) : '';
+      const filename = slashIdx >= 0 ? normalized.slice(slashIdx + 1) : normalized;
+      if (!filename) return null;
+      const dotIdx = filename.lastIndexOf('.');
+      const base = dotIdx > 0 ? filename.slice(0, dotIdx) : filename;
+      if (!base) return null;
+      return `${dir}meta_${base}.vtt`;
+    };
+
     const p = player || getActiveHlsPlayer();
     if (!p) {
       return {
@@ -870,7 +890,8 @@ function App() {
         currentPlaylistUri: null,
         currentPlaylistResolvedUri: null,
         currentSegmentSequence: null,
-        currentSegmentUri: null
+        currentSegmentUri: null,
+        currentSubtitleUri: null
       };
     }
 
@@ -878,6 +899,7 @@ function App() {
     let currentPlaylistResolvedUri = null;
     let currentSegmentSequence = null;
     let currentSegmentUri = null;
+    let currentSubtitleUri = null;
     try {
       const tech = p.tech?.({ IWillNotUseThisInPlugins: true });
       const vhs = tech?.vhs || p.vhs || null;
@@ -911,6 +933,7 @@ function App() {
           const segment = segments[segmentIdx] || null;
           if (segment) {
             currentSegmentUri = segment.uri || segment.resolvedUri || null;
+            currentSubtitleUri = subtitleUriForSegmentUri(currentSegmentUri);
             currentSegmentSequence = Number.isFinite(mediaSequence)
               ? mediaSequence + segmentIdx
               : segmentIdx;
@@ -926,7 +949,8 @@ function App() {
       currentPlaylistUri,
       currentPlaylistResolvedUri,
       currentSegmentSequence,
-      currentSegmentUri
+      currentSegmentUri,
+      currentSubtitleUri
     };
   };
 
@@ -938,7 +962,8 @@ function App() {
       currentPlaylistUri: info.currentPlaylistUri,
       currentPlaylistResolvedUri: info.currentPlaylistResolvedUri,
       currentSegmentSequence: info.currentSegmentSequence,
-      currentSegmentUri: info.currentSegmentUri
+      currentSegmentUri: info.currentSegmentUri,
+      currentSubtitleUri: info.currentSubtitleUri
     }));
   };
 
@@ -997,6 +1022,7 @@ function App() {
       currentPlaylistResolvedUri: null,
       currentSegmentSequence: null,
       currentSegmentUri: null,
+      currentSubtitleUri: null,
       error: null
     });
 
@@ -1667,7 +1693,7 @@ function App() {
                         source: {dvrDiag.currentSrc || 'n/a'} | playlist: {dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri || 'n/a'}
                       </Text>
                       <Text size="xs" c="dimmed" mb="xs">
-                        segment: {dvrDiag.currentSegmentSequence != null ? dvrDiag.currentSegmentSequence : 'n/a'}{dvrDiag.currentSegmentUri ? ` (${dvrDiag.currentSegmentUri})` : ''}
+                        segment: {dvrDiag.currentSegmentSequence != null ? dvrDiag.currentSegmentSequence : 'n/a'}{dvrDiag.currentSegmentUri ? ` (${dvrDiag.currentSegmentUri})` : ''} | subtitle: {dvrDiag.currentSubtitleUri || 'n/a'}
                       </Text>
                       {dvrDiag.error ? (
                         <Text size="xs" c="red" mb="xs">error: {dvrDiag.error}</Text>

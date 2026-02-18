@@ -202,39 +202,33 @@ function writeSegmentVtt({
   maxCueDurSec
 }) {
   const segDur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 5;
+  const maxStartSec = Math.max(0, segDur - 0.001);
   const cues = [];
   const total = records.length;
   const finiteKlvTimes = records
     .map((r) => Number(r.klvUnixMs))
     .filter((ms) => Number.isFinite(ms));
   const relBaseMs = finiteKlvTimes.length ? finiteKlvTimes[0] : null;
-  let useAbsoluteClock = false;
-  if (Number.isFinite(segmentStartMs) && finiteKlvTimes.length) {
-    const first = finiteKlvTimes[0];
-    const last = finiteKlvTimes[finiteKlvTimes.length - 1];
-    const minExpected = segmentStartMs - 1000;
-    const maxExpected = segmentStartMs + (segDur * 1000) + 1000;
-    useAbsoluteClock = first >= minExpected && first <= maxExpected && last >= minExpected && last <= maxExpected;
-  }
 
   const computeStartSec = (record, index) => {
-    if (Number.isFinite(record.klvUnixMs) && useAbsoluteClock) {
-      return clamp((record.klvUnixMs - segmentStartMs) / 1000, 0, Math.max(0, segDur - 0.001));
+    // Primary mapping: mission/source timestamp relative to segment start time.
+    if (Number.isFinite(record.klvUnixMs) && Number.isFinite(segmentStartMs)) {
+      return clamp((record.klvUnixMs - segmentStartMs) / 1000, 0, maxStartSec);
     }
     if (Number.isFinite(record.klvUnixMs) && Number.isFinite(relBaseMs)) {
-      return clamp((record.klvUnixMs - relBaseMs) / 1000, 0, Math.max(0, segDur - 0.001));
+      return clamp((record.klvUnixMs - relBaseMs) / 1000, 0, maxStartSec);
     }
     if (total <= 1) return 0;
-    return clamp((index / total) * segDur, 0, Math.max(0, segDur - 0.001));
+    return clamp((index / total) * segDur, 0, maxStartSec);
   };
 
   let lastCueSecond = null;
   let cueCountThisSecond = 0;
+  const selected = [];
 
   for (let i = 0; i < total; i++) {
     const rec = records[i];
     const cueStartSec = computeStartSec(rec, i);
-    const nextStartSec = i + 1 < total ? computeStartSec(records[i + 1], i + 1) : null;
 
     const secBucket = Math.floor(cueStartSec);
     if (lastCueSecond !== secBucket) {
@@ -243,16 +237,36 @@ function writeSegmentVtt({
     }
     if (cueCountThisSecond >= maxCuesPerSecond) continue;
     cueCountThisSecond++;
+    selected.push({ rec, cueStartSec });
+  }
 
-    const dtSec = Number.isFinite(nextStartSec) && nextStartSec > cueStartSec
-      ? (nextStartSec - cueStartSec)
-      : 0.1;
-    const cueDur = clamp(dtSec * 1.2, minCueDurSec, maxCueDurSec);
+  // Ensure starts are strictly increasing to prevent overlap.
+  let prevStartSec = -Infinity;
+  for (const item of selected) {
+    let s = Number(item.cueStartSec);
+    if (!Number.isFinite(s)) s = 0;
+    if (s <= prevStartSec) s = Math.min(maxStartSec, prevStartSec + 0.001);
+    item.cueStartSec = s;
+    prevStartSec = s;
+  }
+
+  for (let i = 0; i < selected.length; i++) {
+    const { rec, cueStartSec } = selected[i];
+    const nextStartSec = i + 1 < selected.length ? selected[i + 1].cueStartSec : null;
+
+    let cueEndSec;
+    if (Number.isFinite(nextStartSec) && nextStartSec > cueStartSec) {
+      // End exactly at the next cue start: no overlap.
+      cueEndSec = Math.min(segDur, nextStartSec);
+    } else {
+      cueEndSec = Math.min(segDur, cueStartSec + clamp(minCueDurSec, 0.001, maxCueDurSec));
+    }
+    if (!(cueEndSec > cueStartSec)) {
+      cueEndSec = Math.min(segDur, cueStartSec + 0.001);
+    }
+
     const cueStartGlobalSec = Math.max(0, Number(segmentOffsetSec) + cueStartSec);
-    const cueEndGlobalSec = Math.min(
-      Math.max(0, Number(segmentOffsetSec) + segDur),
-      cueStartGlobalSec + cueDur
-    );
+    const cueEndGlobalSec = Math.min(Math.max(0, Number(segmentOffsetSec) + segDur), Number(segmentOffsetSec) + cueEndSec);
     const payload = buildVttCuePayload(rec.decoded);
 
     cues.push(

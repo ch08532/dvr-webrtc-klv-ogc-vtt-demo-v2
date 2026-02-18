@@ -19,11 +19,6 @@ function normalizeSegmentSeconds(value) {
   return n;
 }
 
-function buildHlsFlags() {
-  // independent_segments + temp_file avoids clients reading partial/incomplete segments.
-  return "append_list+program_date_time+independent_segments+temp_file";
-}
-
 function formatCommand(cmd, args) {
   const parts = [cmd, ...args].map((p) => JSON.stringify(String(p)));
   return parts.join(" ");
@@ -57,13 +52,21 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const playlist = path.join(outDir, "playlist.m3u8");
   const segmentFilename = "playlist%d.ts";
 
-  const base = [
-    "-hide_banner", "-loglevel", "warning",
-    "-copy_unknown",
-    "-fflags", "nobuffer", "-flags", "low_delay",
-    ...videoProfile.inputArgs,
-    "-i", inputUrl
-  ];
+const base = [
+  "-hide_banner", "-loglevel", "warning",
+
+  // good monotonic timestamps without hard wallclock pacing
+  "-fflags", "+genpts",
+  "-avoid_negative_ts", "make_zero",
+
+  // UDP jitter absorption (tune fifo_size as needed)
+  // if inputUrl is udp://... keep these:
+   "-probesize", "32M", "-analyzeduration", "2M",
+
+  "-copy_unknown",
+  ...videoProfile.inputArgs,
+  "-i", inputUrl
+];
 
   const mediaOut = [
     // Fixed encode path (mode is forced to xcode-any).
@@ -79,9 +82,9 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
 
   const hls = [
     "-f", "hls",
+    "-start_number", "0",
     "-hls_time", String(segmentSeconds),
     "-hls_list_size", String(listSize),
-    //"-hls_flags", buildHlsFlags(),
     "-hls_segment_type", "mpegts",
     "-hls_segment_filename", segmentFilename,
     playlist
@@ -101,8 +104,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     encoder: videoProfile.encoder,
     mapDataStreams: true,
     hlsSegmentType: "mpegts",
-    hlsSegmentFilename: segmentFilename,
-    hlsFlags: buildHlsFlags()
+    hlsSegmentFilename: segmentFilename
   });
   log.info("ffmpeg_command", {
     requestId,
