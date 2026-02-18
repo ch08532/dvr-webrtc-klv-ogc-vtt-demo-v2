@@ -5,7 +5,8 @@
   "type": "module",
   "main": "streamer.js",
   "scripts": {
-    "start": "node streamer.js -i ../videos/t10.ts --loop"
+    "start": "node streamer.js -i ../videos/t10.ts --loop",
+    "start2": "node streamer.js -i sample.ts --loop"
   },
   "dependencies": {
     "commander": "^12.1.0"

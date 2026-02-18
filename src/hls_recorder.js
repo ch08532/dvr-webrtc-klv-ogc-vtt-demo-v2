@@ -56,8 +56,10 @@ const base = [
   "-hide_banner", "-loglevel", "warning",
 
   // good monotonic timestamps without hard wallclock pacing
+  //"-fflags", "+genpts",
+  //"-avoid_negative_ts", "make_zero",
   "-fflags", "+genpts",
-  "-avoid_negative_ts", "make_zero",
+  "-use_wallclock_as_timestamps", "1",
 
   // UDP jitter absorption (tune fifo_size as needed)
   // if inputUrl is udp://... keep these:
