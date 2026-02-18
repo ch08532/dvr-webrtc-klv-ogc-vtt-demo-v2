@@ -41,6 +41,8 @@ function App() {
     currentSegmentSequence: null,
     currentSegmentUri: null,
     currentSubtitleUri: null,
+    currentTimeSec: null,
+    durationSec: null,
     error: null
   });
   const [liveStatus, setLiveStatus] = useState('Idle');
@@ -99,6 +101,8 @@ function App() {
       currentSegmentSequence: null,
       currentSegmentUri: null,
       currentSubtitleUri: null,
+      currentTimeSec: null,
+      durationSec: null,
       error: null
     }));
     setDvrStatus('No media');
@@ -153,6 +157,8 @@ function App() {
       currentSegmentSequence: null,
       currentSegmentUri: null,
       currentSubtitleUri: null,
+      currentTimeSec: null,
+      durationSec: null,
       error: 'server offline'
     });
     setHlsMediaLoaded(false);
@@ -684,6 +690,8 @@ function App() {
         currentSegmentSequence: null,
         currentSegmentUri: null,
         currentSubtitleUri: null,
+        currentTimeSec: null,
+        durationSec: null,
         error: null
       });
       cleanupWebRtcPlayback();
@@ -866,6 +874,12 @@ function App() {
     }
   };
 
+  const formatPlayerTime = (seconds) => {
+    const n = Number(seconds);
+    if (!Number.isFinite(n)) return 'n/a';
+    return `${n.toFixed(2)}s`;
+  };
+
   const getCurrentHlsPlaylistInfo = (player = null) => {
     const subtitleUriForSegmentUri = (segmentUri) => {
       const raw = String(segmentUri || '').trim();
@@ -891,7 +905,9 @@ function App() {
         currentPlaylistResolvedUri: null,
         currentSegmentSequence: null,
         currentSegmentUri: null,
-        currentSubtitleUri: null
+        currentSubtitleUri: null,
+        currentTimeSec: null,
+        durationSec: null
       };
     }
 
@@ -900,7 +916,26 @@ function App() {
     let currentSegmentSequence = null;
     let currentSegmentUri = null;
     let currentSubtitleUri = null;
+    let currentTimeSec = null;
+    let durationSec = null;
     try {
+      const now = Number(p.currentTime?.());
+      if (Number.isFinite(now)) currentTimeSec = now;
+      const dur = Number(p.duration?.());
+      const seekBoundsNow = getHlsSeekBounds(p);
+      const seekStartNow = Number(seekBoundsNow?.start);
+      const seekEndNow = Number(seekBoundsNow?.end);
+      const seekWindowDur = Number.isFinite(seekStartNow) && Number.isFinite(seekEndNow)
+        ? Math.max(0, seekEndNow - seekStartNow)
+        : null;
+      if (Number.isFinite(dur) && dur > 0) {
+        durationSec = dur;
+      } else if (Number.isFinite(seekWindowDur) && seekWindowDur > 0) {
+        durationSec = seekWindowDur;
+      } else if (Number.isFinite(now) && now > 0) {
+        durationSec = now;
+      }
+
       const tech = p.tech?.({ IWillNotUseThisInPlugins: true });
       const vhs = tech?.vhs || p.vhs || null;
       const mediaPlaylist = vhs?.playlists?.media?.();
@@ -950,7 +985,9 @@ function App() {
       currentPlaylistResolvedUri,
       currentSegmentSequence,
       currentSegmentUri,
-      currentSubtitleUri
+      currentSubtitleUri,
+      currentTimeSec,
+      durationSec
     };
   };
 
@@ -963,7 +1000,9 @@ function App() {
       currentPlaylistResolvedUri: info.currentPlaylistResolvedUri,
       currentSegmentSequence: info.currentSegmentSequence,
       currentSegmentUri: info.currentSegmentUri,
-      currentSubtitleUri: info.currentSubtitleUri
+      currentSubtitleUri: info.currentSubtitleUri,
+      currentTimeSec: info.currentTimeSec,
+      durationSec: info.durationSec
     }));
   };
 
@@ -1023,6 +1062,8 @@ function App() {
       currentSegmentSequence: null,
       currentSegmentUri: null,
       currentSubtitleUri: null,
+      currentTimeSec: null,
+      durationSec: null,
       error: null
     });
 
@@ -1135,6 +1176,9 @@ function App() {
       });
       window.player.on('seeked', () => {
         setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
+        refreshDvrPlaybackInfo(window.player);
+      });
+      window.player.on('timeupdate', () => {
         refreshDvrPlaybackInfo(window.player);
       });
       window.player.on('pause', () => {
@@ -1699,6 +1743,9 @@ function App() {
                         <Text size="xs" c="red" mb="xs">error: {dvrDiag.error}</Text>
                       ) : null}
                       <div ref={dvrVideoHostRef} style={{ width: '100%', minHeight: '180px' }} />
+                      <Text size="xs" c="dimmed" mt="xs">
+                        player time: {formatPlayerTime(dvrDiag.currentTimeSec)} / {formatPlayerTime(dvrDiag.durationSec)}
+                      </Text>
                       {activeTab === 'dvr' && hlsMediaLoaded ? (
                         <Group mt="xs">
                           <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
