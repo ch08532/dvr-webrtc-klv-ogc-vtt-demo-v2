@@ -52,47 +52,83 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const playlist = path.join(outDir, "playlist.m3u8");
   const segmentFilename = "playlist%d.ts";
 
-const base = [
-  "-hide_banner", "-loglevel", "warning",
+  // --- INPUT / BASE ---
+  const base = [
+    "-hide_banner",
+    "-loglevel", "warning",
 
-  // good monotonic timestamps without hard wallclock pacing
-  //"-fflags", "+genpts",
-  //"-avoid_negative_ts", "make_zero",
-  "-fflags", "+genpts",
-  "-use_wallclock_as_timestamps", "1",
+    // You said wallclock was the only way that kept KLV in sync in your source.
+    "-use_wallclock_as_timestamps", "1",
+    "-fflags", "+genpts",
+    "-avoid_negative_ts", "make_zero",
 
-  // UDP jitter absorption (tune fifo_size as needed)
-  // if inputUrl is udp://... keep these:
-   "-probesize", "32M", "-analyzeduration", "2M",
+    // Tune probing (TS/KLV)
+    "-probesize", "32M",
+    "-analyzeduration", "2M",
 
-  "-copy_unknown",
-  ...videoProfile.inputArgs,
-  "-i", inputUrl
-];
+    // UDP smoothing (safe even if not udp://; ffmpeg ignores when not applicable)
+    "-fifo_size", "2000000",
+    "-overrun_nonfatal", "1",
 
-  const mediaOut = [
-    // Fixed encode path (mode is forced to xcode-any).
-    // Include optional input data streams (e.g., KLV) into TS output.
-    "-map", "0:v:0",
-    "-map", "0:d?",
-    "-an",
-    "-sn",
-    ...videoProfile.videoArgs,
-    "-c:d", "copy",
-    "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`
+    // Preserve unknown streams (helps with KLV carriage)
+    "-copy_unknown",
+
+    "-i", inputUrl,
   ];
 
+  // --- STREAM SELECTION + ENCODE/COPY ---
+  const mediaOut = [
+    // Video + ALL data streams (KLV)
+    "-map", "0:v:0",
+    "-map", "0:d?",
+
+    // No audio/subs
+    "-an",
+    "-sn",
+
+    // Your chosen video path (copy or encode)
+    ...videoProfile.videoArgs,
+
+    // Copy data streams as-is
+    "-c:d", "copy",
+
+    // If you are encoding video, keep your forced keyframes:
+    // (If you are video-copying, this option won’t apply / will be ignored)
+    "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`,
+  ];
+
+  // --- MUX TUNING (helps smoothness + interleaving) ---
+  const muxTuning = [
+    "-muxpreload", "0",
+    "-muxdelay", "0",
+  ];
+
+  // --- HLS OUTPUT ---
   const hls = [
     "-f", "hls",
+
     "-start_number", "0",
     "-hls_time", String(segmentSeconds),
     "-hls_list_size", String(listSize),
+
     "-hls_segment_type", "mpegts",
+
+    // Makes segments more seek/player-friendly when segment boundaries are keyframes
+    "-hls_flags", "independent_segments",
+
     "-hls_segment_filename", segmentFilename,
+
     playlist
   ];
 
-  const args = [...base, ...mediaOut, ...hls];
+  // --- FINAL ARG LIST (what you pass to spawn) ---
+  const args = [
+    ...base,
+    ...mediaOut,
+    ...muxTuning,
+    ...hls
+  ];
+
   log.info("start", {
     requestId,
     streamId,
