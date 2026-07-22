@@ -2,12 +2,21 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse } from '@mantine/core';
+import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select } from '@mantine/core';
 import { Device } from 'mediasoup-client';
+import { HLS_RENDITIONS } from './hls_ladder.js';
 
 const theme = createTheme({
   /** Put your mantine theme override here */
 });
+
+const HLS_QUALITY_OPTIONS = [
+  { value: 'auto', label: 'Auto (adaptive)' },
+  ...[...HLS_RENDITIONS].sort((a, b) => a.bandwidth - b.bandwidth).map((rendition) => ({
+    value: rendition.id,
+    label: `${rendition.id} (${rendition.videoBitrate})`
+  }))
+];
 
 function App() {
   const [streamId, setStreamId] = useState('stream1');
@@ -33,6 +42,8 @@ function App() {
   const [activeTab, setActiveTab] = useState('dvr');
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
+  const [hlsQuality, setHlsQuality] = useState('auto');
+  const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
   const [dvrDiag, setDvrDiag] = useState({
     currentSrc: null,
@@ -43,6 +54,8 @@ function App() {
     currentSubtitleUri: null,
     currentTimeSec: null,
     durationSec: null,
+    decodedVideoWidth: null,
+    decodedVideoHeight: null,
     error: null
   });
   const [liveStatus, setLiveStatus] = useState('Idle');
@@ -72,6 +85,7 @@ function App() {
   const vttDiscoverTimerRef = useRef(null);
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
+  const hlsQualityRef = useRef('auto');
   const webrtcRetryTimerRef = useRef(null);
   const webrtcRetryTokenRef = useRef(0);
   const webrtcTransportRef = useRef(null);
@@ -369,6 +383,7 @@ function App() {
     }
     videoRef.current = null;
     setHlsMediaLoaded(false);
+    setHlsQualityControlAvailable(false);
     vttHookedRef.current = false;
   };
 
@@ -799,6 +814,49 @@ function App() {
     return window.player;
   };
 
+  const getHlsRepresentations = (player = getActiveHlsPlayer()) => {
+    if (!player) return [];
+    try {
+      const representations = player.tech?.()?.vhs?.representations?.();
+      return Array.isArray(representations) ? representations : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const applyHlsQuality = (quality) => {
+    const representations = getHlsRepresentations();
+    if (!representations.length) {
+      setHlsQualityControlAvailable(false);
+      return false;
+    }
+
+    const target = HLS_RENDITIONS.find((rendition) => rendition.id === quality);
+    let matched = quality === 'auto';
+    for (const representation of representations) {
+      const enabled = quality === 'auto' || (
+        representation.width === target?.width && representation.height === target?.height
+      );
+      if (enabled) matched = true;
+      try { representation.enabled(enabled); } catch {}
+    }
+
+    if (!matched) {
+      for (const representation of representations) {
+        try { representation.enabled(true); } catch {}
+      }
+    }
+    setHlsQualityControlAvailable(true);
+    return matched;
+  };
+
+  const handleHlsQualityChange = (value) => {
+    const quality = value || 'auto';
+    hlsQualityRef.current = quality;
+    setHlsQuality(quality);
+    applyHlsQuality(quality);
+  };
+
   const hasLoadedHlsMedia = (player) => {
     if (!player || player.isDisposed?.()) return false;
     const readyState = Number(player.readyState?.());
@@ -918,6 +976,8 @@ function App() {
     let currentSubtitleUri = null;
     let currentTimeSec = null;
     let durationSec = null;
+    let decodedVideoWidth = null;
+    let decodedVideoHeight = null;
     try {
       const now = Number(p.currentTime?.());
       if (Number.isFinite(now)) currentTimeSec = now;
@@ -937,6 +997,11 @@ function App() {
       }
 
       const tech = p.tech?.({ IWillNotUseThisInPlugins: true });
+      const videoEl = tech?.el?.() || p.el?.()?.querySelector?.('video');
+      const videoWidth = Number(videoEl?.videoWidth);
+      const videoHeight = Number(videoEl?.videoHeight);
+      if (Number.isFinite(videoWidth) && videoWidth > 0) decodedVideoWidth = videoWidth;
+      if (Number.isFinite(videoHeight) && videoHeight > 0) decodedVideoHeight = videoHeight;
       const vhs = tech?.vhs || p.vhs || null;
       const mediaPlaylist = vhs?.playlists?.media?.();
       if (mediaPlaylist) {
@@ -987,7 +1052,9 @@ function App() {
       currentSegmentUri,
       currentSubtitleUri,
       currentTimeSec,
-      durationSec
+      durationSec,
+      decodedVideoWidth,
+      decodedVideoHeight
     };
   };
 
@@ -1002,7 +1069,9 @@ function App() {
       currentSegmentUri: info.currentSegmentUri,
       currentSubtitleUri: info.currentSubtitleUri,
       currentTimeSec: info.currentTimeSec,
-      durationSec: info.durationSec
+      durationSec: info.durationSec,
+      decodedVideoWidth: info.decodedVideoWidth,
+      decodedVideoHeight: info.decodedVideoHeight
     }));
   };
 
@@ -1054,6 +1123,7 @@ function App() {
 
     const url = `/hls/${encodeURIComponent(streamId)}/master.m3u8`;
     setHlsMediaLoaded(false);
+    setHlsQualityControlAvailable(false);
     setDvrStatus('Connecting...');
     setDvrDiag({
       currentSrc: url,
@@ -1078,6 +1148,7 @@ function App() {
         setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
         setDvrDiag((prev) => ({ ...prev, error: null }));
         refreshDvrPlaybackInfo(window.player);
+        applyHlsQuality(hlsQualityRef.current);
         window.player.play().catch(() => {});
         hookVttOverlaySoon();
         return;
@@ -1121,6 +1192,8 @@ function App() {
       window.player = window.videojs(videoRef.current, {
         controls: true,
         liveui: true,
+        fluid: true,
+        aspectRatio: '16:9',
         controlBar: {
           progressControl: true,
           subsCapsButton: false
@@ -1151,12 +1224,14 @@ function App() {
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(window.player);
+        applyHlsQuality(hlsQualityRef.current);
       });
       window.player.on('canplay', () => {
         forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(window.player);
+        applyHlsQuality(hlsQualityRef.current);
       });
       window.player.on('playing', () => {
         setHlsMediaLoaded(true);
@@ -1193,6 +1268,7 @@ function App() {
       });
       window.player.on('dispose', () => {
         setHlsMediaLoaded(false);
+        setHlsQualityControlAvailable(false);
         setDvrStatus('Idle');
       });
 
@@ -1209,6 +1285,7 @@ function App() {
 
       window.player.ready(() => {
         forceHideCaptionTracks(window.player);
+        applyHlsQuality(hlsQualityRef.current);
         window.player.play().catch(() => {});
         refreshDvrPlaybackInfo(window.player);
         hookVttOverlaySoon();
@@ -1598,6 +1675,11 @@ function App() {
   const liveKlvOverlayEntries = overlayData?.mode === 'live-ws'
     ? Object.entries(overlayData)
     : [];
+  const activeHlsRendition = HLS_RENDITIONS.find((rendition) => (
+    [dvrDiag.currentPlaylistUri, dvrDiag.currentPlaylistResolvedUri]
+      .filter(Boolean)
+      .some((uri) => String(uri).includes(rendition.playlist))
+  ));
   const statusParsed = parseStatusPayload(status);
 
   return (
@@ -1733,8 +1815,33 @@ function App() {
                         <Text size="sm" c="dimmed">Status: {dvrStatus}</Text>
                         <Badge color={dvrBadge.color} variant="light">{dvrBadge.label}</Badge>
                       </Group>
+                      <Group gap="xs" mb="xs" align="flex-end">
+                        <Select
+                          label="Video quality"
+                          data={HLS_QUALITY_OPTIONS}
+                          value={hlsQuality}
+                          onChange={handleHlsQualityChange}
+                          allowDeselect={false}
+                          disabled={hlsMediaLoaded && !hlsQualityControlAvailable}
+                          w={180}
+                        />
+                        <Text size="xs" c="dimmed" pb={6}>
+                          {hlsQualityControlAvailable
+                            ? 'Auto switches based on network conditions.'
+                            : hlsMediaLoaded
+                              ? 'Manual selection is unavailable with native HLS playback.'
+                              : 'Manual selection becomes available when the HLS player is ready.'}
+                        </Text>
+                      </Group>
                       <Text size="xs" c="dimmed" mb="xs">
                         source: {dvrDiag.currentSrc || 'n/a'} | playlist: {dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri || 'n/a'}
+                      </Text>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        active rendition: {activeHlsRendition
+                          ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.videoBitrate}`
+                          : 'n/a'} | decoded: {dvrDiag.decodedVideoWidth && dvrDiag.decodedVideoHeight
+                          ? `${dvrDiag.decodedVideoWidth}×${dvrDiag.decodedVideoHeight}`
+                          : 'n/a'}
                       </Text>
                       <Text size="xs" c="dimmed" mb="xs">
                         segment: {dvrDiag.currentSegmentSequence != null ? dvrDiag.currentSegmentSequence : 'n/a'}{dvrDiag.currentSegmentUri ? ` (${dvrDiag.currentSegmentUri})` : ''} | subtitle: {dvrDiag.currentSubtitleUri || 'n/a'}

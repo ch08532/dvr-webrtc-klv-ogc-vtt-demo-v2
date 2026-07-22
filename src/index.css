@@ -7,3 +7,7 @@
 .video-js .vjs-text-track-display {
   display: none !important;
 }
+
+.video-js.vjs-fluid {
+  width: 100%;
+}

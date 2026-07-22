@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { createServiceLogger, serializeError } from "./service_logger.js";
 import { buildVideoArgs } from "./ffmpeg_video.js";
+import { HLS_RENDITIONS } from "./hls_ladder.js";
 
 const log = createServiceLogger("hls_recorder");
 const TRANSIENT_INPUT_WARNING_RE = /Invalid frame dimensions 0x0\./i;
@@ -41,16 +43,45 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
+function buildLadderFilter() {
+  const metadataInputIndex = HLS_RENDITIONS.length;
+  const splitLabels = Array.from(
+    { length: HLS_RENDITIONS.length + 1 },
+    (_, index) => `[input${index}]`
+  ).join("");
+  const filters = [`[0:v:0]split=${HLS_RENDITIONS.length + 1}${splitLabels}`];
+
+  HLS_RENDITIONS.forEach((rendition, index) => {
+    filters.push(
+      `[input${index}]scale=${rendition.width}:${rendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[video${index}]`
+    );
+  });
+  const metadataRendition = HLS_RENDITIONS[0];
+  filters.push(
+    `[input${metadataInputIndex}]scale=${metadataRendition.width}:${metadataRendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${metadataRendition.width}:${metadataRendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[metadata]`
+  );
+
+  return filters.join(";");
+}
+
 export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId }) {
   const requestedMode = normalizeMode(mode);
   const chosen = "xcode-any";
   const videoProfile = buildVideoArgs(chosen);
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
+  const inputProtocolArgs = /^udp:\/\//i.test(inputUrl)
+    ? ["-fifo_size", "2000000", "-overrun_nonfatal", "1"]
+    : [];
 
   // Keep the full history in the playlist.
   const listSize = 0;
-  const playlist = path.join(outDir, "playlist.m3u8");
-  const segmentFilename = "playlist%d.ts";
+  const abrPlaylist = path.join(outDir, "v%v", "index.m3u8");
+  const abrSegmentFilename = path.join(outDir, "v%v", "segment_%06d.ts");
+  const metadataPlaylist = path.join(outDir, "playlist.m3u8");
+  const metadataSegmentFilename = path.join(outDir, "playlist%d.ts");
+  for (const rendition of HLS_RENDITIONS) {
+    fs.mkdirSync(path.join(outDir, path.dirname(rendition.playlist)), { recursive: true });
+  }
 
   // --- INPUT / BASE ---
   const base = [
@@ -66,9 +97,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-probesize", "32M",
     "-analyzeduration", "2M",
 
-    // UDP smoothing (safe even if not udp://; ffmpeg ignores when not applicable)
-    "-fifo_size", "2000000",
-    "-overrun_nonfatal", "1",
+    ...inputProtocolArgs,
 
     // Preserve unknown streams (helps with KLV carriage)
     "-copy_unknown",
@@ -76,57 +105,60 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-i", inputUrl,
   ];
 
-  // --- STREAM SELECTION + ENCODE/COPY ---
-  const mediaOut = [
-    // Video + ALL data streams (KLV)
-    "-map", "0:v:0",
+  const metadataRendition = HLS_RENDITIONS[0];
+  const metadataOutput = [
+    "-map", "[metadata]",
     "-map", "0:d?",
-
-    // No audio/subs
     "-an",
     "-sn",
-
-    // Your chosen video path (copy or encode)
     ...videoProfile.videoArgs,
-
-    // Copy data streams as-is
+    "-b:v", metadataRendition.videoBitrate,
+    "-maxrate:v", metadataRendition.maxRate,
+    "-bufsize:v", metadataRendition.bufferSize,
     "-c:d", "copy",
-
-    // If you are encoding video, keep your forced keyframes:
-    // (If you are video-copying, this option won’t apply / will be ignored)
     "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`,
-  ];
-
-  // --- MUX TUNING (helps smoothness + interleaving) ---
-  const muxTuning = [
     "-muxpreload", "0",
     "-muxdelay", "0",
-  ];
-
-  // --- HLS OUTPUT ---
-  const hls = [
     "-f", "hls",
-
     "-start_number", "0",
     "-hls_time", String(segmentSeconds),
     "-hls_list_size", String(listSize),
-
     "-hls_segment_type", "mpegts",
+    "-hls_flags", "independent_segments+program_date_time",
+    "-hls_segment_filename", metadataSegmentFilename,
+    metadataPlaylist
+  ];
 
-    // Makes segments more seek/player-friendly when segment boundaries are keyframes
-    "-hls_flags", "independent_segments",
-
-    "-hls_segment_filename", segmentFilename,
-
-    playlist
+  const abrOutput = [
+    ...HLS_RENDITIONS.flatMap((_, index) => ["-map", `[video${index}]`]),
+    "-an",
+    "-sn",
+    ...videoProfile.videoArgs,
+    ...HLS_RENDITIONS.flatMap((rendition, index) => [
+      `-b:v:${index}`, rendition.videoBitrate,
+      `-maxrate:v:${index}`, rendition.maxRate,
+      `-bufsize:v:${index}`, rendition.bufferSize
+    ]),
+    "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`,
+    "-muxpreload", "0",
+    "-muxdelay", "0",
+    "-f", "hls",
+    "-start_number", "0",
+    "-hls_time", String(segmentSeconds),
+    "-hls_list_size", String(listSize),
+    "-hls_segment_type", "mpegts",
+    "-hls_flags", "independent_segments+program_date_time",
+    "-hls_segment_filename", abrSegmentFilename,
+    "-var_stream_map", HLS_RENDITIONS.map((_, index) => `v:${index}`).join(" "),
+    abrPlaylist
   ];
 
   // --- FINAL ARG LIST (what you pass to spawn) ---
   const args = [
     ...base,
-    ...mediaOut,
-    ...muxTuning,
-    ...hls
+    "-filter_complex", buildLadderFilter(),
+    ...metadataOutput,
+    ...abrOutput
   ];
 
   log.info("start", {
@@ -140,9 +172,10 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     listSize,
     streamCopy: false,
     encoder: videoProfile.encoder,
-    mapDataStreams: true,
+    renditions: HLS_RENDITIONS.map(({ id, width, height, videoBitrate }) => ({ id, width, height, videoBitrate })),
+    metadataPlaylist,
     hlsSegmentType: "mpegts",
-    hlsSegmentFilename: segmentFilename
+    hlsSegmentFilename: abrSegmentFilename
   });
   log.info("ffmpeg_command", {
     requestId,

@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
+import { createHlsMasterPlaylist } from "./src/hls_ladder.js";
 import { startKlvStreamWorker, stopKlvStreamWorker } from "./src/klv_stream_worker_client.js";
 import { startSfuWorkerClient } from "./src/sfu_worker_client.js";
 import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
@@ -576,16 +577,10 @@ app.post("/sources", async (req, res) => {
     });
     setSourceState(streamId, { state: "starting", stage: "hls_started" });
 
-    // Write master playlist referencing subtitles + video
+    // Write the ABR master playlist before the recorder begins publishing variants.
     const masterPath = path.join(outDir, "master.m3u8");
     await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
-    await fs.promises.writeFile(masterPath, `#EXTM3U
-#EXT-X-VERSION:6
-#EXT-X-INDEPENDENT-SEGMENTS
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="KLV",AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subtitles.m3u8"
-#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="avc1.42e01f,wvtt",SUBTITLES="subs",CLOSED-CAPTIONS=NONE
-playlist.m3u8
-`);
+    await fs.promises.writeFile(masterPath, createHlsMasterPlaylist());
 
     // 2) KLV ingest + DB/VTT sidecar in dedicated worker process
     klvWorker = await startKlvStreamWorker({

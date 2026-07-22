@@ -91,6 +91,7 @@ Thumbs.db
 
 # Project specific
 recordings/
+videos/
 db/
 *.sqlite
 *.sqlite3

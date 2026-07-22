@@ -93,14 +93,6 @@ function vttFilenameForSegment(segmentUri) {
   return `meta_${base}.vtt`;
 }
 
-function segmentIndexFromUri(segmentUri) {
-  const base = path.basename(segmentUri, path.extname(segmentUri));
-  const match = base.match(/(\d+)$/);
-  if (!match) return null;
-  const n = Number(match[1]);
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
-
 function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entries }) {
   const subtitlePlaylistPath = path.join(outDir, "subtitles.m3u8");
   const target = Math.max(1, Math.ceil(Number(targetDurationSec) || 1));
@@ -194,32 +186,52 @@ function buildVttCuePayload(payload) {
 function writeSegmentVtt({
   outPath,
   durationSec,
-  segmentStartMs,
-  segmentOffsetSec,
+  carrierOffsetSec,
+  sourceTimelineBaseMs,
+  sourceTimelineStartSec,
+  videoSegmentOffsetSec,
+  transportTimelineBasePts90k,
   records,
   maxCuesPerSecond,
   minCueDurSec,
   maxCueDurSec
 }) {
   const segDur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 5;
-  const maxStartSec = Math.max(0, segDur - 0.001);
   const cues = [];
   const total = records.length;
+  const segmentTransportStartPts90k = records
+    .map((record) => Number(record.transportSegmentStartPts90k))
+    .find((pts90k) => Number.isFinite(pts90k));
+  const hasTransportTimeline = Number.isFinite(transportTimelineBasePts90k)
+    && Number.isFinite(segmentTransportStartPts90k);
+  const segmentTimelineStartSec = hasTransportTimeline
+    ? Math.max(0, (segmentTransportStartPts90k - transportTimelineBasePts90k) / 90_000)
+    : Math.max(0, Number(videoSegmentOffsetSec) || 0);
+  const segmentTimelineEndSec = segmentTimelineStartSec + segDur;
+  const maxStartSec = Math.max(segmentTimelineStartSec, segmentTimelineEndSec - 0.001);
   const finiteKlvTimes = records
+    .filter((r) => r.timeSource === "source_timestamp")
     .map((r) => Number(r.klvUnixMs))
     .filter((ms) => Number.isFinite(ms));
   const relBaseMs = finiteKlvTimes.length ? finiteKlvTimes[0] : null;
+  const relativeStartSec = clamp(segmentTimelineStartSec + (Number(carrierOffsetSec) || 0), segmentTimelineStartSec, maxStartSec);
+  const hasSourceTimeline = Number.isFinite(sourceTimelineBaseMs)
+    && Number.isFinite(sourceTimelineStartSec)
+    && Number.isFinite(videoSegmentOffsetSec);
 
   const computeStartSec = (record, index) => {
-    // Primary mapping: mission/source timestamp relative to segment start time.
-    if (Number.isFinite(record.klvUnixMs) && Number.isFinite(segmentStartMs)) {
-      return clamp((record.klvUnixMs - segmentStartMs) / 1000, 0, maxStartSec);
+    if (hasTransportTimeline && Number.isFinite(record.transportStreamPts90k)) {
+      return clamp((record.transportStreamPts90k - transportTimelineBasePts90k) / 90_000, segmentTimelineStartSec, maxStartSec);
+    }
+    if (hasSourceTimeline && record.timeSource === "source_timestamp" && Number.isFinite(record.klvUnixMs)) {
+      const globalSec = sourceTimelineStartSec + ((record.klvUnixMs - sourceTimelineBaseMs) / 1000);
+      return clamp(globalSec, segmentTimelineStartSec, maxStartSec);
     }
     if (Number.isFinite(record.klvUnixMs) && Number.isFinite(relBaseMs)) {
-      return clamp((record.klvUnixMs - relBaseMs) / 1000, 0, maxStartSec);
+      return clamp(relativeStartSec + ((record.klvUnixMs - relBaseMs) / 1000), segmentTimelineStartSec, maxStartSec);
     }
-    if (total <= 1) return 0;
-    return clamp((index / total) * segDur, 0, maxStartSec);
+    if (total <= 1) return relativeStartSec;
+    return clamp(relativeStartSec + ((index / total) * (segmentTimelineEndSec - relativeStartSec)), segmentTimelineStartSec, maxStartSec);
   };
 
   let lastCueSecond = null;
@@ -244,7 +256,7 @@ function writeSegmentVtt({
   let prevStartSec = -Infinity;
   for (const item of selected) {
     let s = Number(item.cueStartSec);
-    if (!Number.isFinite(s)) s = 0;
+    if (!Number.isFinite(s)) s = segmentTimelineStartSec;
     if (s <= prevStartSec) s = Math.min(maxStartSec, prevStartSec + 0.001);
     item.cueStartSec = s;
     prevStartSec = s;
@@ -257,20 +269,18 @@ function writeSegmentVtt({
     let cueEndSec;
     if (Number.isFinite(nextStartSec) && nextStartSec > cueStartSec) {
       // End exactly at the next cue start: no overlap.
-      cueEndSec = Math.min(segDur, nextStartSec);
+      cueEndSec = Math.min(segmentTimelineEndSec, nextStartSec);
     } else {
-      cueEndSec = Math.min(segDur, cueStartSec + clamp(minCueDurSec, 0.001, maxCueDurSec));
+      cueEndSec = Math.min(segmentTimelineEndSec, cueStartSec + clamp(minCueDurSec, 0.001, maxCueDurSec));
     }
     if (!(cueEndSec > cueStartSec)) {
-      cueEndSec = Math.min(segDur, cueStartSec + 0.001);
+      cueEndSec = Math.min(segmentTimelineEndSec, cueStartSec + 0.001);
     }
 
-    const cueStartGlobalSec = Math.max(0, Number(segmentOffsetSec) + cueStartSec);
-    const cueEndGlobalSec = Math.min(Math.max(0, Number(segmentOffsetSec) + segDur), Number(segmentOffsetSec) + cueEndSec);
     const payload = buildVttCuePayload(rec.decoded);
 
     cues.push(
-      `${vttTime(cueStartGlobalSec)} --> ${vttTime(cueEndGlobalSec)}\n${safeJson(payload)}\n\n`
+      `${vttTime(cueStartSec)} --> ${vttTime(cueEndSec)}\n${safeJson(payload)}\n\n`
     );
   }
 
@@ -279,11 +289,32 @@ function writeSegmentVtt({
   fs.writeFileSync(outPath, content);
 }
 
-async function processSegmentEntry(current, entry, segmentOffsetSec) {
-  const tsPath = path.join(current.outDir, entry.uri);
+function findCarrierEntry(videoEntry, carrierEntries) {
+  const sameSequence = carrierEntries.find((entry) => entry.sequence === videoEntry.sequence);
+  if (sameSequence) return sameSequence;
+
+  if (!Number.isFinite(videoEntry.pdtMs)) return null;
+  const maxDifferenceMs = Math.max(1, Number(videoEntry.durationSec) || 1) * 2_000;
+  let closest = null;
+  let closestDifferenceMs = Infinity;
+
+  for (const entry of carrierEntries) {
+    if (!Number.isFinite(entry.pdtMs)) continue;
+    const differenceMs = Math.abs(entry.pdtMs - videoEntry.pdtMs);
+    if (differenceMs < closestDifferenceMs) {
+      closest = entry;
+      closestDifferenceMs = differenceMs;
+    }
+  }
+
+  return closestDifferenceMs <= maxDifferenceMs ? closest : null;
+}
+
+async function processSegmentEntry(current, videoEntry, carrierEntry, videoSegmentOffsetSec) {
+  const tsPath = path.join(current.outDir, carrierEntry.uri);
   if (!fs.existsSync(tsPath)) return false;
 
-  const vttFile = vttFilenameForSegment(entry.uri);
+  const vttFile = vttFilenameForSegment(videoEntry.uri);
   const vttPath = path.join(current.outDir, vttFile);
   const decodedItems = await extractKlvFromTsFile({
     streamId: current.streamId,
@@ -298,15 +329,35 @@ async function processSegmentEntry(current, entry, segmentOffsetSec) {
     records.push({
       decoded: enriched.decoded,
       klvUnixMs: enriched.klvUnixMs,
-      timeSource: enriched.timeSource
+      timeSource: enriched.timeSource,
+      transportStreamPts90k: Number(decoded.transportStreamPts90k),
+      transportSegmentStartPts90k: Number(decoded.transportSegmentStartPts90k)
     });
+  }
+
+  const carrierOffsetSec = Number.isFinite(carrierEntry.pdtMs) && Number.isFinite(videoEntry.pdtMs)
+    ? (carrierEntry.pdtMs - videoEntry.pdtMs) / 1000
+    : 0;
+  const firstSourceRecord = records.find((record) => (
+    record.timeSource === "source_timestamp" && Number.isFinite(record.klvUnixMs)
+  ));
+  if (current.sourceTimelineBaseMs == null && firstSourceRecord) {
+    current.sourceTimelineBaseMs = firstSourceRecord.klvUnixMs;
+    current.sourceTimelineStartSec = videoSegmentOffsetSec + carrierOffsetSec;
+  }
+  const firstTransportRecord = records.find((record) => Number.isFinite(record.transportSegmentStartPts90k));
+  if (current.transportTimelineBasePts90k == null && firstTransportRecord) {
+    current.transportTimelineBasePts90k = firstTransportRecord.transportSegmentStartPts90k;
   }
 
   writeSegmentVtt({
     outPath: vttPath,
-    durationSec: entry.durationSec,
-    segmentStartMs: entry.pdtMs,
-    segmentOffsetSec,
+    durationSec: videoEntry.durationSec,
+    carrierOffsetSec,
+    sourceTimelineBaseMs: current.sourceTimelineBaseMs,
+    sourceTimelineStartSec: current.sourceTimelineStartSec,
+    videoSegmentOffsetSec,
+    transportTimelineBasePts90k: current.transportTimelineBasePts90k,
     records,
     maxCuesPerSecond: current.maxCuesPerSecond,
     minCueDurSec: current.minCueDurSec,
@@ -316,12 +367,25 @@ async function processSegmentEntry(current, entry, segmentOffsetSec) {
   log.debug("segment_processed", {
     requestId: current.requestId,
     streamId: current.streamId,
-    tsFile: entry.uri,
+    tsFile: carrierEntry.uri,
     vttFile,
-    segmentOffsetSec,
+    videoSequence: videoEntry.sequence,
+    carrierSequence: carrierEntry.sequence,
     decodedCount: decodedItems.length
   });
   return true;
+}
+
+function getVideoSegmentOffsetSec(current, videoEntry) {
+  if (current.timelineBaseSequence == null) current.timelineBaseSequence = videoEntry.sequence;
+  if (current.timelineBasePdtMs == null && Number.isFinite(videoEntry.pdtMs)) {
+    current.timelineBasePdtMs = videoEntry.pdtMs;
+  }
+  if (Number.isFinite(videoEntry.pdtMs) && Number.isFinite(current.timelineBasePdtMs)) {
+    return Math.max(0, (videoEntry.pdtMs - current.timelineBasePdtMs) / 1000);
+  }
+  const durationSec = Number(videoEntry.durationSec) || current.segmentSeconds;
+  return Math.max(0, (videoEntry.sequence - current.timelineBaseSequence) * durationSec);
 }
 
 async function processPendingSegments() {
@@ -329,39 +393,28 @@ async function processPendingSegments() {
   if (!current || current.processing) return;
   current.processing = true;
   try {
-    const parsed = parseVideoPlaylist(current.playlistPath);
-    if (!parsed || !parsed.entries.length) return;
+    const videoPlaylist = parseVideoPlaylist(current.videoPlaylistPath);
+    const carrierPlaylist = parseVideoPlaylist(current.carrierPlaylistPath);
+    if (!videoPlaylist || !carrierPlaylist || !videoPlaylist.entries.length || !carrierPlaylist.entries.length) return;
 
-    for (const entry of parsed.entries) {
-      if (current.lastProcessedSequence != null && entry.sequence <= current.lastProcessedSequence) {
+    for (const videoEntry of videoPlaylist.entries) {
+      if (current.lastProcessedSequence != null && videoEntry.sequence <= current.lastProcessedSequence) {
         continue;
       }
-      if (current.timelineBaseSequence == null) {
-        current.timelineBaseSequence = entry.sequence;
-      }
-      if (current.timelineBasePdtMs == null && Number.isFinite(entry.pdtMs)) {
-        current.timelineBasePdtMs = entry.pdtMs;
-      }
-      const durationHint = Number.isFinite(entry.durationSec) && entry.durationSec > 0
-        ? entry.durationSec
-        : current.segmentSeconds;
-      const segmentIndex = segmentIndexFromUri(entry.uri);
-      const segmentOffsetSec = Number.isFinite(segmentIndex)
-        ? Math.max(0, segmentIndex * current.segmentSeconds)
-        : Number.isFinite(entry.pdtMs) && Number.isFinite(current.timelineBasePdtMs)
-          ? Math.max(0, (entry.pdtMs - current.timelineBasePdtMs) / 1000)
-          : Math.max(0, (entry.sequence - current.timelineBaseSequence) * durationHint);
+      const carrierEntry = findCarrierEntry(videoEntry, carrierPlaylist.entries);
+      if (!carrierEntry) break;
+      const videoSegmentOffsetSec = getVideoSegmentOffsetSec(current, videoEntry);
 
-      const done = await processSegmentEntry(current, entry, segmentOffsetSec);
+      const done = await processSegmentEntry(current, videoEntry, carrierEntry, videoSegmentOffsetSec);
       if (!done) break;
-      current.lastProcessedSequence = entry.sequence;
+      current.lastProcessedSequence = videoEntry.sequence;
     }
 
     writeSubtitlePlaylist({
       outDir: current.outDir,
-      mediaSequence: parsed.mediaSequence,
-      targetDurationSec: parsed.targetDurationSec,
-      entries: parsed.entries
+      mediaSequence: videoPlaylist.mediaSequence,
+      targetDurationSec: videoPlaylist.targetDurationSec,
+      entries: videoPlaylist.entries
     });
   } catch (error) {
     send({
@@ -392,7 +445,8 @@ async function start(message) {
   const store = new SqliteKlvStore({ dbPath });
   await store.init();
 
-  const playlistPath = path.join(outDir, "playlist.m3u8");
+  const videoPlaylistPath = path.join(outDir, "v0", "index.m3u8");
+  const carrierPlaylistPath = path.join(outDir, "playlist.m3u8");
   const segmentPollTimer = setInterval(() => {
     processPendingSegments().catch(() => {});
   }, SEGMENT_POLL_MS);
@@ -402,7 +456,8 @@ async function start(message) {
     requestId,
     inputUrl,
     outDir,
-    playlistPath,
+    videoPlaylistPath,
+    carrierPlaylistPath,
     segmentSeconds,
     maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
     minCueDurSec: Number(minCueDurSec) || 0.10,
@@ -413,6 +468,9 @@ async function start(message) {
     lastProcessedSequence: null,
     timelineBaseSequence: null,
     timelineBasePdtMs: null,
+    sourceTimelineBaseMs: null,
+    sourceTimelineStartSec: null,
+    transportTimelineBasePts90k: null,
     liveIngestHandle: null
   };
 

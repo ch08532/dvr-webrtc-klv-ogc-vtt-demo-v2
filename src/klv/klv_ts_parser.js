@@ -125,8 +125,37 @@ function openInput(inputUrl) {
   return fs.createReadStream(inputUrl);
 }
 
+function readPesPts90k(payload) {
+  if (payload.length < 14) return null;
+  if (payload[0] !== 0x00 || payload[1] !== 0x00 || payload[2] !== 0x01) return null;
+
+  const ptsDtsFlags = (payload[7] >> 6) & 0x03;
+  if (ptsDtsFlags !== 0x02 && ptsDtsFlags !== 0x03) return null;
+
+  const p = 9;
+  return ((payload[p] & 0x0e) * 0x20000000)
+    + (payload[p + 1] * 0x400000)
+    + ((payload[p + 2] & 0xfe) * 0x4000)
+    + (payload[p + 3] * 0x80)
+    + ((payload[p + 4] & 0xfe) / 2);
+}
+
+function readPcr90k(packet) {
+  const adaptationFieldControl = (packet[3] >> 4) & 0x03;
+  if (adaptationFieldControl !== 0x02 && adaptationFieldControl !== 0x03) return null;
+  const adaptationFieldLength = packet[4];
+  if (adaptationFieldLength < 7 || packet.length < 12 || !(packet[5] & 0x10)) return null;
+
+  return (packet[6] * 0x2000000)
+    + (packet[7] * 0x20000)
+    + (packet[8] * 0x200)
+    + (packet[9] * 2)
+    + ((packet[10] & 0x80) >> 7)
+    + ((((packet[10] & 0x01) * 256) + packet[11]) / 300);
+}
+
 function scanForSt0601(buf, onDecoded, context = {}) {
-  const { streamId, requestId, pid } = context;
+  const { streamId, requestId, pid, pts90k } = context;
   let scanFrom = 0;
 
   while (true) {
@@ -159,23 +188,33 @@ function scanForSt0601(buf, onDecoded, context = {}) {
     }
 
     const decoded = decodeSt0601LocalSet(value);
-    if (Object.keys(decoded).length) onDecoded(decoded);
+    if (Object.keys(decoded).length) {
+      onDecoded(Number.isFinite(pts90k)
+        ? { ...decoded, transportStreamPts90k: pts90k }
+        : decoded);
+    }
 
     scanFrom = v1;
   }
 }
 
-function createTsKlvPacketHandler({ streamId, requestId, onDecoded }) {
+function createTsKlvPacketHandler({ streamId, requestId, onDecoded, onPesStart, onPcr }) {
   let pmtPid = null;
   let klvPids = null;
+  let lastPcr90k = null;
   const rolling = new Map();
+  const ptsByPid = new Map();
   const KEEP = 256 * 1024;
 
-  function append(pid, payload) {
+  function append(pid, payload, pusi) {
     const prev = rolling.get(pid) ?? Buffer.alloc(0);
     let buf = Buffer.concat([prev, payload]);
     if (buf.length > KEEP) buf = buf.subarray(buf.length - KEEP);
-    const remaining = scanForSt0601(buf, onDecoded, { streamId, requestId, pid });
+    const ptsFromPayload = pusi ? readPesPts90k(payload) : null;
+    if (Number.isFinite(ptsFromPayload)) ptsByPid.set(pid, ptsFromPayload);
+    else if (pusi) ptsByPid.delete(pid);
+    const pts90k = ptsByPid.get(pid) ?? lastPcr90k;
+    const remaining = scanForSt0601(buf, onDecoded, { streamId, requestId, pid, pts90k });
     rolling.set(pid, remaining);
     return remaining;
   }
@@ -183,6 +222,12 @@ function createTsKlvPacketHandler({ streamId, requestId, onDecoded }) {
   return (pkt) => {
     const h = parseTsHeader(pkt);
     if (!h || h.tei) return;
+
+    const pcr90k = readPcr90k(pkt);
+    if (Number.isFinite(pcr90k)) {
+      lastPcr90k = pcr90k;
+      onPcr?.({ pid: h.pid, pts90k: pcr90k });
+    }
 
     if (h.pid === 0x0000 && h.pusi) {
       const progs = parsePat(h.payload);
@@ -217,11 +262,16 @@ function createTsKlvPacketHandler({ streamId, requestId, onDecoded }) {
 
     if (!h.payload?.length) return;
 
+    if (h.pusi) {
+      const pts90k = readPesPts90k(h.payload);
+      if (Number.isFinite(pts90k)) onPesStart?.({ pid: h.pid, pts90k });
+    }
+
     if (klvPids?.size) {
       if (!klvPids.has(h.pid)) return;
-      append(h.pid, h.payload);
+      append(h.pid, h.payload, h.pusi);
     } else {
-      append(h.pid, h.payload);
+      append(h.pid, h.payload, h.pusi);
       if (rolling.size > 64) rolling.clear();
     }
   };
@@ -249,12 +299,23 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
 
 export async function extractKlvFromTsFile({ streamId, inputPath, requestId }) {
   const decodedItems = [];
+  let segmentStartPts90k = null;
   const input = fs.createReadStream(inputPath);
   const packetizer = new TsPacketizer();
   const onPacket = createTsKlvPacketHandler({
     streamId,
     requestId,
-    onDecoded: (decoded) => decodedItems.push(decoded)
+    onDecoded: (decoded) => decodedItems.push(decoded),
+    onPesStart: ({ pts90k }) => {
+      if (segmentStartPts90k == null || pts90k < segmentStartPts90k) {
+        segmentStartPts90k = pts90k;
+      }
+    },
+    onPcr: ({ pts90k }) => {
+      if (segmentStartPts90k == null || pts90k < segmentStartPts90k) {
+        segmentStartPts90k = pts90k;
+      }
+    }
   });
 
   return await new Promise((resolve, reject) => {
@@ -263,7 +324,10 @@ export async function extractKlvFromTsFile({ streamId, inputPath, requestId }) {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve(decodedItems);
+      const items = Number.isFinite(segmentStartPts90k)
+        ? decodedItems.map((item) => ({ ...item, transportSegmentStartPts90k: segmentStartPts90k }))
+        : decodedItems;
+      resolve(items);
     };
     const fail = (error) => {
       if (settled) return;
