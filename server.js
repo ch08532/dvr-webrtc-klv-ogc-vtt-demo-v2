@@ -10,7 +10,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
-import { createHlsMasterPlaylist } from "./src/hls_ladder.js";
+import { createHlsMasterPlaylist, createPassthroughHlsMasterPlaylist } from "./src/hls_ladder.js";
 import { finalizeKlvStreamWorker, startKlvStreamWorker, stopKlvStreamWorker } from "./src/klv_stream_worker_client.js";
 import { startSfuWorkerClient } from "./src/sfu_worker_client.js";
 import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
@@ -111,6 +111,44 @@ function normalizeSourceType(value) {
   return value === "file" ? "file" : "stream";
 }
 
+function normalizeHlsMode(value) {
+  return value === "abr" ? "abr" : "passthrough";
+}
+
+function normalizeWebRtcMode(value) {
+  if (value === "copy" || value === "transcode") return value;
+  return "auto";
+}
+
+function resolveHlsEncodeMode(hlsMode, probe) {
+  if (hlsMode === "abr") {
+    return { encoderMode: "xcode-any", effectiveMode: "abr", fallbackReason: null };
+  }
+
+  const videoCodec = String(probe?.video?.codec || "").toLowerCase();
+  const audioCodec = String(probe?.audio?.codec || "").toLowerCase();
+  if (videoCodec === "h264" && (!audioCodec || audioCodec === "aac")) {
+    return { encoderMode: "copy-h264", effectiveMode: "passthrough", fallbackReason: null };
+  }
+
+  const incompatibilities = [];
+  if (videoCodec !== "h264") incompatibilities.push(`video codec ${videoCodec || "unknown"}`);
+  if (audioCodec && audioCodec !== "aac") incompatibilities.push(`audio codec ${audioCodec}`);
+  return {
+    encoderMode: "xcode-single",
+    effectiveMode: "single-transcode",
+    fallbackReason: `${incompatibilities.join(" and ")} is not browser-compatible for HLS passthrough`
+  };
+}
+
+function resolveWebRtcEncodeMode(webRtcMode, probe) {
+  if (webRtcMode === "copy") return "copy-h264";
+  if (webRtcMode === "transcode") return "xcode-any";
+  return String(probe?.video?.codec || "").toLowerCase() === "h264"
+    ? "copy-h264"
+    : "xcode-any";
+}
+
 function resolveUploadedVideo(assetId) {
   if (typeof assetId !== "string" || !/^[a-f0-9-]{36}\.(?:ts|m2ts|mp4|mov|mkv)$/i.test(assetId)) {
     throw new Error("invalid uploaded video asset ID");
@@ -137,6 +175,7 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
   const format = ffprobeJson && typeof ffprobeJson === "object" ? ffprobeJson.format : null;
   const streams = Array.isArray(ffprobeJson?.streams) ? ffprobeJson.streams : [];
   const firstVideo = streams.find((s) => s && s.codec_type === "video") || null;
+  const firstAudio = streams.find((s) => s && s.codec_type === "audio") || null;
   const dataStreams = streams.filter((s) => s && s.codec_type === "data");
   const explicitKlvStreams = dataStreams.filter((s) => {
     const text = [
@@ -167,6 +206,10 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
     height: Number.isFinite(Number(firstVideo.height)) ? Number(firstVideo.height) : null,
     fps
   } : null;
+  const audio = firstAudio ? {
+    codec: firstAudio.codec_name || null,
+    codecLongName: firstAudio.codec_long_name || null
+  } : null;
 
   const klvCandidates = explicitKlvStreams.length ? explicitKlvStreams : dataStreams;
   const klv = {
@@ -187,6 +230,7 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
     container,
     durationSeconds: container?.durationSeconds ?? null,
     video,
+    audio,
     klv,
     streamCount: streams.length
   };
@@ -314,6 +358,12 @@ function getSourceRuntime(streamId) {
       running: false,
       sourceType: tracked?.sourceType || "stream",
       webRtcAvailable: tracked?.webRtcAvailable !== false,
+      hlsMode: tracked?.hlsMode || null,
+      hlsEffectiveMode: tracked?.hlsEffectiveMode || null,
+      hlsFallbackReason: tracked?.hlsFallbackReason || null,
+      webRtcMode: tracked?.webRtcMode || null,
+      hlsEncoderMode: tracked?.hlsEncoderMode || null,
+      webRtcEncoderMode: tracked?.webRtcEncoderMode || null,
       stage: tracked?.stage || null,
       durationSeconds: tracked?.durationSeconds ?? null,
       processedSeconds: tracked?.processedSeconds ?? null,
@@ -351,6 +401,12 @@ function getSourceRuntime(streamId) {
     running,
     sourceType: source.sourceType,
     webRtcAvailable: source.sourceType !== "file",
+    hlsMode: source.hlsMode,
+    hlsEffectiveMode: source.hlsEffectiveMode,
+    hlsFallbackReason: source.hlsFallbackReason,
+    webRtcMode: source.webRtcMode,
+    hlsEncoderMode: source.hlsEncoderMode,
+    webRtcEncoderMode: source.webRtcEncoderMode,
     stage: tracked?.stage || null,
     durationSeconds: tracked?.durationSeconds ?? null,
     processedSeconds: tracked?.processedSeconds ?? null,
@@ -552,6 +608,12 @@ app.get("/sources", (req, res) => {
     inputUrl: s.inputUrl,
     sourceType: s.sourceType,
     webRtcAvailable: s.sourceType !== "file",
+    hlsMode: s.hlsMode,
+    hlsEffectiveMode: s.hlsEffectiveMode,
+    hlsFallbackReason: s.hlsFallbackReason,
+    webRtcMode: s.webRtcMode,
+    hlsEncoderMode: s.hlsEncoderMode,
+    webRtcEncoderMode: s.webRtcEncoderMode,
     mode: s.mode,
     hlsSegmentSeconds: s.hlsSegmentSeconds,
     vttSegmentSeconds: s.vttSegmentSeconds,
@@ -568,6 +630,12 @@ app.get("/sources", (req, res) => {
       inputUrl: tracked?.inputUrl || null,
       sourceType: tracked?.sourceType || "stream",
       webRtcAvailable: tracked?.webRtcAvailable !== false,
+      hlsMode: tracked?.hlsMode || null,
+      hlsEffectiveMode: tracked?.hlsEffectiveMode || null,
+      hlsFallbackReason: tracked?.hlsFallbackReason || null,
+      webRtcMode: tracked?.webRtcMode || null,
+      hlsEncoderMode: tracked?.hlsEncoderMode || null,
+      webRtcEncoderMode: tracked?.webRtcEncoderMode || null,
       mode: tracked?.mode || null,
       hlsSegmentSeconds: tracked?.hlsSegmentSeconds || null,
       vttSegmentSeconds: tracked?.vttSegmentSeconds || null,
@@ -598,6 +666,8 @@ app.post("/sources", async (req, res) => {
   inputUrl,
   sourceType: requestedSourceType = "stream",
   assetId,
+  hlsMode: requestedHlsMode = "passthrough",
+  webRtcMode: requestedWebRtcMode = "auto",
   hlsSegmentSeconds = 1,
   vttSegmentSeconds = 5,
   purgeBeforeStart = false,
@@ -607,27 +677,39 @@ app.post("/sources", async (req, res) => {
   minCueDurSec = 0.10,
   maxCueDurSec = 0.50
 } = req.body || {};
-    const mode = "xcode-any";
     sourceType = normalizeSourceType(requestedSourceType);
+    const hlsMode = normalizeHlsMode(requestedHlsMode);
+    const webRtcMode = normalizeWebRtcMode(requestedWebRtcMode);
     const resolvedInputUrl = sourceType === "file"
       ? resolveUploadedVideo(assetId)
       : (typeof inputUrl === "string" ? inputUrl.trim() : "");
-    let fileDurationSeconds = null;
-    if (sourceType === "file") {
-      try {
-        const probe = await probeInputWithFfprobe(resolvedInputUrl);
-        fileDurationSeconds = probe.durationSeconds;
-      } catch (error) {
-        log.warn("file_duration_probe_error", { streamId, error: serializeError(error) });
-      }
-    }
     requestedStreamId = streamId;
+    if (!streamId || !resolvedInputUrl) throw new Error("streamId and inputUrl required");
+
+    let sourceProbe = null;
+    let fileDurationSeconds = null;
+    try {
+        sourceProbe = await probeInputWithFfprobe(resolvedInputUrl);
+        if (sourceType === "file") {
+          const probe = sourceProbe;
+        fileDurationSeconds = probe.durationSeconds;
+        }
+    } catch (error) {
+      log.warn("source_probe_error", { streamId, sourceType, error: serializeError(error) });
+    }
+    const hlsResolution = resolveHlsEncodeMode(hlsMode, sourceProbe);
+    const hlsEncoderMode = hlsResolution.encoderMode;
+    const hlsEffectiveMode = hlsResolution.effectiveMode;
+    const hlsFallbackReason = hlsResolution.fallbackReason;
+    const webRtcEncoderMode = sourceType === "file"
+      ? null
+      : resolveWebRtcEncodeMode(webRtcMode, sourceProbe);
+    const mode = hlsEncoderMode;
     const effectiveSegmentSeconds = normalizeSegmentSeconds(
       hlsSegmentSeconds,
       normalizeSegmentSeconds(vttSegmentSeconds, 1)
     );
 
-    if (!streamId || !resolvedInputUrl) throw new Error("streamId and inputUrl required");
     if (sources.has(streamId)) {
       return res.status(409).json({
         ok: false,
@@ -651,6 +733,12 @@ app.post("/sources", async (req, res) => {
       inputUrl: resolvedInputUrl,
       sourceType,
       webRtcAvailable: sourceType !== "file",
+      hlsMode,
+      hlsEffectiveMode,
+      hlsFallbackReason,
+      webRtcMode,
+      hlsEncoderMode,
+      webRtcEncoderMode,
       durationSeconds: fileDurationSeconds,
       processedSeconds: sourceType === "file" ? 0 : null,
       progressPercent: sourceType === "file" ? 0 : null,
@@ -674,7 +762,14 @@ app.post("/sources", async (req, res) => {
       streamId,
       inputUrl: resolvedInputUrl,
       sourceType,
-      mode,
+      hlsMode,
+      hlsEffectiveMode,
+      hlsFallbackReason,
+      webRtcMode,
+      hlsEncoderMode,
+      webRtcEncoderMode,
+      detectedVideoCodec: sourceProbe?.video?.codec || null,
+      detectedAudioCodec: sourceProbe?.audio?.codec || null,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
       purgeBeforeStart
@@ -689,7 +784,7 @@ app.post("/sources", async (req, res) => {
       inputUrl: resolvedInputUrl,
       outDir,
       hlsSegmentSeconds: effectiveSegmentSeconds,
-      mode,
+      mode: hlsEncoderMode,
       sourceType,
       onProgress: ({ processedSeconds, speed, complete }) => {
         if (sourceType !== "file" || !Number.isFinite(processedSeconds)) return;
@@ -718,16 +813,20 @@ app.post("/sources", async (req, res) => {
       usingGpu: hls.usingGpu
     });
 
-    // Write the ABR master playlist before the recorder begins publishing variants.
+    // Write the master playlist before the recorder begins publishing media playlists.
     const masterPath = path.join(outDir, "master.m3u8");
     await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
-    await fs.promises.writeFile(masterPath, createHlsMasterPlaylist());
+    await fs.promises.writeFile(
+      masterPath,
+      hls.isAbr ? createHlsMasterPlaylist() : createPassthroughHlsMasterPlaylist()
+    );
 
     // 2) KLV ingest + DB/VTT sidecar in dedicated worker process
     klvWorker = await startKlvStreamWorker({
       streamId,
       inputUrl: resolvedInputUrl,
       outDir,
+      videoPlaylistName: hls.videoPlaylistName,
       segmentSeconds: effectiveSegmentSeconds,
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
       minCueDurSec: Number(minCueDurSec) || 0.10,
@@ -758,7 +857,7 @@ app.post("/sources", async (req, res) => {
       const ingest = await sfuClient.startIngest({
         streamId,
         inputUrl: resolvedInputUrl,
-        mode,
+        mode: webRtcEncoderMode,
         requestId: req.requestId
       });
       startedSfuIngest = true;
@@ -771,7 +870,16 @@ app.post("/sources", async (req, res) => {
     }
 
     sources.set(streamId, {
-      streamId, inputUrl: resolvedInputUrl, sourceType, mode,
+      streamId,
+      inputUrl: resolvedInputUrl,
+      sourceType,
+      mode,
+      hlsMode,
+      hlsEffectiveMode,
+      hlsFallbackReason,
+      webRtcMode,
+      hlsEncoderMode,
+      webRtcEncoderMode,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
@@ -848,6 +956,12 @@ app.post("/sources", async (req, res) => {
       hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
       subtitlesUrl: `/hls/${streamId}/subtitles.m3u8`,
       sourceType,
+      hlsMode,
+      hlsEffectiveMode,
+      hlsFallbackReason,
+      webRtcMode,
+      hlsEncoderMode,
+      webRtcEncoderMode,
       webrtc: sourceType === "file" ? { available: false } : { available: true, producerId },
       purge: {
         enabled: !!purgeBeforeStart,

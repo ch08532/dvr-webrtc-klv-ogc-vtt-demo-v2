@@ -433,6 +433,7 @@ async function start(message) {
     streamId,
     inputUrl,
     outDir,
+    videoPlaylistName,
     segmentSeconds,
     maxCuesPerSecond,
     minCueDurSec,
@@ -446,7 +447,7 @@ async function start(message) {
   const store = new SqliteKlvStore({ dbPath });
   await store.init();
 
-  const videoPlaylistPath = path.join(outDir, "v0", "index.m3u8");
+  const videoPlaylistPath = path.join(outDir, videoPlaylistName || "v0/index.m3u8");
   const carrierPlaylistPath = path.join(outDir, "playlist.m3u8");
   const segmentPollTimer = setInterval(() => {
     processPendingSegments().catch(() => {});

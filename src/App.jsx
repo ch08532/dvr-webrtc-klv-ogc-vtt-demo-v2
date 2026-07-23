@@ -23,6 +23,8 @@ function App() {
   const [sourceType, setSourceType] = useState('stream');
   const [inputUrl, setInputUrl] = useState('udp://239.1.2.3:5000');
   const [videoFile, setVideoFile] = useState(null);
+  const [hlsMode, setHlsMode] = useState('passthrough');
+  const [webRtcMode, setWebRtcMode] = useState('auto');
   const [hlsSegmentSeconds, setHlsSegmentSeconds] = useState(5);
   const [maxCuesPerSecond, setMaxCuesPerSecond] = useState(10);
   const [minCueDurSec, setMinCueDurSec] = useState(0.10);
@@ -74,6 +76,14 @@ function App() {
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
   const [hostMetrics, setHostMetrics] = useState(null);
+  const activeHlsMode = streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode;
+  const passthroughFallbackLikely = hlsMode === 'passthrough'
+    && !!inputProbe.video?.codec
+    && (inputProbe.video.codec.toLowerCase() !== 'h264'
+      || (inputProbe.audio?.codec && inputProbe.audio.codec.toLowerCase() !== 'aac'));
+  const hlsQualityOptions = activeHlsMode === 'abr'
+    ? HLS_QUALITY_OPTIONS
+    : [{ value: 'auto', label: 'Auto (source)' }];
 
   const videoRef = useRef(null);
   const dvrVideoHostRef = useRef(null);
@@ -670,6 +680,8 @@ function App() {
           sourceType,
           inputUrl: sourceType === 'stream' ? inputUrl : undefined,
           assetId,
+          hlsMode,
+          webRtcMode,
           hlsSegmentSeconds,
           vttSegmentSeconds: hlsSegmentSeconds,
           maxCuesPerSecond,
@@ -855,6 +867,10 @@ function App() {
   };
 
   const applyHlsQuality = (quality) => {
+    if (activeHlsMode !== 'abr') {
+      setHlsQualityControlAvailable(false);
+      return quality === 'auto';
+    }
     const representations = getHlsRepresentations();
     if (!representations.length) {
       setHlsQualityControlAvailable(false);
@@ -1733,11 +1749,20 @@ function App() {
   const liveKlvOverlayEntries = overlayData?.mode === 'live-ws'
     ? Object.entries(overlayData)
     : [];
-  const activeHlsRendition = HLS_RENDITIONS.find((rendition) => (
-    [dvrDiag.currentPlaylistUri, dvrDiag.currentPlaylistResolvedUri]
-      .filter(Boolean)
-      .some((uri) => String(uri).includes(rendition.playlist))
-  ));
+  const activeHlsRendition = activeHlsMode === 'abr'
+    ? HLS_RENDITIONS.find((rendition) => (
+      [dvrDiag.currentPlaylistUri, dvrDiag.currentPlaylistResolvedUri]
+        .filter(Boolean)
+        .some((uri) => String(uri).includes(rendition.playlist))
+    ))
+    : null;
+  const activeHlsRenditionLabel = activeHlsRendition
+    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.videoBitrate}`
+    : dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri
+      ? activeHlsMode === 'single-transcode'
+        ? 'single transcoded rendition'
+        : 'source (single rendition)'
+      : 'n/a';
   const statusParsed = parseStatusPayload(status);
 
   return (
@@ -1817,6 +1842,45 @@ function App() {
                     : `container: ${inputProbe.container?.longName || inputProbe.container?.name || 'unknown'} | video codec: ${inputProbe.video?.codecLongName || inputProbe.video?.codec || 'unknown'}${inputProbe.video?.width && inputProbe.video?.height ? ` | ${inputProbe.video.width}x${inputProbe.video.height}` : ''}${Number.isFinite(inputProbe.video?.fps) ? ` | ${inputProbe.video.fps} fps` : ''} | klv: ${inputProbe.klv?.available ? (inputProbe.klv?.confidence === 'high' ? 'detected' : 'possible (data stream found)') : 'not detected'}`}
                 </Text>
               ) : null}
+              <Group grow mt="xs">
+                <Select
+                  label="HLS mode"
+                  description="Passthrough copies browser-compatible H.264/AAC; other sources use one H.264 fallback stream. ABR creates three streams."
+                  data={[
+                    { value: 'passthrough', label: 'Passthrough (source quality)' },
+                    { value: 'abr', label: 'Full ABR ladder' }
+                  ]}
+                  value={hlsMode}
+                  onChange={(value) => {
+                    const nextMode = value || 'passthrough';
+                    setHlsMode(nextMode);
+                    if (nextMode === 'passthrough') {
+                      hlsQualityRef.current = 'auto';
+                      setHlsQuality('auto');
+                      setHlsQualityControlAvailable(false);
+                    }
+                  }}
+                  allowDeselect={false}
+                />
+                <Select
+                  label="Live WebRTC mode"
+                  description="Auto copies H.264 when safe, otherwise it transcodes."
+                  data={[
+                    { value: 'auto', label: 'Auto-copy H.264 (recommended)' },
+                    { value: 'copy', label: 'Force H.264 passthrough' },
+                    { value: 'transcode', label: 'Force transcode' }
+                  ]}
+                  value={webRtcMode}
+                  onChange={(value) => setWebRtcMode(value || 'auto')}
+                  allowDeselect={false}
+                  disabled={sourceType === 'file'}
+                />
+              </Group>
+              {passthroughFallbackLikely ? (
+                <Text size="xs" mt="xs" c="yellow">
+                  Passthrough fallback: this source is not H.264/AAC, so one H.264 playback stream will be encoded. KLV remains copy-only.
+                </Text>
+              ) : null}
               <Group mt="sm">
                 <Button
                   variant="subtle"
@@ -1852,11 +1916,20 @@ function App() {
                   {streamRuntime?.state || 'unknown'}
                 </Badge>
                 <Text size="sm">{streamRuntime?.running ? 'Running' : 'Not Running'}</Text>
-                {streamRuntime?.encoder ? (
+                  {streamRuntime?.encoder ? (
                   <Text size="sm" c={streamRuntime?.usingGpu ? 'teal' : 'orange'}>
                     Encoding: {streamRuntime.usingGpu ? 'GPU' : 'CPU'} ({streamRuntime.encoder})
                   </Text>
-                ) : null}
+                  ) : null}
+                <Text size="sm" c="dimmed">
+                  HLS: {streamRuntime?.hlsMode || hlsMode} ({streamRuntime?.hlsEncoderMode || 'pending'})
+                  {streamRuntime?.hlsEffectiveMode && streamRuntime.hlsEffectiveMode !== streamRuntime.hlsMode
+                    ? ` → ${streamRuntime.hlsEffectiveMode}`
+                    : ''}
+                  {streamRuntime?.sourceType !== 'file'
+                    ? ` | WebRTC: ${streamRuntime?.webRtcMode || webRtcMode} (${streamRuntime?.webRtcEncoderMode || 'pending'})`
+                    : ''}
+                </Text>
               </Group>
               {streamRuntime?.sourceType === 'file' && streamRuntime?.state !== 'stopped' ? (
                 <Stack gap={4} mt="xs">
@@ -1890,6 +1963,9 @@ function App() {
                     </Group>
                     <Text size="xs" c="dimmed">
                       type: {s.sourceType || 'stream'} | hls: {s.hlsRunning ? 'up' : 'down'} | klv: {s.klvRunning ? 'up' : 'down'} | ingest: {s.ingestRunning ? 'up' : 'down'}
+                      {s.hlsMode ? ` | HLS mode: ${s.hlsMode}` : ''}
+                      {s.hlsEffectiveMode && s.hlsEffectiveMode !== s.hlsMode ? ` → ${s.hlsEffectiveMode}` : ''}
+                      {s.webRtcMode && s.sourceType !== 'file' ? ` | WebRTC mode: ${s.webRtcMode}` : ''}
                       {s.encoder ? ` | encoder: ${s.usingGpu ? 'GPU' : 'CPU'} (${s.encoder})` : ''}
                     </Text>
                     {s.sourceType === 'file' ? (
@@ -1943,15 +2019,21 @@ function App() {
                       <Group gap="xs" mb="xs" align="flex-end">
                         <Select
                           label="Video quality"
-                          data={HLS_QUALITY_OPTIONS}
+                          data={hlsQualityOptions}
                           value={hlsQuality}
                           onChange={handleHlsQualityChange}
                           allowDeselect={false}
-                          disabled={hlsMediaLoaded && !hlsQualityControlAvailable}
+                          disabled={activeHlsMode !== 'abr' || (hlsMediaLoaded && !hlsQualityControlAvailable)}
                           w={180}
                         />
                         <Text size="xs" c="dimmed" pb={6}>
-                          {hlsQualityControlAvailable
+                          {activeHlsMode === 'passthrough'
+                            ? 'Passthrough uses the source rendition.'
+                            : activeHlsMode === 'single-transcode'
+                              ? 'A single browser-compatible H.264 rendition is available.'
+                              : activeHlsMode !== 'abr'
+                                ? 'A single rendition is available.'
+                            : hlsQualityControlAvailable
                             ? 'Auto switches based on network conditions.'
                             : hlsMediaLoaded
                               ? 'Manual selection is unavailable with native HLS playback.'
@@ -1962,9 +2044,7 @@ function App() {
                         source: {dvrDiag.currentSrc || 'n/a'} | playlist: {dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri || 'n/a'}
                       </Text>
                       <Text size="xs" c="dimmed" mb="xs">
-                        active rendition: {activeHlsRendition
-                          ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.videoBitrate}`
-                          : 'n/a'} | decoded: {dvrDiag.decodedVideoWidth && dvrDiag.decodedVideoHeight
+                        active rendition: {activeHlsRenditionLabel} | decoded: {dvrDiag.decodedVideoWidth && dvrDiag.decodedVideoHeight
                           ? `${dvrDiag.decodedVideoWidth}×${dvrDiag.decodedVideoHeight}`
                           : 'n/a'}
                       </Text>

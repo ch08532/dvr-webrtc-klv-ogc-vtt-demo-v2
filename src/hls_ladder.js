@@ -55,3 +55,14 @@ export function createHlsMasterPlaylist() {
     ""
   ].join("\n");
 }
+
+export function createPassthroughHlsMasterPlaylist() {
+  return [
+    "#EXTM3U",
+    "#EXT-X-VERSION:6",
+    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="KLV",AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subtitles.m3u8"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=10000000,SUBTITLES="subs",CLOSED-CAPTIONS=NONE',
+    "v0/index.m3u8",
+    ""
+  ].join("\n");
+}

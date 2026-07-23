@@ -81,7 +81,11 @@ function buildLadderFilter() {
 
 export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId, sourceType = "stream", onProgress }) {
   const requestedMode = normalizeMode(mode);
-  const chosen = "xcode-any";
+  const chosen = requestedMode === "copy-h264" || requestedMode === "xcode-single"
+    ? requestedMode
+    : "xcode-any";
+  const isPassthrough = chosen === "copy-h264";
+  const isSingleTranscode = chosen === "xcode-single";
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
   const isFileSource = sourceType === "file";
   const videoProfile = buildVideoArgs(chosen, {
@@ -100,6 +104,8 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const abrSegmentFilename = path.join(outDir, "v%v", "segment_%06d.ts");
   const metadataPlaylist = path.join(outDir, "playlist.m3u8");
   const metadataSegmentFilename = path.join(outDir, "playlist%d.ts");
+  const singlePlaylist = path.join(outDir, "v0", "index.m3u8");
+  const singleSegmentFilename = path.join(outDir, "v0", "segment_%06d.ts");
   for (const rendition of HLS_RENDITIONS) {
     fs.mkdirSync(path.join(outDir, path.dirname(rendition.playlist)), { recursive: true });
   }
@@ -129,6 +135,61 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   ];
 
   const metadataRendition = HLS_RENDITIONS[0];
+  const carrierOutput = [
+    "-map", "0:v:0",
+    "-map", "0:a?",
+    "-map", "0:d?",
+    "-c:v", "copy",
+    "-c:a", "copy",
+    "-c:d", "copy",
+    "-muxpreload", "0",
+    "-muxdelay", "0",
+    "-f", "hls",
+    "-start_number", "0",
+    "-hls_time", String(segmentSeconds),
+    "-hls_list_size", String(listSize),
+    "-hls_segment_type", "mpegts",
+    "-hls_flags", "program_date_time",
+    "-hls_segment_filename", metadataSegmentFilename,
+    metadataPlaylist
+  ];
+  const passthroughVideoOutput = [
+    "-map", "0:v:0",
+    "-map", "0:a?",
+    "-c:v", "copy",
+    "-c:a", "copy",
+    "-muxpreload", "0",
+    "-muxdelay", "0",
+    "-f", "hls",
+    "-start_number", "0",
+    "-hls_time", String(segmentSeconds),
+    "-hls_list_size", String(listSize),
+    "-hls_segment_type", "mpegts",
+    "-hls_flags", "program_date_time",
+    "-hls_segment_filename", singleSegmentFilename,
+    singlePlaylist
+  ];
+  const singleTranscodeOutput = [
+    "-map", "0:v:0",
+    "-map", "0:a?",
+    ...videoProfile.videoArgs,
+    "-b:v", HLS_RENDITIONS[1].videoBitrate,
+    "-maxrate:v", HLS_RENDITIONS[1].maxRate,
+    "-bufsize:v", HLS_RENDITIONS[1].bufferSize,
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-force_key_frames", `expr:gte(t,n_forced*${segmentSeconds})`,
+    "-muxpreload", "0",
+    "-muxdelay", "0",
+    "-f", "hls",
+    "-start_number", "0",
+    "-hls_time", String(segmentSeconds),
+    "-hls_list_size", String(listSize),
+    "-hls_segment_type", "mpegts",
+    "-hls_flags", "independent_segments+program_date_time",
+    "-hls_segment_filename", singleSegmentFilename,
+    singlePlaylist
+  ];
   const metadataOutput = [
     "-map", "[metadata]",
     "-map", "0:d?",
@@ -179,9 +240,11 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   // --- FINAL ARG LIST (what you pass to spawn) ---
   const args = [
     ...base,
-    "-filter_complex", buildLadderFilter(),
-    ...metadataOutput,
-    ...abrOutput
+    ...(isPassthrough
+      ? [...carrierOutput, ...passthroughVideoOutput]
+      : isSingleTranscode
+        ? [...carrierOutput, ...singleTranscodeOutput]
+        : ["-filter_complex", buildLadderFilter(), ...metadataOutput, ...abrOutput])
   ];
 
   log.info("start", {
@@ -194,13 +257,15 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     hlsSegmentSeconds: segmentSeconds,
     outDir,
     listSize,
-    streamCopy: false,
+    streamCopy: isPassthrough,
     encoder: videoProfile.encoder,
     usingGpu: videoProfile.usingGpu,
-    renditions: HLS_RENDITIONS.map(({ id, width, height, videoBitrate }) => ({ id, width, height, videoBitrate })),
+    renditions: chosen === "xcode-any"
+      ? HLS_RENDITIONS.map(({ id, width, height, videoBitrate }) => ({ id, width, height, videoBitrate }))
+      : [{ id: isPassthrough ? "source" : "source-h264", playlist: "v0/index.m3u8" }],
     metadataPlaylist,
     hlsSegmentType: "mpegts",
-    hlsSegmentFilename: abrSegmentFilename
+    hlsSegmentFilename: chosen === "xcode-any" ? abrSegmentFilename : singleSegmentFilename
   });
   log.info("ffmpeg_command", {
     requestId,
@@ -270,7 +335,15 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     log[level](event, { requestId, streamId, code, signal });
   });
 
-  return { streamId, proc, requestId, encoder: videoProfile.encoder, usingGpu: videoProfile.usingGpu };
+  return {
+    streamId,
+    proc,
+    requestId,
+    encoder: videoProfile.encoder,
+    usingGpu: videoProfile.usingGpu,
+    isAbr: chosen === "xcode-any",
+    videoPlaylistName: chosen === "xcode-any" ? "v0/index.m3u8" : "playlist.m3u8"
+  };
 }
 
 export async function stopHlsRecorder(hls) {
