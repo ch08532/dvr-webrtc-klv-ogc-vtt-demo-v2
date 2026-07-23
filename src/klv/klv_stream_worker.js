@@ -93,7 +93,7 @@ function vttFilenameForSegment(segmentUri) {
   return `meta_${base}.vtt`;
 }
 
-function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entries }) {
+function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entries, endList = false }) {
   const subtitlePlaylistPath = path.join(outDir, "subtitles.m3u8");
   const target = Math.max(1, Math.ceil(Number(targetDurationSec) || 1));
   const published = [];
@@ -122,6 +122,7 @@ function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entri
     txt += `#EXTINF:${durationText},\n`;
     txt += `${vttFile}\n`;
   }
+  if (endList) txt += "#EXT-X-ENDLIST\n";
 
   fs.writeFileSync(subtitlePlaylistPath, txt);
 }
@@ -507,6 +508,25 @@ async function stop() {
   send({ type: "stopped", streamId: current.streamId });
 }
 
+async function finalize(finalizeId) {
+  const current = runtime;
+  if (!current) throw new Error("worker is not started");
+  while (current.processing) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  await processPendingSegments();
+  const videoPlaylist = parseVideoPlaylist(current.videoPlaylistPath);
+  if (!videoPlaylist) throw new Error("video HLS playlist is unavailable for VTT finalization");
+  writeSubtitlePlaylist({
+    outDir: current.outDir,
+    mediaSequence: videoPlaylist.mediaSequence,
+    targetDurationSec: videoPlaylist.targetDurationSec,
+    entries: videoPlaylist.entries,
+    endList: true
+  });
+  send({ type: "finalized", streamId: current.streamId, finalizeId });
+}
+
 process.on("message", async (message) => {
   if (!message || typeof message !== "object") return;
   try {
@@ -517,6 +537,10 @@ process.on("message", async (message) => {
     if (message.type === "stop") {
       await stop();
       process.exit(0);
+    }
+    if (message.type === "finalize") {
+      await finalize(message.finalizeId);
+      return;
     }
   } catch (error) {
     const streamId = runtime?.streamId || message.streamId;

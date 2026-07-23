@@ -3,16 +3,20 @@ import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
 import { createHlsMasterPlaylist } from "./src/hls_ladder.js";
-import { startKlvStreamWorker, stopKlvStreamWorker } from "./src/klv_stream_worker_client.js";
+import { finalizeKlvStreamWorker, startKlvStreamWorker, stopKlvStreamWorker } from "./src/klv_stream_worker_client.js";
 import { startSfuWorkerClient } from "./src/sfu_worker_client.js";
 import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
 import { registerOgcMovingFeaturesRoutes } from "./src/ogc_moving_features.js";
 import { getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
+import { getGpuMetrics } from "./src/gpu_metrics.js";
 import {
   createServiceLogger,
   newRequestId,
@@ -32,9 +36,13 @@ const log = createServiceLogger("server");
 
 const RECORD_ROOT = path.resolve("./recordings");
 const DB_DIR = path.resolve("./db");
+const VIDEO_ROOT = path.resolve("./videos");
+const MAX_UPLOAD_BYTES = Math.max(1, Number(process.env.MAX_VIDEO_UPLOAD_MB || 10_240)) * 1024 * 1024;
+const VIDEO_UPLOAD_EXTENSIONS = new Set([".ts", ".m2ts", ".mp4", ".mov", ".mkv"]);
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
+fs.mkdirSync(VIDEO_ROOT, { recursive: true });
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -99,6 +107,21 @@ function normalizeSegmentSeconds(value, fallback = 1) {
   return n;
 }
 
+function normalizeSourceType(value) {
+  return value === "file" ? "file" : "stream";
+}
+
+function resolveUploadedVideo(assetId) {
+  if (typeof assetId !== "string" || !/^[a-f0-9-]{36}\.(?:ts|m2ts|mp4|mov|mkv)$/i.test(assetId)) {
+    throw new Error("invalid uploaded video asset ID");
+  }
+  const inputUrl = path.resolve(VIDEO_ROOT, assetId);
+  if (!inputUrl.startsWith(`${VIDEO_ROOT}${path.sep}`) || !fs.existsSync(inputUrl)) {
+    throw new Error("uploaded video file not found");
+  }
+  return inputUrl;
+}
+
 function parseFrameRate(rateText) {
   if (!rateText || typeof rateText !== "string") return null;
   const [numText, denText] = rateText.split("/");
@@ -133,7 +156,8 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
 
   const container = format ? {
     name: format.format_name || null,
-    longName: format.format_long_name || null
+    longName: format.format_long_name || null,
+    durationSeconds: Number.isFinite(Number(format.duration)) ? Number(format.duration) : null
   } : null;
 
   const video = firstVideo ? {
@@ -161,6 +185,7 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
     inputUrl,
     hasVideo: !!firstVideo,
     container,
+    durationSeconds: container?.durationSeconds ?? null,
     video,
     klv,
     streamCount: streams.length
@@ -174,7 +199,7 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
       "-print_format", "json",
       "-show_format",
       "-show_streams",
-      "-show_entries", "format=format_name,format_long_name:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,avg_frame_rate,r_frame_rate,profile:stream_tags",
+      "-show_entries", "format=format_name,format_long_name,duration:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,avg_frame_rate,r_frame_rate,profile:stream_tags",
       "-analyzeduration", "3000000",
       "-probesize", "5000000",
       "-read_intervals", "%+3",
@@ -287,6 +312,16 @@ function getSourceRuntime(streamId) {
       streamId,
       state: tracked?.state || "stopped",
       running: false,
+      sourceType: tracked?.sourceType || "stream",
+      webRtcAvailable: tracked?.webRtcAvailable !== false,
+      stage: tracked?.stage || null,
+      durationSeconds: tracked?.durationSeconds ?? null,
+      processedSeconds: tracked?.processedSeconds ?? null,
+      progressPercent: tracked?.progressPercent ?? null,
+      encodeSpeed: tracked?.encodeSpeed ?? null,
+      etaSeconds: tracked?.etaSeconds ?? null,
+      encoder: tracked?.encoder ?? null,
+      usingGpu: tracked?.usingGpu ?? null,
       lastError: tracked?.lastError || null,
       updatedAt: tracked?.updatedAt || new Date().toISOString()
     };
@@ -298,9 +333,11 @@ function getSourceRuntime(streamId) {
   const running = hlsRunning;
 
   let state = tracked?.state || "running";
-  if (state === "starting" || state === "stopping") {
+  if (state === "ready") {
+    // A completed file source retains its HLS/VTT artifacts but no child processes.
+  } else if (state === "starting" || state === "stopping" || state === "finalizing") {
     // honor explicit transition state
-  } else if (hlsRunning && klvRunning && ingestRunning) {
+  } else if (hlsRunning && klvRunning && (source.sourceType === "file" || ingestRunning)) {
     state = "running";
   } else if (hlsRunning) {
     state = "degraded";
@@ -312,6 +349,16 @@ function getSourceRuntime(streamId) {
     streamId,
     state,
     running,
+    sourceType: source.sourceType,
+    webRtcAvailable: source.sourceType !== "file",
+    stage: tracked?.stage || null,
+    durationSeconds: tracked?.durationSeconds ?? null,
+    processedSeconds: tracked?.processedSeconds ?? null,
+    progressPercent: tracked?.progressPercent ?? null,
+    encodeSpeed: tracked?.encodeSpeed ?? null,
+    etaSeconds: tracked?.etaSeconds ?? null,
+    encoder: source.hls?.encoder ?? tracked?.encoder ?? null,
+    usingGpu: source.hls?.usingGpu ?? tracked?.usingGpu ?? null,
     hlsRunning,
     klvRunning,
     ingestRunning,
@@ -402,6 +449,48 @@ app.use("/hls", (_req, res) => {
 registerOgcMovingFeaturesRoutes(app, { sources, store });
 
 // ---------- API: input probe ----------
+app.post("/uploads/video", async (req, res) => {
+  const uploadName = decodeURIComponent(String(req.headers["x-upload-filename"] || ""));
+  const extension = path.extname(uploadName).toLowerCase();
+  const contentLength = Number(req.headers["content-length"]);
+
+  if (!VIDEO_UPLOAD_EXTENSIONS.has(extension)) {
+    return res.status(400).json({ ok: false, error: "supported video extensions: .ts, .m2ts, .mp4, .mov, .mkv" });
+  }
+  if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_BYTES) {
+    return res.status(413).json({ ok: false, error: `video exceeds ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload limit` });
+  }
+
+  const assetId = `${randomUUID()}${extension}`;
+  const temporaryPath = path.join(VIDEO_ROOT, `${assetId}.upload`);
+  const destinationPath = path.join(VIDEO_ROOT, assetId);
+  let receivedBytes = 0;
+  const byteLimit = new Transform({
+    transform(chunk, _encoding, callback) {
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_UPLOAD_BYTES) {
+        callback(new Error(`video exceeds ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload limit`));
+        return;
+      }
+      callback(null, chunk);
+    }
+  });
+
+  try {
+    await pipeline(req, byteLimit, fs.createWriteStream(temporaryPath, { flags: "wx" }));
+    if (!receivedBytes) throw new Error("uploaded video file is empty");
+    await fs.promises.rename(temporaryPath, destinationPath);
+    log.info("video_upload_complete", { requestId: req.requestId, assetId, receivedBytes });
+    res.status(201).json({ ok: true, assetId, sizeBytes: receivedBytes });
+  } catch (error) {
+    await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+    const message = String(error?.message || error);
+    const status = message.includes("upload limit") ? 413 : 400;
+    log.warn("video_upload_error", { requestId: req.requestId, error: serializeError(error) });
+    res.status(status).json({ ok: false, error: message });
+  }
+});
+
 app.post("/probe/input", async (req, res) => {
   const inputUrl = typeof req.body?.inputUrl === "string" ? req.body.inputUrl.trim() : "";
   if (!inputUrl) {
@@ -461,6 +550,8 @@ app.get("/sources", (req, res) => {
   const list = [...sources.values()].map((s) => ({
     streamId: s.streamId,
     inputUrl: s.inputUrl,
+    sourceType: s.sourceType,
+    webRtcAvailable: s.sourceType !== "file",
     mode: s.mode,
     hlsSegmentSeconds: s.hlsSegmentSeconds,
     vttSegmentSeconds: s.vttSegmentSeconds,
@@ -475,6 +566,8 @@ app.get("/sources", (req, res) => {
     list.push({
       streamId,
       inputUrl: tracked?.inputUrl || null,
+      sourceType: tracked?.sourceType || "stream",
+      webRtcAvailable: tracked?.webRtcAvailable !== false,
       mode: tracked?.mode || null,
       hlsSegmentSeconds: tracked?.hlsSegmentSeconds || null,
       vttSegmentSeconds: tracked?.vttSegmentSeconds || null,
@@ -495,6 +588,7 @@ app.post("/sources", async (req, res) => {
   let hls = null;
   let klvWorker = null;
   let startedSfuIngest = false;
+  let sourceType = "stream";
   let producerId = null;
   let purgeResult = null;
 
@@ -502,6 +596,8 @@ app.post("/sources", async (req, res) => {
     const {
   streamId,
   inputUrl,
+  sourceType: requestedSourceType = "stream",
+  assetId,
   hlsSegmentSeconds = 1,
   vttSegmentSeconds = 5,
   purgeBeforeStart = false,
@@ -512,13 +608,26 @@ app.post("/sources", async (req, res) => {
   maxCueDurSec = 0.50
 } = req.body || {};
     const mode = "xcode-any";
+    sourceType = normalizeSourceType(requestedSourceType);
+    const resolvedInputUrl = sourceType === "file"
+      ? resolveUploadedVideo(assetId)
+      : (typeof inputUrl === "string" ? inputUrl.trim() : "");
+    let fileDurationSeconds = null;
+    if (sourceType === "file") {
+      try {
+        const probe = await probeInputWithFfprobe(resolvedInputUrl);
+        fileDurationSeconds = probe.durationSeconds;
+      } catch (error) {
+        log.warn("file_duration_probe_error", { streamId, error: serializeError(error) });
+      }
+    }
     requestedStreamId = streamId;
     const effectiveSegmentSeconds = normalizeSegmentSeconds(
       hlsSegmentSeconds,
       normalizeSegmentSeconds(vttSegmentSeconds, 1)
     );
 
-    if (!streamId || !inputUrl) throw new Error("streamId and inputUrl required");
+    if (!streamId || !resolvedInputUrl) throw new Error("streamId and inputUrl required");
     if (sources.has(streamId)) {
       return res.status(409).json({
         ok: false,
@@ -539,7 +648,14 @@ app.post("/sources", async (req, res) => {
       state: "starting",
       running: false,
       ingestRunning: false,
-      inputUrl,
+      inputUrl: resolvedInputUrl,
+      sourceType,
+      webRtcAvailable: sourceType !== "file",
+      durationSeconds: fileDurationSeconds,
+      processedSeconds: sourceType === "file" ? 0 : null,
+      progressPercent: sourceType === "file" ? 0 : null,
+      encodeSpeed: null,
+      etaSeconds: null,
       stage: "initializing",
       lastError: null
     });
@@ -556,7 +672,8 @@ app.post("/sources", async (req, res) => {
 
     log.info("source_create_start", {
       streamId,
-      inputUrl,
+      inputUrl: resolvedInputUrl,
+      sourceType,
       mode,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
@@ -569,13 +686,37 @@ app.post("/sources", async (req, res) => {
     // 1) DVR recorder (HLS MPEG-TS) — provides PROGRAM-DATE-TIME timestamps
     hls = startHlsRecorder({
       streamId,
-      inputUrl,
+      inputUrl: resolvedInputUrl,
       outDir,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       mode,
+      sourceType,
+      onProgress: ({ processedSeconds, speed, complete }) => {
+        if (sourceType !== "file" || !Number.isFinite(processedSeconds)) return;
+        const clampedProcessedSeconds = Number.isFinite(fileDurationSeconds)
+          ? Math.min(processedSeconds, fileDurationSeconds)
+          : processedSeconds;
+        const progressPercent = Number.isFinite(fileDurationSeconds) && fileDurationSeconds > 0
+          ? Math.min(100, (clampedProcessedSeconds / fileDurationSeconds) * 100)
+          : null;
+        const etaSeconds = Number.isFinite(fileDurationSeconds) && Number.isFinite(speed) && speed > 0
+          ? Math.max(0, (fileDurationSeconds - clampedProcessedSeconds) / speed)
+          : null;
+        setSourceState(streamId, {
+          processedSeconds: clampedProcessedSeconds,
+          progressPercent: complete ? 100 : progressPercent,
+          encodeSpeed: speed,
+          etaSeconds: complete ? 0 : etaSeconds
+        });
+      },
       requestId: req.requestId
     });
-    setSourceState(streamId, { state: "starting", stage: "hls_started" });
+    setSourceState(streamId, {
+      state: "starting",
+      stage: "hls_started",
+      encoder: hls.encoder,
+      usingGpu: hls.usingGpu
+    });
 
     // Write the ABR master playlist before the recorder begins publishing variants.
     const masterPath = path.join(outDir, "master.m3u8");
@@ -585,7 +726,7 @@ app.post("/sources", async (req, res) => {
     // 2) KLV ingest + DB/VTT sidecar in dedicated worker process
     klvWorker = await startKlvStreamWorker({
       streamId,
-      inputUrl,
+      inputUrl: resolvedInputUrl,
       outDir,
       segmentSeconds: effectiveSegmentSeconds,
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
@@ -612,36 +753,71 @@ app.post("/sources", async (req, res) => {
     });
     setSourceState(streamId, { state: "starting", stage: "klv_started" });
 
-    // 3) WebRTC ingest path (delegated to SFU worker process)
-    const ingest = await sfuClient.startIngest({
-      streamId,
-      inputUrl,
-      mode,
-      requestId: req.requestId
-    });
-    startedSfuIngest = true;
-    producerId = ingest.producerId;
-    setSourceState(streamId, {
-      state: "starting",
-      stage: "ingest_ready",
-      ingestRunning: true
-    });
+    // 3) WebRTC is a live-stream path. File sources are packaged for HLS/VTT playback only.
+    if (sourceType !== "file") {
+      const ingest = await sfuClient.startIngest({
+        streamId,
+        inputUrl: resolvedInputUrl,
+        mode,
+        requestId: req.requestId
+      });
+      startedSfuIngest = true;
+      producerId = ingest.producerId;
+      setSourceState(streamId, {
+        state: "starting",
+        stage: "ingest_ready",
+        ingestRunning: true
+      });
+    }
 
     sources.set(streamId, {
-      streamId, inputUrl, mode,
+      streamId, inputUrl: resolvedInputUrl, sourceType, mode,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
       minCueDurSec: Number(minCueDurSec) || 0.10,
       maxCueDurSec: Number(maxCueDurSec) || 0.50,
       hls, klvWorker,
-      webrtc: { ingestRunning: true, producerId }
+      webrtc: sourceType === "file" ? null : { ingestRunning: true, producerId }
     });
+
+    const finalizeFileSource = async () => {
+      const source = sources.get(streamId);
+      if (!source || source.sourceType !== "file") return;
+      setSourceState(streamId, { state: "finalizing", running: false, ingestRunning: false, stage: "finalizing_vtt" });
+      try {
+        await finalizeKlvStreamWorker(source.klvWorker);
+        await stopKlvStreamWorker(source.klvWorker);
+        source.klvWorker = null;
+        setSourceState(streamId, {
+          state: "ready",
+          running: false,
+          ingestRunning: false,
+          stage: null,
+          progressPercent: 100,
+          etaSeconds: 0,
+          lastError: null
+        });
+        log.info("file_source_ready", { streamId });
+      } catch (error) {
+        setSourceState(streamId, {
+          state: "error",
+          running: false,
+          ingestRunning: false,
+          stage: null,
+          lastError: `file finalization failed: ${String(error?.message || error)}`
+        });
+      }
+    };
 
     const onWorkerExit = (service, code, signal) => {
       if (!sources.has(streamId)) return;
       const currentState = currentSourceState(streamId);
       if (currentState === "stopping" || currentState === "stopped") return;
+      if (sourceType === "file" && service === "hls_recorder" && code === 0 && !signal) {
+        void finalizeFileSource();
+        return;
+      }
       const hardDown = service === "hls_recorder";
       setSourceState(streamId, {
         state: hardDown ? "error" : "degraded",
@@ -656,18 +832,23 @@ app.post("/sources", async (req, res) => {
       state: "running",
       running: true,
       stage: null,
-      ingestRunning: true,
+      ingestRunning: sourceType !== "file",
       lastError: null
     });
 
-    log.info("source_create_success", { streamId, producerId });
+    if (sourceType === "file" && hls.proc?.exitCode === 0) {
+      void finalizeFileSource();
+    }
+
+    log.info("source_create_success", { streamId, sourceType, producerId });
 
     res.json({
       ok: true,
       streamId,
       hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
       subtitlesUrl: `/hls/${streamId}/subtitles.m3u8`,
-      webrtc: { producerId },
+      sourceType,
+      webrtc: sourceType === "file" ? { available: false } : { available: true, producerId },
       purge: {
         enabled: !!purgeBeforeStart,
         deletedEvents: purgeResult?.deletedEvents ?? 0
@@ -711,14 +892,33 @@ app.delete("/sources/:streamId", async (req, res) => {
   if (!s) return res.status(404).json({ ok: false, error: "not found", state: getSourceRuntime(streamId) });
 
   log.info("source_delete_start", { streamId });
-  setSourceState(streamId, { state: "stopping", running: false, ingestRunning: false, stage: "teardown" });
+  setSourceState(streamId, {
+    state: "stopping",
+    running: false,
+    ingestRunning: false,
+    stage: "teardown",
+    processedSeconds: null,
+    progressPercent: null,
+    encodeSpeed: null,
+    etaSeconds: null
+  });
   sources.delete(streamId);
 
   await stopKlvStreamWorker(s.klvWorker);
   await stopHlsRecorder(s.hls);
   await sfuClient.stopIngest(streamId);
 
-  setSourceState(streamId, { state: "stopped", running: false, ingestRunning: false, stage: null, lastError: null });
+  setSourceState(streamId, {
+    state: "stopped",
+    running: false,
+    ingestRunning: false,
+    stage: null,
+    processedSeconds: null,
+    progressPercent: null,
+    encodeSpeed: null,
+    etaSeconds: null,
+    lastError: null
+  });
   log.info("source_delete_success", { streamId });
   res.json({ ok: true });
 });
@@ -825,6 +1025,7 @@ app.get("/webrtc/debug", async (req, res) => {
 // ---------- Runtime metrics / health ----------
 app.get("/metrics/runtime", async (req, res) => {
   const runtime = getRuntimeMetricsSnapshot();
+  runtime.host.gpu = await getGpuMetrics();
   let sfuHealth = null;
   let sfuError = null;
   try {

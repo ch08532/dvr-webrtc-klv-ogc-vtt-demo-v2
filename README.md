@@ -5,7 +5,7 @@ A runnable Node.js demo that:
 - ingests an MPEG-TS stream (UDP or file)
 - parses STANAG 4609 / MISB ST 0601 KLV
 - records video as HLS MPEG-TS with `EXT-X-PROGRAM-DATE-TIME` (DVR)
-- publishes a five-rung adaptive-bitrate ladder: 90p/100 kbps, 180p/350 kbps, 360p/800 kbps, 540p/1.6 Mbps, and 720p/3 Mbps
+- publishes a three-rung adaptive-bitrate ladder: 90p/100 kbps, 360p/800 kbps, and 720p/3 Mbps
 - generates a **segmented WebVTT sidecar track** (default 5 seconds/segment, configurable)
 - serves HLS master playlist with subtitles group ("KLV")
 - plays Live via WebRTC (mediasoup) and DVR via HLS
@@ -76,13 +76,19 @@ In the UI, set:
 
 Click **Start Source**.
 
+### Ingesting a video file
+
+Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. The browser uploads it to the server's ignored `./videos/` directory before it is packaged. File sources produce the same HLS ladder and segmented WebVTT output, then transition to **ready** when packaging completes. Play them from the DVR (HLS) tab; the live WebRTC tab is intentionally unavailable for file sources.
+
+The default upload limit is 10 GB. Override it with `MAX_VIDEO_UPLOAD_MB` when starting the server.
+
+While a file source is packaging, the UI displays its conversion percentage, source media time processed, FFmpeg speed, and estimated remaining time. It then reports `finalizing` while WebVTT files are completed and `ready` when HLS playback is available.
+
 DVR output will appear under `./recordings/<streamId>/`:
 - `master.m3u8`
 - `v0/index.m3u8` (360p video; timing reference for the VTT playlist)
-- `v1/index.m3u8` (540p video)
-- `v2/index.m3u8` (720p video)
-- `v3/index.m3u8` (180p video)
-- `v4/index.m3u8` (90p video)
+- `v1/index.m3u8` (720p video)
+- `v2/index.m3u8` (90p video)
 - `playlist.m3u8` (private KLV carrier playlist)
 - `subtitles.m3u8` (VTT playlist)
 - `meta_<segNo>.vtt` (segmented metadata)

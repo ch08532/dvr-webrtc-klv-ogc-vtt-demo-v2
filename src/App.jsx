@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select } from '@mantine/core';
+import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 
@@ -20,7 +20,9 @@ const HLS_QUALITY_OPTIONS = [
 
 function App() {
   const [streamId, setStreamId] = useState('stream1');
+  const [sourceType, setSourceType] = useState('stream');
   const [inputUrl, setInputUrl] = useState('udp://239.1.2.3:5000');
+  const [videoFile, setVideoFile] = useState(null);
   const [hlsSegmentSeconds, setHlsSegmentSeconds] = useState(5);
   const [maxCuesPerSecond, setMaxCuesPerSecond] = useState(10);
   const [minCueDurSec, setMinCueDurSec] = useState(0.10);
@@ -71,6 +73,7 @@ function App() {
   const [serverOnline, setServerOnline] = useState(true);
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
+  const [hostMetrics, setHostMetrics] = useState(null);
 
   const videoRef = useRef(null);
   const dvrVideoHostRef = useRef(null);
@@ -189,7 +192,7 @@ function App() {
     try {
       const res = await fetch(url, opts);
       const urlText = String(url || '');
-      const isBackendApiPath = /^\/(sources|webrtc|streams|probe|metrics|healthz|ogc)(\/|$)/.test(urlText);
+      const isBackendApiPath = /^\/(sources|uploads|webrtc|streams|probe|metrics|healthz|ogc)(\/|$)/.test(urlText);
       const contentType = String(res.headers.get('content-type') || '').toLowerCase();
       const hasBackendRequestId = !!res.headers.get('x-request-id');
       const looksLikeBackendApi = hasBackendRequestId || contentType.includes('application/json');
@@ -212,7 +215,8 @@ function App() {
   const stateColor = (state) => {
     if (state === 'running') return 'green';
     if (state === 'degraded') return 'orange';
-    if (state === 'starting' || state === 'stopping') return 'yellow';
+    if (state === 'starting' || state === 'stopping' || state === 'finalizing') return 'yellow';
+    if (state === 'ready') return 'blue';
     if (state === 'error') return 'red';
     if (state === 'offline') return 'red';
     return 'gray';
@@ -232,10 +236,12 @@ function App() {
     return 'Not Tested';
   })();
 
-  const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping'].includes(streamRuntime?.state);
+  const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping', 'ready'].includes(streamRuntime?.state);
   const isStopBlockedByState = ['starting', 'stopping', 'stopped'].includes(streamRuntime?.state);
-  const canStartSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
+  const hasSelectedInput = sourceType === 'file' ? !!videoFile : !!String(inputUrl || '').trim();
+  const canStartSource = serverOnline && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
+  const currentSourceIsFile = streamRuntime?.sourceType === 'file';
 
   const webrtcBadge = (() => {
     const statusText = String(liveStatus || '').toLowerCase();
@@ -268,8 +274,8 @@ function App() {
     const result = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
     if (result?.streamId) {
       setStreamRuntime(result);
-      if (result.running) setAutoAttachOnDvr(true);
-      if (!result.running) setAutoAttachOnDvr(false);
+      if (result.running || result.state === 'ready') setAutoAttachOnDvr(true);
+      if (!result.running && result.state !== 'ready') setAutoAttachOnDvr(false);
       if (updateStatus) setStatus(JSON.stringify(result, null, 2));
     }
   };
@@ -637,14 +643,33 @@ function App() {
     if (!canStartSource) return;
     setStartRequestInFlight(true);
     setHlsMediaLoaded(false);
-    setStreamRuntime({ streamId, state: 'starting', running: false, lastError: null });
+    setStreamRuntime({ streamId, sourceType, state: 'starting', running: false, lastError: null });
     try {
+      let assetId = null;
+      if (sourceType === 'file') {
+        setStatus(`Uploading ${videoFile.name}...`);
+        const uploadResult = await api('/uploads/video', {
+          method: 'POST',
+          headers: {
+            'content-type': videoFile.type || 'application/octet-stream',
+            'x-upload-filename': encodeURIComponent(videoFile.name)
+          },
+          body: videoFile
+        });
+        if (!uploadResult?.ok || !uploadResult.assetId) {
+          throw new Error(uploadResult?.error || 'Video upload failed');
+        }
+        assetId = uploadResult.assetId;
+        setActiveTab('dvr');
+      }
       const result = await api("/sources", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           streamId,
-          inputUrl,
+          sourceType,
+          inputUrl: sourceType === 'stream' ? inputUrl : undefined,
+          assetId,
           hlsSegmentSeconds,
           vttSegmentSeconds: hlsSegmentSeconds,
           maxCuesPerSecond,
@@ -666,7 +691,7 @@ function App() {
       if (result?.ok && activeTab === 'dvr') {
         startHlsAutoAttach(streamId);
       }
-      if (result?.ok && activeTab === 'live-webrtc') {
+      if (result?.ok && sourceType !== 'file' && activeTab === 'live-webrtc') {
         startWebRtcAutoAttach(streamId);
       }
     } catch (error) {
@@ -728,6 +753,11 @@ function App() {
     const result = await api("/sources");
     if (Array.isArray(result)) setSourcesList(result);
     if (!silent) setStatus(JSON.stringify(result, null, 2));
+  };
+
+  const refreshHostMetrics = async () => {
+    const result = await api('/metrics/runtime');
+    if (result?.host) setHostMetrics(result.host);
   };
 
   const refreshWebRtcDebug = async (targetStreamId = streamId) => {
@@ -936,6 +966,29 @@ function App() {
     const n = Number(seconds);
     if (!Number.isFinite(n)) return 'n/a';
     return `${n.toFixed(2)}s`;
+  };
+
+  const formatConversionTime = (seconds) => {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value < 0) return 'n/a';
+    const totalSeconds = Math.round(value);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+    return hours
+      ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+      : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+  };
+
+  const formatBytes = (bytes) => {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value < 0) return 'n/a';
+    return (value / (1024 ** 3)).toFixed(1) + ' GB';
+  };
+
+  const conversionProgress = (source) => {
+    const percent = Number(source?.progressPercent);
+    return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
   };
 
   const getCurrentHlsPlaylistInfo = (player = null) => {
@@ -1565,6 +1618,9 @@ function App() {
 
   useEffect(() => {
     streamRuntimeRef.current = streamRuntime;
+    if (streamRuntime?.sourceType === 'file' && activeTab === 'live-webrtc') {
+      setActiveTab('dvr');
+    }
     if (activeTab === 'live-webrtc' && (streamRuntime?.state === 'stopped' || streamRuntime?.state === 'stopping')) {
       setOverlayData(null);
       setLiveNotConnected();
@@ -1591,10 +1647,12 @@ function App() {
   useEffect(() => {
     refreshSources({ silent: true }).catch(() => {});
     refreshStreamState(streamId, { updateStatus: true }).catch(() => {});
+    refreshHostMetrics().catch(() => {});
 
     const timer = setInterval(() => {
       refreshSources({ silent: true }).catch(() => {});
       refreshStreamState(streamId).catch(() => {});
+      refreshHostMetrics().catch(() => {});
     }, 2000);
     return () => clearInterval(timer);
   }, [streamId]);
@@ -1716,21 +1774,42 @@ function App() {
                   value={streamId}
                   onChange={(e) => setStreamId(e.target.value)}
                 />
-                <TextInput
-                  style={{ flex: 1 }}
-                  label="Input URL"
-                  value={inputUrl}
-                  onChange={(e) => setInputUrl(e.target.value)}
+                <Select
+                  w={150}
+                  label="Source type"
+                  data={[{ value: 'stream', label: 'Stream URL' }, { value: 'file', label: 'Video file' }]}
+                  value={sourceType}
+                  onChange={(value) => setSourceType(value || 'stream')}
+                  allowDeselect={false}
                 />
-                <Button
-                  onClick={testInputFeed}
-                  loading={inputProbe.phase === 'testing'}
-                  disabled={!serverOnline || !String(inputUrl || '').trim()}
-                >
-                  Test Feed
-                </Button>
-                <Badge color={probeBadgeColor} variant="filled">{probeBadgeLabel}</Badge>
+                {sourceType === 'stream' ? <>
+                  <TextInput
+                    style={{ flex: 1 }}
+                    label="Input URL"
+                    value={inputUrl}
+                    onChange={(e) => setInputUrl(e.target.value)}
+                  />
+                  <Button
+                    onClick={testInputFeed}
+                    loading={inputProbe.phase === 'testing'}
+                    disabled={!serverOnline || !String(inputUrl || '').trim()}
+                  >
+                    Test Feed
+                  </Button>
+                  <Badge color={probeBadgeColor} variant="filled">{probeBadgeLabel}</Badge>
+                </> : <FileInput
+                  style={{ flex: 1 }}
+                  label="Video file"
+                  placeholder="Choose a video file"
+                  value={videoFile}
+                  onChange={setVideoFile}
+                  accept="video/*,.ts,.m2ts"
+                  clearable
+                />}
               </Group>
+              {sourceType === 'file' ? (
+                <Text size="xs" mt="xs" c="dimmed">The file uploads to this server, then packages into HLS and segmented WebVTT. Playback is available in DVR (HLS); WebRTC is disabled.</Text>
+              ) : null}
               {(inputProbe.container || inputProbe.video || inputProbe.klv || inputProbe.error) ? (
                 <Text size="xs" mt="xs" c={inputProbe.error ? 'red' : 'dimmed'}>
                   {inputProbe.error
@@ -1773,7 +1852,25 @@ function App() {
                   {streamRuntime?.state || 'unknown'}
                 </Badge>
                 <Text size="sm">{streamRuntime?.running ? 'Running' : 'Not Running'}</Text>
+                {streamRuntime?.encoder ? (
+                  <Text size="sm" c={streamRuntime?.usingGpu ? 'teal' : 'orange'}>
+                    Encoding: {streamRuntime.usingGpu ? 'GPU' : 'CPU'} ({streamRuntime.encoder})
+                  </Text>
+                ) : null}
               </Group>
+              {streamRuntime?.sourceType === 'file' && streamRuntime?.state !== 'stopped' ? (
+                <Stack gap={4} mt="xs">
+                  <Group justify="space-between">
+                    <Text size="xs">Conversion ({streamRuntime?.state || 'preparing'}): {conversionProgress(streamRuntime) != null ? `${conversionProgress(streamRuntime).toFixed(1)}%` : 'Preparing...'}</Text>
+                    <Text size="xs" c="dimmed">
+                      {formatConversionTime(streamRuntime.processedSeconds)} / {formatConversionTime(streamRuntime.durationSeconds)}
+                      {Number.isFinite(Number(streamRuntime.encodeSpeed)) ? ` · ${Number(streamRuntime.encodeSpeed).toFixed(2)}x` : ''}
+                      {Number.isFinite(Number(streamRuntime.etaSeconds)) ? ` · ETA ${formatConversionTime(streamRuntime.etaSeconds)}` : ''}
+                    </Text>
+                  </Group>
+                  <Progress value={conversionProgress(streamRuntime) || 0} animated={streamRuntime?.state === 'running'} />
+                </Stack>
+              ) : null}
               {streamRuntime?.lastError ? (
                 <Text size="sm" c="red" mt="xs">Last error: {streamRuntime.lastError}</Text>
               ) : null}
@@ -1792,11 +1889,39 @@ function App() {
                       </Group>
                     </Group>
                     <Text size="xs" c="dimmed">
-                      hls: {s.hlsRunning ? 'up' : 'down'} | klv: {s.klvRunning ? 'up' : 'down'} | ingest: {s.ingestRunning ? 'up' : 'down'}
+                      type: {s.sourceType || 'stream'} | hls: {s.hlsRunning ? 'up' : 'down'} | klv: {s.klvRunning ? 'up' : 'down'} | ingest: {s.ingestRunning ? 'up' : 'down'}
+                      {s.encoder ? ` | encoder: ${s.usingGpu ? 'GPU' : 'CPU'} (${s.encoder})` : ''}
                     </Text>
+                    {s.sourceType === 'file' ? (
+                      <Stack gap={3} mt="xs">
+                        <Text size="xs" c="dimmed">
+                          conversion: {conversionProgress(s) != null ? `${conversionProgress(s).toFixed(1)}%` : 'preparing'} · {formatConversionTime(s.processedSeconds)} / {formatConversionTime(s.durationSeconds)}
+                          {Number.isFinite(Number(s.encodeSpeed)) ? ` · ${Number(s.encodeSpeed).toFixed(2)}x` : ''}
+                          {Number.isFinite(Number(s.etaSeconds)) ? ` · ETA ${formatConversionTime(s.etaSeconds)}` : ''}
+                        </Text>
+                        <Progress value={conversionProgress(s) || 0} animated={s.state === 'running'} size="sm" />
+                      </Stack>
+                    ) : null}
                   </Paper>
                 )) : <Text size="sm" c="dimmed">No active sources</Text>}
               </Stack>
+            </Paper>
+
+            <Paper shadow="xs" p="md">
+              <Text size="lg" fw={500}>System Utilization</Text>
+              <Group mt="xs" grow align="flex-start">
+                <Stack gap={2}>
+                  <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
+                  <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
+                </Stack>
+                <Stack gap={2}>
+                  {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (
+                    <Text key={gpu.name} size="sm">
+                      GPU: {gpu.name} · {gpu.utilizationPercent ?? 'n/a'}% · {gpu.memoryUsedMiB ?? 'n/a'} / {gpu.memoryTotalMiB ?? 'n/a'} MiB{gpu.temperatureC != null ? ' · ' + gpu.temperatureC + '°C' : ''}
+                    </Text>
+                  )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
+                </Stack>
+              </Group>
             </Paper>
 
             <Paper shadow="xs" p="md">
@@ -1804,7 +1929,7 @@ function App() {
               <Tabs value={activeTab} onChange={setActiveTab}>
                 <Tabs.List>
                   <Tabs.Tab value="dvr">DVR (HLS)</Tabs.Tab>
-                  <Tabs.Tab value="live-webrtc">Live (WebRTC)</Tabs.Tab>
+                  <Tabs.Tab value="live-webrtc" disabled={currentSourceIsFile}>Live (WebRTC)</Tabs.Tab>
                 </Tabs.List>
 
                 <Tabs.Panel value="dvr" pt="xs">

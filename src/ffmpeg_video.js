@@ -20,7 +20,7 @@ function envNumber(name, defaultValue) {
   return Number.isFinite(raw) && raw > 0 ? raw : defaultValue;
 }
 
-export function buildVideoArgs(mode) {
+export function buildVideoArgs(mode, { gpuPreset } = {}) {
   if (mode === "copy-h264") {
     return {
       inputArgs: [],
@@ -52,7 +52,7 @@ export function buildVideoArgs(mode) {
 
   const encoder = envString("FFMPEG_GPU_CODEC", "h264_nvenc");
   const hwaccel = envString("FFMPEG_HWACCEL", "auto");
-  const preset = envString("FFMPEG_GPU_PRESET", encoder === "h264_nvenc" ? "p4" : "");
+  const preset = gpuPreset || envString("FFMPEG_GPU_PRESET", encoder === "h264_nvenc" ? "p4" : "");
   const tune = envString("FFMPEG_GPU_TUNE", encoder === "h264_nvenc" ? "ll" : "");
   const gop = String(envNumber("FFMPEG_GOP", 30));
 

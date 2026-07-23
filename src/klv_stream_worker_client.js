@@ -5,6 +5,7 @@ import { createServiceLogger, serializeError } from "./service_logger.js";
 const log = createServiceLogger("klv_stream_worker_client");
 const START_TIMEOUT_MS = 8000;
 const STOP_TIMEOUT_MS = 2000;
+const FINALIZE_TIMEOUT_MS = 30000;
 
 function sanitizeExecArgv(argv) {
   const out = [];
@@ -192,5 +193,38 @@ export async function stopKlvStreamWorker(handle) {
         finish();
       }, STOP_TIMEOUT_MS);
     }, STOP_TIMEOUT_MS);
+  });
+}
+
+export async function finalizeKlvStreamWorker(handle) {
+  if (!handle?.proc || handle.proc.exitCode != null || handle.proc.killed) {
+    throw new Error("KLV worker is not available for finalization");
+  }
+
+  const finalizeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  log.info("finalize_requested", { requestId: handle.requestId, streamId: handle.streamId });
+
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      handle.proc.off("message", onMessage);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onMessage = (message) => {
+      if (message?.type !== "finalized" || message.finalizeId !== finalizeId) return;
+      finish();
+    };
+    const timer = setTimeout(() => finish(new Error(`KLV worker finalization timed out for stream ${handle.streamId}`)), FINALIZE_TIMEOUT_MS);
+
+    handle.proc.on("message", onMessage);
+    try {
+      handle.proc.send({ type: "finalize", streamId: handle.streamId, finalizeId });
+    } catch (error) {
+      finish(error);
+    }
   });
 }

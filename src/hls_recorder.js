@@ -43,6 +43,21 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
+function progressSeconds(fields) {
+  const raw = fields.out_time_us ?? fields.out_time_ms;
+  const micros = Number(raw);
+  if (Number.isFinite(micros) && micros >= 0) return micros / 1_000_000;
+
+  const match = String(fields.out_time || "").match(/^(\d+):(\d+):(\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  return (Number(match[1]) * 3600) + (Number(match[2]) * 60) + Number(match[3]);
+}
+
+function parseProgressSpeed(value) {
+  const speed = Number(String(value || "").replace(/x$/i, ""));
+  return Number.isFinite(speed) && speed > 0 ? speed : null;
+}
+
 function buildLadderFilter() {
   const metadataInputIndex = HLS_RENDITIONS.length;
   const splitLabels = Array.from(
@@ -64,14 +79,20 @@ function buildLadderFilter() {
   return filters.join(";");
 }
 
-export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId }) {
+export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId, sourceType = "stream", onProgress }) {
   const requestedMode = normalizeMode(mode);
   const chosen = "xcode-any";
-  const videoProfile = buildVideoArgs(chosen);
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
+  const isFileSource = sourceType === "file";
+  const videoProfile = buildVideoArgs(chosen, {
+    gpuPreset: isFileSource ? "p1" : undefined
+  });
   const inputProtocolArgs = /^udp:\/\//i.test(inputUrl)
     ? ["-fifo_size", "2000000", "-overrun_nonfatal", "1"]
     : [];
+  const inputTimestampArgs = isFileSource
+    ? []
+    : ["-use_wallclock_as_timestamps", "1"];
 
   // Keep the full history in the playlist.
   const listSize = 0;
@@ -87,9 +108,11 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const base = [
     "-hide_banner",
     "-loglevel", "warning",
+    "-nostats",
+    "-progress", "pipe:1",
 
-    // You said wallclock was the only way that kept KLV in sync in your source.
-    "-use_wallclock_as_timestamps", "1",
+    // Live UDP sources need arrival-time timestamps; file sources retain media PTS.
+    ...inputTimestampArgs,
     "-fflags", "+genpts",
     "-avoid_negative_ts", "make_zero",
 
@@ -165,6 +188,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     requestId,
     streamId,
     inputUrl,
+    sourceType,
     requestedMode,
     mode: chosen,
     hlsSegmentSeconds: segmentSeconds,
@@ -172,6 +196,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     listSize,
     streamCopy: false,
     encoder: videoProfile.encoder,
+    usingGpu: videoProfile.usingGpu,
     renditions: HLS_RENDITIONS.map(({ id, width, height, videoBitrate }) => ({ id, width, height, videoBitrate })),
     metadataPlaylist,
     hlsSegmentType: "mpegts",
@@ -187,9 +212,37 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
 
   const proc = spawn("ffmpeg", args, {
     cwd: outDir,
-    stdio: ["ignore", "ignore", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"]
   });
   proc._intentionalStop = false;
+  let progressBuffer = "";
+  let progressFields = {};
+
+  proc.stdout.on("data", (chunk) => {
+    progressBuffer += chunk.toString();
+    const lines = progressBuffer.split(/\r?\n/);
+    progressBuffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const separator = line.indexOf("=");
+      if (separator <= 0) continue;
+      const key = line.slice(0, separator);
+      const value = line.slice(separator + 1);
+      progressFields[key] = value;
+      if (key !== "progress") continue;
+
+      try {
+        onProgress?.({
+          processedSeconds: progressSeconds(progressFields),
+          speed: parseProgressSpeed(progressFields.speed),
+          complete: value === "end"
+        });
+      } catch (error) {
+        log.warn("progress_handler_error", { requestId, streamId, error: serializeError(error) });
+      }
+      progressFields = {};
+    }
+  });
 
   proc.stderr.on("data", (chunk) => {
     const lines = chunk.toString().split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
@@ -217,7 +270,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     log[level](event, { requestId, streamId, code, signal });
   });
 
-  return { streamId, proc, requestId };
+  return { streamId, proc, requestId, encoder: videoProfile.encoder, usingGpu: videoProfile.usingGpu };
 }
 
 export async function stopHlsRecorder(hls) {

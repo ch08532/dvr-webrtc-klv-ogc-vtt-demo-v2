@@ -12,20 +12,8 @@ export const HLS_RENDITIONS = [
     codecs: "avc1.42e01e,wvtt"
   },
   {
-    id: "540p",
-    playlist: "v1/index.m3u8",
-    width: 960,
-    height: 540,
-    videoBitrate: "1600k",
-    maxRate: "1712k",
-    bufferSize: "2400k",
-    averageBandwidth: 1600000,
-    bandwidth: 1712000,
-    codecs: "avc1.42e01f,wvtt"
-  },
-  {
     id: "720p",
-    playlist: "v2/index.m3u8",
+    playlist: "v1/index.m3u8",
     width: 1280,
     height: 720,
     videoBitrate: "3000k",
@@ -36,20 +24,8 @@ export const HLS_RENDITIONS = [
     codecs: "avc1.42e01f,wvtt"
   },
   {
-    id: "180p",
-    playlist: "v3/index.m3u8",
-    width: 320,
-    height: 180,
-    videoBitrate: "350k",
-    maxRate: "375k",
-    bufferSize: "525k",
-    averageBandwidth: 350000,
-    bandwidth: 375000,
-    codecs: "avc1.42e00c,wvtt"
-  },
-  {
     id: "90p",
-    playlist: "v4/index.m3u8",
+    playlist: "v2/index.m3u8",
     width: 160,
     height: 90,
     videoBitrate: "100k",
