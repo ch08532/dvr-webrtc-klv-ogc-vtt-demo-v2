@@ -5,6 +5,7 @@ import { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
+import KlvMap from './KlvMap.jsx';
 
 const theme = createTheme({
   /** Put your mantine theme override here */
@@ -2009,7 +2010,7 @@ function App() {
                 </Tabs.List>
 
                 <Tabs.Panel value="dvr" pt="xs">
-                  <Text>DVR HLS playback with VTT overlay</Text>
+                  <Text>DVR HLS playback with synchronized WebVTT telemetry.</Text>
                   <Group mt="xs" align="flex-start" grow wrap="wrap">
                     <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
                       <Group gap="xs" mb="xs">
@@ -2091,6 +2092,11 @@ function App() {
                       )}
                     </Paper>
                   </Group>
+                  <Paper p="sm" withBorder mt="xs">
+                    <Text size="sm" fw={600}>KLV Map</Text>
+                    <Text size="xs" c="dimmed" mb="xs">Platform position and frame center follow the active WebVTT cue.</Text>
+                    <KlvMap telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null} active={activeTab === 'dvr'} />
+                  </Paper>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
@@ -2129,6 +2135,10 @@ function App() {
                       )}
                     </Paper>
                   </Group>
+                  <Paper p="sm" withBorder mt="xs">
+                    <Text size="sm" fw={600}>Live KLV Map</Text>
+                    <KlvMap telemetry={overlayData?.mode === 'live-ws' ? overlayData : null} active={activeTab === 'live-webrtc'} />
+                  </Paper>
                 </Tabs.Panel>
               </Tabs>
             </Paper>

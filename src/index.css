@@ -11,3 +11,25 @@
 .video-js.vjs-fluid {
   width: 100%;
 }
+
+.klv-map-shell {
+  position: relative;
+}
+
+.klv-map {
+  height: 360px;
+  width: 100%;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.klv-map-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  color: #495057;
+  background: rgba(255, 255, 255, 0.75);
+  pointer-events: none;
+}
