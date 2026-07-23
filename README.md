@@ -32,6 +32,8 @@ npm start
 Use `npm run dev` during frontend development. `npm run build` regenerates the ignored `public/assets/` bundle that `npm start` serves.
 
 ## Docker
+**Run this if you want to test via containerization.  Highly recommend to to run on bare metal using Node.**
+
 Build and run with Docker Compose (uses host networking for UDP multicast access):
 ```bash
 docker-compose up --build
