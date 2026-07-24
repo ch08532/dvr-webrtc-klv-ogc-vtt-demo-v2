@@ -9,7 +9,7 @@ export const HLS_RENDITIONS = [
     bufferSize: "1200k",
     averageBandwidth: 800000,
     bandwidth: 856000,
-    codecs: "avc1.42e01e,wvtt"
+    codecs: "avc1.42e02a,wvtt"
   },
   {
     id: "1080p",
@@ -33,7 +33,7 @@ export const HLS_RENDITIONS = [
     bufferSize: "150k",
     averageBandwidth: 100000,
     bandwidth: 120000,
-    codecs: "avc1.42e00b,wvtt"
+    codecs: "avc1.42e02a,wvtt"
   }
 ];
 
@@ -41,6 +41,11 @@ function topRenditionForSource(sourceVideo) {
   const width = Number(sourceVideo?.width);
   const height = Number(sourceVideo?.height);
   const isH264 = String(sourceVideo?.codec || "").toLowerCase() === "h264";
+  const profile = String(sourceVideo?.profile || "").toLowerCase();
+  // The ABR encoder produces Constrained Baseline H.264. Copying a Main/High
+  // profile source into the same ladder makes browser rendition switches
+  // codec-incompatible, even though each individual rendition is playable.
+  const isAbrCopyCompatible = isH264 && profile.includes("baseline");
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return null;
 
   const is720pOrLower = height <= 720;
@@ -56,8 +61,8 @@ function topRenditionForSource(sourceVideo) {
     bandwidth: is720pOrLower ? 3210000 : 6420000,
     // The copied source may use a profile/level different from the encoded
     // defaults, so omit CODECS rather than advertising an incorrect value.
-    codecs: isH264 ? null : "avc1.42e02a,wvtt",
-    sourceCopy: isH264
+    codecs: isAbrCopyCompatible ? null : "avc1.42e02a,wvtt",
+    sourceCopy: isAbrCopyCompatible
   };
 }
 

@@ -202,6 +202,7 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
   const video = firstVideo ? {
     codec: firstVideo.codec_name || null,
     codecLongName: firstVideo.codec_long_name || null,
+    profile: firstVideo.profile || null,
     width: Number.isFinite(Number(firstVideo.width)) ? Number(firstVideo.width) : null,
     height: Number.isFinite(Number(firstVideo.height)) ? Number(firstVideo.height) : null,
     fps
@@ -294,6 +295,95 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
       }
     });
   });
+}
+
+// Some MPEG-TS files (including MX15 recordings) have valid media timestamps
+// but no container duration.  FFprobe consequently reports Duration: N/A,
+// which is insufficient for a file-conversion progress bar.  Estimate the
+// duration from the first and last PCR values without decoding the file.
+async function probeMpegTsDurationFromPcr(inputUrl) {
+  if (!/\.(?:ts|m2ts)$/i.test(String(inputUrl || ""))) return null;
+
+  let handle = null;
+  try {
+    const stat = await fs.promises.stat(inputUrl);
+    if (!stat.isFile() || stat.size < 188 * 3) return null;
+
+    handle = await fs.promises.open(inputUrl, "r");
+    const probeBytes = Math.min(stat.size, 64 * 1024);
+    const probe = Buffer.allocUnsafe(probeBytes);
+    const { bytesRead: probeRead } = await handle.read(probe, 0, probe.length, 0);
+
+    let packetSize = 0;
+    let firstPacketOffset = 0;
+    for (const candidateSize of [188, 192]) {
+      const maxOffset = Math.min(candidateSize, probeRead - (candidateSize * 3));
+      for (let offset = 0; offset <= maxOffset; offset += 1) {
+        if (probe[offset] === 0x47
+          && probe[offset + candidateSize] === 0x47
+          && probe[offset + (candidateSize * 2)] === 0x47) {
+          packetSize = candidateSize;
+          firstPacketOffset = offset;
+          break;
+        }
+      }
+      if (packetSize) break;
+    }
+    if (!packetSize) return null;
+
+    const packetsPerRead = 4096;
+    const buffer = Buffer.allocUnsafe(packetSize * packetsPerRead);
+    let position = firstPacketOffset;
+    let firstPcr = null;
+    let lastPcr = null;
+    let invalidPackets = 0;
+
+    while (position + packetSize <= stat.size) {
+      const requested = Math.min(buffer.length, stat.size - position);
+      const { bytesRead } = await handle.read(buffer, 0, requested, position);
+      if (!bytesRead) break;
+
+      const packetBytes = Math.floor(bytesRead / packetSize) * packetSize;
+      for (let offset = 0; offset < packetBytes; offset += packetSize) {
+        if (buffer[offset] !== 0x47) {
+          invalidPackets += 1;
+          // A long invalid run means this is a padded/corrupt TS tail, not a
+          // momentary damaged packet.  The last PCR before it is the end.
+          if (invalidPackets >= 64) break;
+          continue;
+        }
+        invalidPackets = 0;
+        const adaptationControl = (buffer[offset + 3] >> 4) & 0x03;
+        const adaptationLength = buffer[offset + 4];
+        const hasPcr = (adaptationControl === 2 || adaptationControl === 3)
+          && adaptationLength >= 7
+          && (buffer[offset + 5] & 0x10) !== 0;
+        if (!hasPcr) continue;
+
+        const pcrOffset = offset + 6;
+        const pcrBase = (buffer[pcrOffset] * (2 ** 25))
+          + (buffer[pcrOffset + 1] * (2 ** 17))
+          + (buffer[pcrOffset + 2] * (2 ** 9))
+          + (buffer[pcrOffset + 3] * 2)
+          + (buffer[pcrOffset + 4] >> 7);
+        const pcrExtension = ((buffer[pcrOffset + 4] & 0x01) * 256) + buffer[pcrOffset + 5];
+        const pcr = (pcrBase * 300) + pcrExtension;
+        if (firstPcr == null) firstPcr = pcr;
+        lastPcr = pcr;
+      }
+      if (invalidPackets >= 64 || bytesRead < requested) break;
+      position += packetBytes;
+    }
+
+    if (firstPcr == null || lastPcr == null) return null;
+    const pcrWrap = (2 ** 33) * 300;
+    let elapsedPcr = lastPcr - firstPcr;
+    if (elapsedPcr < 0) elapsedPcr += pcrWrap;
+    const durationSeconds = elapsedPcr / 27_000_000;
+    return Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
@@ -814,6 +904,39 @@ app.post("/sources", async (req, res) => {
       },
       requestId: req.requestId
     });
+
+    // TS duration is often absent from the short ffprobe read.  Resolve it in
+    // the background so source start is not delayed, then immediately turn the
+    // already-reported processed time into an accurate percentage.
+    if (sourceType === "file" && (!Number.isFinite(fileDurationSeconds) || fileDurationSeconds <= 0)) {
+      void probeMpegTsDurationFromPcr(resolvedInputUrl)
+        .then((derivedDurationSeconds) => {
+          if (!Number.isFinite(derivedDurationSeconds) || derivedDurationSeconds <= 0) return;
+          fileDurationSeconds = derivedDurationSeconds;
+          const tracked = sourceStates.get(streamId);
+          if (!tracked || tracked.inputUrl !== resolvedInputUrl || tracked.state === "stopped") return;
+          const processedSeconds = Number(tracked.processedSeconds);
+          const clampedProcessedSeconds = Number.isFinite(processedSeconds)
+            ? Math.min(processedSeconds, fileDurationSeconds)
+            : 0;
+          const speed = Number(tracked.encodeSpeed);
+          setSourceState(streamId, {
+            durationSeconds: fileDurationSeconds,
+            processedSeconds: clampedProcessedSeconds,
+            progressPercent: Math.min(100, (clampedProcessedSeconds / fileDurationSeconds) * 100),
+            etaSeconds: Number.isFinite(speed) && speed > 0
+              ? Math.max(0, (fileDurationSeconds - clampedProcessedSeconds) / speed)
+              : null
+          });
+          log.info("file_duration_derived_from_pcr", {
+            streamId,
+            durationSeconds: Number(fileDurationSeconds.toFixed(3))
+          });
+        })
+        .catch((error) => {
+          log.warn("file_duration_pcr_probe_error", { streamId, error: serializeError(error) });
+        });
+    }
     setSourceState(streamId, {
       state: "starting",
       stage: "hls_started",
