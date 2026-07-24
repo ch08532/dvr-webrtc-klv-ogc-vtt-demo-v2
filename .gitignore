@@ -93,6 +93,7 @@ Thumbs.db
 recordings/
 videos/
 db/
+public/
 *.sqlite
 *.sqlite3
 .agents
