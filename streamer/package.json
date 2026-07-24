@@ -6,7 +6,7 @@
   "main": "streamer.js",
   "scripts": {
     "start": "node streamer.js -i ../videos/t10.ts --loop",
-    "start2": "node streamer.js -i sample.ts --loop",
+    "start-mx15-sample": "node streamer.js -i ../videos/mx15-sample.ts --loop",
     "start3": "node streamer.js -i ../videos/03082026022835.ts --loop",
     "start4": "node streamer.js -i ../videos/03082026023123.ts --loop",
     "start5": "node streamer.js -i ../videos/03082026015431.ts --loop"
