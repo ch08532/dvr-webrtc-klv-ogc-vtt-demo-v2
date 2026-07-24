@@ -12,15 +12,40 @@ const STOP_TERM_WAIT_MS = Number(process.env.FFMPEG_STOP_TERM_WAIT_MS || 1500);
 const STOP_KILL_WAIT_MS = Number(process.env.FFMPEG_STOP_KILL_WAIT_MS || 1500);
 const RTP_PAYLOAD_TYPE = Number(process.env.FFMPEG_RTP_PAYLOAD_TYPE || 96);
 const RTP_SSRC = Number(process.env.FFMPEG_RTP_SSRC || 22222222);
+const UDP_FIFO_SIZE = Math.max(1024, Number(process.env.FFMPEG_WEBRTC_UDP_FIFO_SIZE || 131072));
+const UDP_BUFFER_SIZE = Math.max(64 * 1024, Number(process.env.FFMPEG_WEBRTC_UDP_BUFFER_SIZE || 4194304));
+const INPUT_THREAD_QUEUE_SIZE = Math.max(256, Number(process.env.FFMPEG_WEBRTC_THREAD_QUEUE_SIZE || 4096));
+const INPUT_MAX_DELAY_US = Math.max(0, Number(process.env.FFMPEG_WEBRTC_MAX_DELAY_US || 500000));
+
+function formatCommandArg(value) {
+  const text = String(value);
+  return /[\s"]/u.test(text) ? `"${text.replace(/(["\\])/g, '\\$1')}"` : text;
+}
+
+function bufferedInputUrl(inputUrl) {
+  if (!/^udp:\/\//i.test(String(inputUrl || ''))) return inputUrl;
+  try {
+    const url = new URL(inputUrl);
+    if (!url.searchParams.has('fifo_size')) url.searchParams.set('fifo_size', String(UDP_FIFO_SIZE));
+    if (!url.searchParams.has('buffer_size')) url.searchParams.set('buffer_size', String(UDP_BUFFER_SIZE));
+    if (!url.searchParams.has('overrun_nonfatal')) url.searchParams.set('overrun_nonfatal', '1');
+    return url.toString();
+  } catch {
+    const separator = String(inputUrl).includes('?') ? '&' : '?';
+    return `${inputUrl}${separator}fifo_size=${UDP_FIFO_SIZE}&buffer_size=${UDP_BUFFER_SIZE}&overrun_nonfatal=1`;
+  }
+}
 
 function buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode }) {
-  const videoProfile = buildVideoArgs(mode);
+  const videoProfile = buildVideoArgs(mode, { purpose: "webrtc" });
+  const bufferedInput = bufferedInputUrl(inputUrl);
 
   const base = [
     "-hide_banner", "-loglevel", "warning",
-    "-fflags", "nobuffer", "-flags", "low_delay",
+    "-thread_queue_size", String(INPUT_THREAD_QUEUE_SIZE),
+    "-max_delay", String(INPUT_MAX_DELAY_US),
     ...videoProfile.inputArgs,
-    "-i", inputUrl,
+    "-i", bufferedInput,
     "-an"
   ];
 
@@ -35,7 +60,8 @@ function buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode }) {
 
   return {
     args: [...base, ...videoProfile.videoArgs, ...out],
-    videoProfile
+    videoProfile,
+    bufferedInput
   };
 }
 
@@ -114,11 +140,12 @@ export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requ
   const sdpFile = path.join(sdpDir, `${streamId}.sdp`);
   await fs.unlink(sdpFile).catch(() => {});
 
-  const { args, videoProfile } = buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode });
+  const { args, videoProfile, bufferedInput } = buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode });
   log.info("start", {
     requestId,
     streamId,
     inputUrl,
+    bufferedInput,
     mode,
     ip,
     bindIp,
@@ -127,7 +154,8 @@ export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requ
     sdpFile,
     encoder: videoProfile.encoder,
     usingGpu: videoProfile.usingGpu,
-    hwaccel: videoProfile.hwaccel
+    hwaccel: videoProfile.hwaccel,
+    ffmpegCommand: `ffmpeg ${args.map(formatCommandArg).join(" ")}`
   });
 
   const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });

@@ -2,6 +2,8 @@ import * as mediasoup from "mediasoup";
 import { createServiceLogger } from "./service_logger.js";
 
 const log = createServiceLogger("webrtc_sfu");
+const PLAIN_SOCKET_BUFFER_SIZE = Math.max(64 * 1024, Number(process.env.MEDIASOUP_PLAIN_SOCKET_BUFFER_SIZE || 8 * 1024 * 1024));
+const WEBRTC_SOCKET_BUFFER_SIZE = Math.max(64 * 1024, Number(process.env.MEDIASOUP_WEBRTC_SOCKET_BUFFER_SIZE || 4 * 1024 * 1024));
 
 export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
   const worker = await mediasoup.createWorker({ rtcMinPort, rtcMaxPort });
@@ -41,7 +43,20 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     if (ingestPlainTransports.has(streamId)) return;
 
     const plain = await router.createPlainTransport({
-      listenIp: { ip: "0.0.0.0", announcedIp: announcedIp ?? null },
+      listenInfo: {
+        protocol: "udp",
+        ip: "0.0.0.0",
+        announcedAddress: announcedIp || undefined,
+        sendBufferSize: PLAIN_SOCKET_BUFFER_SIZE,
+        recvBufferSize: PLAIN_SOCKET_BUFFER_SIZE
+      },
+      rtcpListenInfo: {
+        protocol: "udp",
+        ip: "0.0.0.0",
+        announcedAddress: announcedIp || undefined,
+        sendBufferSize: PLAIN_SOCKET_BUFFER_SIZE,
+        recvBufferSize: PLAIN_SOCKET_BUFFER_SIZE
+      },
       rtcpMux: false,
       comedia: true
     });
@@ -51,7 +66,8 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
       streamId,
       ip: plain.tuple.localIp,
       port: plain.tuple.localPort,
-      rtcpPort: plain.rtcpTuple.localPort
+      rtcpPort: plain.rtcpTuple.localPort,
+      socketBufferSize: PLAIN_SOCKET_BUFFER_SIZE
     });
 
     plain.on("tuple", (tuple) => {
@@ -136,7 +152,22 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
 
   async function createWebRtcTransport() {
     const transport = await router.createWebRtcTransport({
-      listenIps: [{ ip: "0.0.0.0", announcedIp: announcedIp ?? null }],
+      listenInfos: [
+        {
+          protocol: "udp",
+          ip: "0.0.0.0",
+          announcedAddress: announcedIp || undefined,
+          sendBufferSize: WEBRTC_SOCKET_BUFFER_SIZE,
+          recvBufferSize: WEBRTC_SOCKET_BUFFER_SIZE
+        },
+        {
+          protocol: "tcp",
+          ip: "0.0.0.0",
+          announcedAddress: announcedIp || undefined,
+          sendBufferSize: WEBRTC_SOCKET_BUFFER_SIZE,
+          recvBufferSize: WEBRTC_SOCKET_BUFFER_SIZE
+        }
+      ],
       enableUdp: true,
       enableTcp: true,
       preferUdp: true
@@ -146,7 +177,8 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     log.debug("webrtc_transport_created", {
       transportId: transport.id,
       iceCandidates: transport.iceCandidates?.length ?? 0,
-      hasDtlsParameters: !!transport.dtlsParameters
+      hasDtlsParameters: !!transport.dtlsParameters,
+      socketBufferSize: WEBRTC_SOCKET_BUFFER_SIZE
     });
 
     transport.on("dtlsstatechange", (state) => {

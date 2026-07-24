@@ -2,9 +2,34 @@ let ws = null;
 let wsUrl = null;
 let streamId = null;
 let mode = "live";
+const UI_UPDATE_INTERVAL_MS = 100;
+let pendingTelemetry = null;
+let telemetryTimer = null;
+let lastTelemetryPostMs = 0;
 
 function post(type, extra = {}) {
   self.postMessage({ type, ...extra });
+}
+
+function clearTelemetryQueue() {
+  if (telemetryTimer) clearTimeout(telemetryTimer);
+  telemetryTimer = null;
+  pendingTelemetry = null;
+  lastTelemetryPostMs = 0;
+}
+
+function queueTelemetry(payload) {
+  pendingTelemetry = payload;
+  if (telemetryTimer) return;
+
+  const delay = Math.max(0, UI_UPDATE_INTERVAL_MS - (Date.now() - lastTelemetryPostMs));
+  telemetryTimer = setTimeout(() => {
+    telemetryTimer = null;
+    const latest = pendingTelemetry;
+    pendingTelemetry = null;
+    lastTelemetryPostMs = Date.now();
+    if (latest) post("st0601", { payload: latest });
+  }, delay);
 }
 
 function sendSubscribe() {
@@ -25,6 +50,7 @@ function detachSocketHandlers() {
 }
 
 function closeSocket() {
+  clearTelemetryQueue();
   if (!ws) return;
   detachSocketHandlers();
   try { ws.close(); } catch {}
@@ -57,13 +83,14 @@ function connect(url) {
       return;
     }
     if (payload?.type === "st0601") {
-      post("st0601", { payload });
+      queueTelemetry(payload);
     }
   };
   ws.onerror = () => {
     post("ws_error", { error: "socket error" });
   };
   ws.onclose = (event) => {
+    clearTelemetryQueue();
     post("ws_close", {
       code: event?.code ?? null,
       reason: event?.reason || ""

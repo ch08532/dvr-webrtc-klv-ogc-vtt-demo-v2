@@ -20,7 +20,11 @@ function envNumber(name, defaultValue) {
   return Number.isFinite(raw) && raw > 0 ? raw : defaultValue;
 }
 
-export function buildVideoArgs(mode, { gpuPreset } = {}) {
+export function buildVideoArgs(mode, { gpuPreset, purpose } = {}) {
+  const isWebRtc = purpose === "webrtc";
+  const webRtcBitrate = envString("FFMPEG_WEBRTC_VIDEO_BITRATE", "2500k");
+  const webRtcMaxRate = envString("FFMPEG_WEBRTC_MAXRATE", webRtcBitrate);
+  const webRtcBufferSize = envString("FFMPEG_WEBRTC_BUFSIZE", webRtcBitrate);
   if (mode === "copy-h264") {
     return {
       inputArgs: [],
@@ -33,17 +37,26 @@ export function buildVideoArgs(mode, { gpuPreset } = {}) {
 
   const useGpu = envFlag("FFMPEG_USE_GPU", true);
   if (!useGpu) {
+    const videoArgs = [
+      "-c:v", "libx264",
+      "-preset", envString("FFMPEG_X264_PRESET", "veryfast"),
+      "-tune", envString("FFMPEG_X264_TUNE", "zerolatency"),
+      "-profile:v", "baseline",
+      "-level", envString("FFMPEG_H264_LEVEL", "4.2"),
+      "-pix_fmt", "yuv420p",
+      "-x264-params", "keyint=30:min-keyint=30:no-scenecut=1"
+    ];
+    if (isWebRtc) {
+      videoArgs.push(
+        "-bf", "0",
+        "-b:v", webRtcBitrate,
+        "-maxrate", webRtcMaxRate,
+        "-bufsize", webRtcBufferSize
+      );
+    }
     return {
       inputArgs: [],
-      videoArgs: [
-        "-c:v", "libx264",
-        "-preset", envString("FFMPEG_X264_PRESET", "veryfast"),
-        "-tune", envString("FFMPEG_X264_TUNE", "zerolatency"),
-        "-profile:v", "baseline",
-        "-level", envString("FFMPEG_H264_LEVEL", "4.2"),
-        "-pix_fmt", "yuv420p",
-        "-x264-params", "keyint=30:min-keyint=30:no-scenecut=1"
-      ],
+      videoArgs,
       encoder: "libx264",
       usingGpu: false,
       hwaccel: null
@@ -72,6 +85,23 @@ export function buildVideoArgs(mode, { gpuPreset } = {}) {
     "-g", gop,
     "-keyint_min", gop
   );
+
+  if (isWebRtc) {
+    videoArgs.push(
+      "-bf", "0",
+      "-b:v", webRtcBitrate,
+      "-maxrate", webRtcMaxRate,
+      "-bufsize", webRtcBufferSize
+    );
+    if (encoder === "h264_nvenc") {
+      videoArgs.push(
+        "-forced-idr", "1",
+        "-zerolatency", "1",
+        "-strict_gop", "1",
+        "-rc", "cbr"
+      );
+    }
+  }
 
   return {
     inputArgs,

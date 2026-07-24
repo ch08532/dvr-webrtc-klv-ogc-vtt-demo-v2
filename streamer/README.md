@@ -22,6 +22,9 @@ node streamer.js -i <input_video.mp4> [options]
 - `-p, --port <port>`: UDP port (default: 5000)
 - `-l, --loop`: Loop the video indefinitely
 - `-d, --duration <seconds>`: Stream duration (0 = until interrupted)
+- `--clean-ts-at <bytes>`: Create and use a clean copy truncated at a known-valid TS byte boundary
+- `--udp-bitrate <bits>`: Pace UDP output at a fixed maximum bitrate
+- `--udp-burst-bits <bits>`: Limit UDP bursts when output pacing is enabled
 
 ### Examples
 
@@ -37,6 +40,14 @@ node streamer.js -i video.mp4 -d 30
 
 # Loop the video indefinitely
 node streamer.js -i video.mp4 --loop
+```
+
+### Repairing a TS file with a corrupt tail
+
+Use `--clean-ts-at` to preserve the original and create a `-clean.ts` copy containing only valid TS packets. The MX15 launcher is preconfigured with its known valid boundary:
+
+```bash
+npm run start-mx15-sample
 ```
 
 ## Generate Sample Video

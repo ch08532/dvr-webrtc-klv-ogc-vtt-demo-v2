@@ -25,6 +25,17 @@ function hlsQualityOptionsFor(renditions) {
   ];
 }
 
+function emptyWebRtcDiag() {
+  return {
+    consumerId: null,
+    producerScore: null,
+    consumerScore: null,
+    currentLayers: null,
+    browser: null,
+    error: null
+  };
+}
+
 function App() {
   const [streamId, setStreamId] = useState('stream1');
   const [sourceType, setSourceType] = useState('stream');
@@ -72,13 +83,7 @@ function App() {
     error: null
   });
   const [liveStatus, setLiveStatus] = useState('Idle');
-  const [webrtcDiag, setWebrtcDiag] = useState({
-    consumerId: null,
-    producerScore: null,
-    consumerScore: null,
-    currentLayers: null,
-    error: null
-  });
+  const [webrtcDiag, setWebrtcDiag] = useState(emptyWebRtcDiag);
   const [startRequestInFlight, setStartRequestInFlight] = useState(false);
   const [stopRequestInFlight, setStopRequestInFlight] = useState(false);
   const [serverOnline, setServerOnline] = useState(true);
@@ -121,6 +126,7 @@ function App() {
   const webrtcConsumerRef = useRef(null);
   const webrtcMediaStreamRef = useRef(null);
   const webrtcStreamIdRef = useRef(null);
+  const webrtcBrowserStatsRef = useRef(null);
   const activeTabRef = useRef(activeTab);
   const streamIdRef = useRef(streamId);
   const streamRuntimeRef = useRef(streamRuntime);
@@ -284,6 +290,7 @@ function App() {
     if ((webrtcDiag.consumerScore ?? 0) <= 0) return { color: 'orange', label: 'No Consumer Media' };
     return { color: 'green', label: 'Media Flowing' };
   })();
+  const webRtcBrowserStats = webrtcDiag.browser;
 
   const dvrBadge = (() => {
     if (dvrDiag.error) return { color: 'red', label: 'Playback Error' };
@@ -478,17 +485,13 @@ function App() {
     webrtcTransportRef.current = null;
     webrtcMediaStreamRef.current = null;
     webrtcStreamIdRef.current = null;
+    webrtcBrowserStatsRef.current = null;
     if (liveVideoRef.current) liveVideoRef.current.srcObject = null;
   };
 
   const clearWebRtcDiag = () => {
-    setWebrtcDiag({
-      consumerId: null,
-      producerScore: null,
-      consumerScore: null,
-      currentLayers: null,
-      error: null
-    });
+    webrtcBrowserStatsRef.current = null;
+    setWebrtcDiag(emptyWebRtcDiag());
   };
 
   const setLiveNotConnected = () => {
@@ -807,13 +810,7 @@ function App() {
     if (!result?.ok || !result?.snapshot) {
       const message = String(result?.error || 'debug unavailable');
       if (/SFU client not initialized|SFU worker is not running/i.test(message)) {
-        setWebrtcDiag({
-          consumerId: null,
-          producerScore: null,
-          consumerScore: null,
-          currentLayers: null,
-          error: null
-        });
+        setWebrtcDiag(emptyWebRtcDiag());
         if (!hasActiveWebRtcSession(targetStreamId)) {
           setLiveStatus('Waiting for SFU...');
         }
@@ -827,15 +824,90 @@ function App() {
     }
 
     const consumers = Array.isArray(result.snapshot.consumers) ? result.snapshot.consumers : [];
-    const c = consumers.find((x) => x.streamId === targetStreamId) || null;
+    const localConsumerId = webrtcConsumerRef.current?.id || null;
+    const c = consumers.find((x) => x.consumerId === localConsumerId)
+      || consumers.find((x) => x.streamId === targetStreamId)
+      || null;
 
-    setWebrtcDiag({
+    setWebrtcDiag((prev) => ({
+      ...prev,
       consumerId: c?.consumerId || null,
       producerScore: Number.isFinite(c?.score?.producerScore) ? c.score.producerScore : null,
       consumerScore: Number.isFinite(c?.score?.score) ? c.score.score : null,
       currentLayers: c?.currentLayers ?? null,
       error: null
-    });
+    }));
+  };
+
+  const refreshWebRtcBrowserStats = async () => {
+    const consumer = webrtcConsumerRef.current;
+    if (!consumer || consumer.closed || typeof consumer.getStats !== 'function') return;
+
+    try {
+      const report = await consumer.getStats();
+      if (webrtcConsumerRef.current !== consumer) return;
+      const values = report && typeof report.values === 'function' ? Array.from(report.values()) : [];
+      const inbound = values.find((stat) => (
+        stat?.type === 'inbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')
+      ));
+      if (!inbound) return;
+
+      const value = (name) => {
+        const number = Number(inbound[name]);
+        return Number.isFinite(number) ? number : null;
+      };
+      const timestamp = value('timestamp') ?? performance.now();
+      const previous = webrtcBrowserStatsRef.current;
+      const elapsedSec = previous && timestamp > previous.timestamp
+        ? (timestamp - previous.timestamp) / 1000
+        : null;
+      const delta = (name) => {
+        const current = value(name);
+        const prior = previous?.[name];
+        return current != null && prior != null ? Math.max(0, current - prior) : null;
+      };
+      const bytesDelta = delta('bytesReceived');
+      const bitrateKbps = bytesDelta != null && elapsedSec && elapsedSec > 0
+        ? Math.round((bytesDelta * 8) / elapsedSec / 1000)
+        : null;
+
+      const sample = {
+        timestamp,
+        bytesReceived: value('bytesReceived'),
+        packetsLost: value('packetsLost'),
+        packetsReceived: value('packetsReceived'),
+        framesDecoded: value('framesDecoded'),
+        framesRendered: value('framesRendered'),
+        framesDropped: value('framesDropped'),
+        freezeCount: value('freezeCount'),
+        totalFreezesDuration: value('totalFreezesDuration')
+      };
+      webrtcBrowserStatsRef.current = sample;
+
+      setWebrtcDiag((prev) => ({
+        ...prev,
+        browser: {
+          frameWidth: value('frameWidth'),
+          frameHeight: value('frameHeight'),
+          framesPerSecond: value('framesPerSecond'),
+          framesDecoded: sample.framesDecoded,
+          framesRendered: sample.framesRendered,
+          framesDropped: sample.framesDropped,
+          decodedSinceLast: delta('framesDecoded'),
+          renderedSinceLast: delta('framesRendered'),
+          droppedSinceLast: delta('framesDropped'),
+          packetsLost: sample.packetsLost,
+          packetsReceived: sample.packetsReceived,
+          lostSinceLast: delta('packetsLost'),
+          jitterMs: value('jitter') != null ? Math.round(value('jitter') * 1000 * 10) / 10 : null,
+          bitrateKbps,
+          freezeCount: sample.freezeCount,
+          freezeSeconds: sample.totalFreezesDuration != null ? Math.round(sample.totalFreezesDuration * 10) / 10 : null
+        }
+      }));
+    } catch {
+      // The receiver can disappear while the transport is reconnecting.
+    }
   };
 
   const showOverlay = (obj, scopeTab = null) => {
@@ -1786,8 +1858,10 @@ function App() {
     if (!serverOnline) return;
     if (!streamRuntime?.running || !streamRuntime?.ingestRunning) return;
     refreshWebRtcDebug(streamId).catch(() => {});
+    refreshWebRtcBrowserStats().catch(() => {});
     const timer = setInterval(() => {
       refreshWebRtcDebug(streamId).catch(() => {});
+      refreshWebRtcBrowserStats().catch(() => {});
     }, 2000);
     return () => clearInterval(timer);
   }, [activeTab, streamId, serverOnline, streamRuntime?.running, streamRuntime?.ingestRunning]);
@@ -2171,7 +2245,16 @@ function App() {
                         <Badge color={webrtcBadge.color} variant="light">{webrtcBadge.label}</Badge>
                       </Group>
                       <Text size="xs" c="dimmed" mb="xs">
-                        producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | layers: {webrtcDiag.currentLayers ? JSON.stringify(webrtcDiag.currentLayers) : 'n/a'}
+                        producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | resolution: {webRtcBrowserStats?.frameWidth && webRtcBrowserStats?.frameHeight ? `${webRtcBrowserStats.frameWidth}×${webRtcBrowserStats.frameHeight}` : 'n/a'} | bitrate: {webRtcBrowserStats?.bitrateKbps != null ? `${webRtcBrowserStats.bitrateKbps} kbps` : 'n/a'}
+                      </Text>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        receiver: fps: {webRtcBrowserStats?.framesPerSecond ?? 'n/a'} | decoded: {webRtcBrowserStats?.framesDecoded ?? 'n/a'}{webRtcBrowserStats?.decodedSinceLast != null ? ` (+${webRtcBrowserStats.decodedSinceLast}/2s)` : ''} | rendered: {webRtcBrowserStats?.framesRendered ?? 'n/a'}{webRtcBrowserStats?.renderedSinceLast != null ? ` (+${webRtcBrowserStats.renderedSinceLast}/2s)` : ''}
+                      </Text>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        network: loss: {webRtcBrowserStats?.packetsLost ?? 'n/a'}{webRtcBrowserStats?.lostSinceLast != null ? ` (+${webRtcBrowserStats.lostSinceLast})` : ''} | jitter: {webRtcBrowserStats?.jitterMs != null ? `${webRtcBrowserStats.jitterMs} ms` : 'n/a'} | dropped: {webRtcBrowserStats?.framesDropped ?? 'n/a'}{webRtcBrowserStats?.droppedSinceLast != null ? ` (+${webRtcBrowserStats.droppedSinceLast})` : ''}
+                      </Text>
+                      <Text size="xs" c="dimmed" mb="xs">
+                        browser freezes: {webRtcBrowserStats?.freezeCount ?? 'n/a'}{webRtcBrowserStats?.freezeSeconds != null ? ` (${webRtcBrowserStats.freezeSeconds}s total)` : ''}
                       </Text>
                       <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
                     </Paper>
