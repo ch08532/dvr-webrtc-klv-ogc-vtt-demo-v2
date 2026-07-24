@@ -364,6 +364,9 @@ function getSourceRuntime(streamId) {
       webRtcMode: tracked?.webRtcMode || null,
       hlsEncoderMode: tracked?.hlsEncoderMode || null,
       webRtcEncoderMode: tracked?.webRtcEncoderMode || null,
+      hlsRenditions: tracked?.hlsRenditions || null,
+      copyNativeTopRung: tracked?.copyNativeTopRung === true,
+      klvProbe: tracked?.klvProbe || null,
       stage: tracked?.stage || null,
       durationSeconds: tracked?.durationSeconds ?? null,
       processedSeconds: tracked?.processedSeconds ?? null,
@@ -407,6 +410,9 @@ function getSourceRuntime(streamId) {
     webRtcMode: source.webRtcMode,
     hlsEncoderMode: source.hlsEncoderMode,
     webRtcEncoderMode: source.webRtcEncoderMode,
+    hlsRenditions: source.hlsRenditions || tracked?.hlsRenditions || null,
+    copyNativeTopRung: source.copyNativeTopRung === true,
+    klvProbe: source.klvProbe || tracked?.klvProbe || null,
     stage: tracked?.stage || null,
     durationSeconds: tracked?.durationSeconds ?? null,
     processedSeconds: tracked?.processedSeconds ?? null,
@@ -739,6 +745,7 @@ app.post("/sources", async (req, res) => {
       webRtcMode,
       hlsEncoderMode,
       webRtcEncoderMode,
+      klvProbe: sourceProbe?.klv || null,
       durationSeconds: fileDurationSeconds,
       processedSeconds: sourceType === "file" ? 0 : null,
       progressPercent: sourceType === "file" ? 0 : null,
@@ -786,6 +793,7 @@ app.post("/sources", async (req, res) => {
       hlsSegmentSeconds: effectiveSegmentSeconds,
       mode: hlsEncoderMode,
       sourceType,
+      sourceVideo: sourceProbe?.video || null,
       onProgress: ({ processedSeconds, speed, complete }) => {
         if (sourceType !== "file" || !Number.isFinite(processedSeconds)) return;
         const clampedProcessedSeconds = Number.isFinite(fileDurationSeconds)
@@ -810,7 +818,9 @@ app.post("/sources", async (req, res) => {
       state: "starting",
       stage: "hls_started",
       encoder: hls.encoder,
-      usingGpu: hls.usingGpu
+      usingGpu: hls.usingGpu,
+      hlsRenditions: hls.renditions,
+      copyNativeTopRung: hls.copyNativeTopRung
     });
 
     // Write the master playlist before the recorder begins publishing media playlists.
@@ -818,7 +828,7 @@ app.post("/sources", async (req, res) => {
     await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
     await fs.promises.writeFile(
       masterPath,
-      hls.isAbr ? createHlsMasterPlaylist() : createPassthroughHlsMasterPlaylist()
+      hls.isAbr ? createHlsMasterPlaylist(hls.renditions) : createPassthroughHlsMasterPlaylist()
     );
 
     // 2) KLV ingest + DB/VTT sidecar in dedicated worker process
@@ -885,6 +895,9 @@ app.post("/sources", async (req, res) => {
       maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
       minCueDurSec: Number(minCueDurSec) || 0.10,
       maxCueDurSec: Number(maxCueDurSec) || 0.50,
+      hlsRenditions: hls.renditions,
+      copyNativeTopRung: hls.copyNativeTopRung,
+      klvProbe: sourceProbe?.klv || null,
       hls, klvWorker,
       webrtc: sourceType === "file" ? null : { ingestRunning: true, producerId }
     });

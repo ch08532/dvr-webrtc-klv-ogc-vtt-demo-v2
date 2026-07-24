@@ -11,13 +11,19 @@ const theme = createTheme({
   /** Put your mantine theme override here */
 });
 
-const HLS_QUALITY_OPTIONS = [
-  { value: 'auto', label: 'Auto (adaptive)' },
-  ...[...HLS_RENDITIONS].sort((a, b) => a.bandwidth - b.bandwidth).map((rendition) => ({
-    value: rendition.id,
-    label: `${rendition.id} (${rendition.videoBitrate})`
+function hlsQualityOptionsFor(renditions) {
+  return [
+    { value: 'auto', label: 'Auto (adaptive)' },
+    ...[...renditions].sort((a, b) => a.bandwidth - b.bandwidth).map((rendition) => ({
+      value: rendition.id,
+      label: rendition.playlist === 'v2/index.m3u8'
+        ? 'Low (90p)'
+        : rendition.playlist === 'v0/index.m3u8'
+          ? 'Medium (360p)'
+          : `High (${rendition.id}${rendition.sourceCopy ? ', source copy' : ''})`
   }))
-];
+  ];
+}
 
 function App() {
   const [streamId, setStreamId] = useState('stream1');
@@ -83,12 +89,15 @@ function App() {
   const activeHlsMode = hlsRuntimeIsActive
     ? streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode
     : hlsMode;
+  const activeHlsRenditions = Array.isArray(streamRuntime?.hlsRenditions) && streamRuntime.hlsRenditions.length
+    ? streamRuntime.hlsRenditions
+    : HLS_RENDITIONS;
   const passthroughFallbackLikely = hlsMode === 'passthrough'
     && !!inputProbe.video?.codec
     && (inputProbe.video.codec.toLowerCase() !== 'h264'
       || (inputProbe.audio?.codec && inputProbe.audio.codec.toLowerCase() !== 'aac'));
   const hlsQualityOptions = activeHlsMode === 'abr'
-    ? HLS_QUALITY_OPTIONS
+    ? hlsQualityOptionsFor(activeHlsRenditions)
     : [{ value: 'auto', label: 'Auto (source)' }];
 
   const videoRef = useRef(null);
@@ -105,6 +114,7 @@ function App() {
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
   const hlsQualityRef = useRef('auto');
+  const appliedHlsQualityRef = useRef({ player: null, quality: null, representations: null });
   const webrtcRetryTimerRef = useRef(null);
   const webrtcRetryTokenRef = useRef(0);
   const webrtcTransportRef = useRef(null);
@@ -286,6 +296,12 @@ function App() {
   })();
 
   const hasActiveKlvFlow = (runtime) => Boolean(runtime?.running && runtime?.klvRunning);
+  // File conversion intentionally stops the KLV worker once its VTT sidecars
+  // are finalized.  Those cues remain valid and must stay visible in DVR.
+  const hasCompletedFileDvrTelemetry = (runtime) => Boolean(
+    runtime?.sourceType === 'file' && runtime?.state === 'ready'
+  );
+  const hasDvrKlvTelemetry = (runtime) => hasActiveKlvFlow(runtime) || hasCompletedFileDvrTelemetry(runtime);
 
   const refreshStreamState = async (targetStreamId = streamId, { updateStatus = false } = {}) => {
     if (!targetStreamId) return;
@@ -293,7 +309,7 @@ function App() {
     if (result?.streamId) {
       streamRuntimeRef.current = result;
       setStreamRuntime(result);
-      if (!hasActiveKlvFlow(result)) setOverlayData(null);
+      if (!hasDvrKlvTelemetry(result)) setOverlayData(null);
       if (result.running || result.state === 'ready') setAutoAttachOnDvr(true);
       if (!result.running && result.state !== 'ready') setAutoAttachOnDvr(false);
       if (updateStatus) setStatus(JSON.stringify(result, null, 2));
@@ -663,6 +679,9 @@ function App() {
     if (!canStartSource) return;
     setStartRequestInFlight(true);
     setHlsMediaLoaded(false);
+    hlsQualityRef.current = 'auto';
+    setHlsQuality('auto');
+    setHlsQualityControlAvailable(false);
     setStreamRuntime({ streamId, sourceType, state: 'starting', running: false, lastError: null });
     try {
       let assetId = null;
@@ -821,7 +840,10 @@ function App() {
 
   const showOverlay = (obj, scopeTab = null) => {
     if (scopeTab && activeTabRef.current !== scopeTab) return;
-    if (!hasActiveKlvFlow(streamRuntimeRef.current)) return;
+    const canShow = scopeTab === 'dvr'
+      ? hasDvrKlvTelemetry(streamRuntimeRef.current)
+      : hasActiveKlvFlow(streamRuntimeRef.current);
+    if (!canShow) return;
     setOverlayData(obj);
   };
 
@@ -844,7 +866,8 @@ function App() {
   const getHlsRepresentations = (player = getActiveHlsPlayer()) => {
     if (!player) return [];
     try {
-      const representations = player.tech?.()?.vhs?.representations?.();
+      const tech = player.tech?.({ IWillNotUseThisInPlugins: true });
+      const representations = tech?.vhs?.representations?.();
       return Array.isArray(representations) ? representations : [];
     } catch {
       return [];
@@ -862,7 +885,25 @@ function App() {
       return false;
     }
 
-    const target = HLS_RENDITIONS.find((rendition) => rendition.id === quality);
+    // Enabling VHS representations can cause a rendition transition.  Do not
+    // repeat that work for the same player and representation set when the
+    // browser emits follow-up canplay/metadata events during the transition.
+    const player = getActiveHlsPlayer();
+    const representationSignature = representations
+      .map((representation) => `${representation.id || ''}:${representation.width || 0}x${representation.height || 0}`)
+      .sort()
+      .join('|');
+    const alreadyApplied = appliedHlsQualityRef.current;
+    if (
+      alreadyApplied.player === player
+      && alreadyApplied.quality === quality
+      && alreadyApplied.representations === representationSignature
+    ) {
+      setHlsQualityControlAvailable(true);
+      return true;
+    }
+
+    const target = activeHlsRenditions.find((rendition) => rendition.id === quality);
     let matched = quality === 'auto';
     for (const representation of representations) {
       const enabled = quality === 'auto' || (
@@ -871,12 +912,16 @@ function App() {
       if (enabled) matched = true;
       try { representation.enabled(enabled); } catch {}
     }
-
     if (!matched) {
       for (const representation of representations) {
         try { representation.enabled(true); } catch {}
       }
     }
+    appliedHlsQualityRef.current = {
+      player,
+      quality,
+      representations: representationSignature
+    };
     setHlsQualityControlAvailable(true);
     return matched;
   };
@@ -990,6 +1035,16 @@ function App() {
   const conversionProgress = (source) => {
     const percent = Number(source?.progressPercent);
     return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+  };
+
+  const klvProbeStatus = (source) => {
+    const probe = source?.klvProbe;
+    if (!probe) return { color: 'gray', label: 'KLV analysis unavailable' };
+    const count = Number(probe.streamCount);
+    const suffix = Number.isFinite(count) && count > 0 ? ` (${count} stream${count === 1 ? '' : 's'})` : '';
+    if (probe.confidence === 'high') return { color: 'teal', label: `KLV detected${suffix}` };
+    if (probe.available) return { color: 'yellow', label: `Possible KLV${suffix}` };
+    return { color: 'gray', label: 'No KLV found' };
   };
 
   const getCurrentHlsPlaylistInfo = (player = null) => {
@@ -1196,7 +1251,7 @@ function App() {
     // Reuse existing player on tab switches if source is unchanged.
     if (window.player && !window.player.isDisposed?.()) {
       const currentSrc = String(window.player.currentSrc?.() || "");
-      if (currentSrc.includes(`/hls/${encodeURIComponent(streamId)}/master.m3u8`)) {
+      if (currentSrc.includes(url)) {
         forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(hasLoadedHlsMedia(window.player));
         setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
@@ -1238,7 +1293,6 @@ function App() {
         videoEl.muted = true;
         videoEl.playsInline = true;
         videoEl.style.width = "100%";
-        videoEl.style.maxHeight = "400px";
         hostEl.appendChild(videoEl);
         videoRef.current = videoEl;
       }
@@ -1258,6 +1312,7 @@ function App() {
           }
         }
       });
+      appliedHlsQualityRef.current = { player: null, quality: null, representations: null };
 
       window.player.src({
         src: url,
@@ -1285,7 +1340,6 @@ function App() {
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(window.player);
-        applyHlsQuality(hlsQualityRef.current);
       });
       window.player.on('playing', () => {
         setHlsMediaLoaded(true);
@@ -1622,13 +1676,21 @@ function App() {
     if (streamRuntime?.sourceType === 'file' && activeTab === 'live-webrtc') {
       setActiveTab('dvr');
     }
-    if (!hasActiveKlvFlow(streamRuntime)) {
+    if (!hasDvrKlvTelemetry(streamRuntime)) {
       setOverlayData(null);
     }
     if (activeTab === 'live-webrtc' && !hasActiveKlvFlow(streamRuntime)) {
       setLiveNotConnected();
     }
   }, [streamRuntime, activeTab]);
+
+  useEffect(() => {
+    if (hlsQuality === 'auto') return;
+    if (activeHlsRenditions.some((rendition) => rendition.id === hlsQuality)) return;
+    hlsQualityRef.current = 'auto';
+    setHlsQuality('auto');
+    setHlsQualityControlAvailable(false);
+  }, [activeHlsRenditions, hlsQuality]);
 
   useEffect(() => {
     if (activeTab !== 'dvr') {
@@ -1737,14 +1799,14 @@ function App() {
     ? Object.entries(overlayData)
     : [];
   const activeHlsRendition = activeHlsMode === 'abr'
-    ? HLS_RENDITIONS.find((rendition) => (
+    ? activeHlsRenditions.find((rendition) => (
       [dvrDiag.currentPlaylistUri, dvrDiag.currentPlaylistResolvedUri]
         .filter(Boolean)
         .some((uri) => String(uri).includes(rendition.playlist))
     ))
     : null;
   const activeHlsRenditionLabel = activeHlsRendition
-    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.videoBitrate}`
+    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.sourceCopy ? 'source copy' : activeHlsRendition.videoBitrate}`
     : dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri
       ? activeHlsMode === 'single-transcode'
         ? 'single transcoded rendition'
@@ -1915,6 +1977,13 @@ function App() {
               </Group>
               {streamRuntime?.sourceType === 'file' && streamRuntime?.state !== 'stopped' ? (
                 <Stack gap={4} mt="xs">
+                  <Group gap="xs">
+                    {(() => {
+                      const klvStatus = klvProbeStatus(streamRuntime);
+                      return <Badge color={klvStatus.color} variant="light">{klvStatus.label}</Badge>;
+                    })()}
+                    <Text size="xs" c="dimmed">Based on the uploaded file&apos;s stream probe.</Text>
+                  </Group>
                   <Group justify="space-between">
                     <Text size="xs">Conversion ({streamRuntime?.state || 'preparing'}): {conversionProgress(streamRuntime) != null ? `${conversionProgress(streamRuntime).toFixed(1)}%` : 'Preparing...'}</Text>
                     <Text size="xs" c="dimmed">
@@ -1951,6 +2020,10 @@ function App() {
                     </Text>
                     {s.sourceType === 'file' ? (
                       <Stack gap={3} mt="xs">
+                        {(() => {
+                          const klvStatus = klvProbeStatus(s);
+                          return <Badge color={klvStatus.color} variant="light" w="fit-content">{klvStatus.label}</Badge>;
+                        })()}
                         <Text size="xs" c="dimmed">
                           conversion: {conversionProgress(s) != null ? `${conversionProgress(s).toFixed(1)}%` : 'preparing'} · {formatConversionTime(s.processedSeconds)} / {formatConversionTime(s.durationSeconds)}
                           {Number.isFinite(Number(s.encodeSpeed)) ? ` · ${Number(s.encodeSpeed).toFixed(2)}x` : ''}
@@ -2050,7 +2123,7 @@ function App() {
                       ) : null}
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
-                      <Text size="sm" fw={600}>VTT Telemetry</Text>
+                      <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
                       <Tabs value={dvrTelemetryTab} onChange={setDvrTelemetryTab} mt="xs">
                         <Tabs.List grow>
                           <Tabs.Tab value="data">Data</Tabs.Tab>

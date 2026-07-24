@@ -5,7 +5,7 @@ A runnable Node.js demo that:
 - ingests an MPEG-TS stream (UDP or file)
 - parses STANAG 4609 / MISB ST 0601 KLV
 - records video as HLS MPEG-TS with `EXT-X-PROGRAM-DATE-TIME` (DVR)
-- publishes a three-rung adaptive-bitrate ladder: 90p/100 kbps, 360p/800 kbps, and 720p/3 Mbps
+- publishes a three-rung adaptive-bitrate ladder: 90p/100 kbps, 360p/800 kbps, and 1080p/6 Mbps
 - generates a **segmented WebVTT sidecar track** (default 5 seconds/segment, configurable)
 - serves HLS master playlist with subtitles group ("KLV")
 - plays Live via WebRTC (mediasoup) and DVR via HLS
@@ -25,7 +25,7 @@ A runnable Node.js demo that:
 ### Processing modes
 - **HLS passthrough** is the default: confirmed H.264 video with AAC (or no) audio is copied without video encoding. The browser playlist excludes KLV; a separate copy-only carrier playlist retains KLV for extraction.
 - **HLS compatibility fallback** activates when passthrough input is not H.264/AAC (for example MPEG-2 video): it produces one H.264 playback rendition and retains the original KLV carrier without re-encoding it.
-- **HLS ABR** creates the configured 90p, 360p, and 720p ladder and requires video transcoding.
+- **HLS ABR** creates three renditions: Low (90p), Medium (360p), and High (the source's native resolution). A compatible H.264 source is copied into High; other source codecs are encoded to their native-resolution High rung.
 - **Live WebRTC auto-copy** copies H.264 into RTP when the input probe confirms H.264; it falls back to transcoding for other codecs. File sources are HLS-only.
 
 ## Install / run
@@ -95,7 +95,7 @@ While a file source is packaging, the UI displays its conversion percentage, sou
 DVR output will appear under `./recordings/<streamId>/`:
 - `master.m3u8`
 - `v0/index.m3u8` (360p video; timing reference for the VTT playlist)
-- `v1/index.m3u8` (720p video)
+- `v1/index.m3u8` (1080p video)
 - `v2/index.m3u8` (90p video)
 - `playlist.m3u8` (private KLV carrier playlist)
 - `subtitles.m3u8` (VTT playlist)

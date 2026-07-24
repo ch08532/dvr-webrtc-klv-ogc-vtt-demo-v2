@@ -40,7 +40,7 @@ export function buildVideoArgs(mode, { gpuPreset } = {}) {
         "-preset", envString("FFMPEG_X264_PRESET", "veryfast"),
         "-tune", envString("FFMPEG_X264_TUNE", "zerolatency"),
         "-profile:v", "baseline",
-        "-level", "3.1",
+        "-level", envString("FFMPEG_H264_LEVEL", "4.2"),
         "-pix_fmt", "yuv420p",
         "-x264-params", "keyint=30:min-keyint=30:no-scenecut=1"
       ],
@@ -67,7 +67,7 @@ export function buildVideoArgs(mode, { gpuPreset } = {}) {
 
   videoArgs.push(
     "-profile:v", "baseline",
-    "-level", "3.1",
+    "-level", envString("FFMPEG_H264_LEVEL", "4.2"),
     "-pix_fmt", "yuv420p",
     "-g", gop,
     "-keyint_min", gop
