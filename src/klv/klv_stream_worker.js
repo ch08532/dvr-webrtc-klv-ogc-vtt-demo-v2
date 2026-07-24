@@ -21,11 +21,7 @@ function vttTime(seconds) {
   return `${pad(hh, 2)}:${pad(mm, 2)}:${pad(ss, 2)}.${pad(ms, 3)}`;
 }
 
-function safeJson(obj, maxLen = 950) {
-  let s = JSON.stringify(obj);
-  if (s.length > maxLen) s = s.slice(0, maxLen) + "…";
-  return s;
-}
+function safeJson(obj) { return JSON.stringify(obj); }
 
 function parseVideoPlaylist(playlistPath) {
   try {
@@ -177,7 +173,21 @@ function buildVttCuePayload(payload) {
     sensorLon: payload.sensorLon,
     frameCenterLat: payload.frameCenterLat,
     frameCenterLon: payload.frameCenterLon,
+    frameCorner1Lat: payload.frameCorner1Lat,
+    frameCorner1Lon: payload.frameCorner1Lon,
+    frameCorner2Lat: payload.frameCorner2Lat,
+    frameCorner2Lon: payload.frameCorner2Lon,
+    frameCorner3Lat: payload.frameCorner3Lat,
+    frameCorner3Lon: payload.frameCorner3Lon,
+    frameCorner4Lat: payload.frameCorner4Lat,
+    frameCorner4Lon: payload.frameCorner4Lon,
+    frameCornerSource: payload.frameCornerSource,
+    sensorAltMslM: payload.sensorAltMslM,
     platformHeadingDeg: payload.platformHeadingDeg,
+    platformPitchDeg: payload.platformPitchDeg,
+    platformRollDeg: payload.platformRollDeg,
+    sensorRelAzDeg: payload.sensorRelAzDeg,
+    sensorRelElDeg: payload.sensorRelElDeg,
     sensorHfovDeg: payload.sensorHfovDeg,
     sensorVfovDeg: payload.sensorVfovDeg,
     slantRangeM: payload.slantRangeM

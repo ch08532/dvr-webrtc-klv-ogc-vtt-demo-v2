@@ -23,6 +23,26 @@
   overflow: hidden;
 }
 
+.klv-map-center-button {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 1;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  color: #212529;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+}
+
+.klv-map-center-button:disabled,
+.klv-map-center-button:disabled {
+  color: #868e96;
+  cursor: not-allowed;
+}
+
 .klv-map-empty {
   position: absolute;
   inset: 0;
@@ -32,4 +52,34 @@
   color: #495057;
   background: rgba(255, 255, 255, 0.75);
   pointer-events: none;
+}
+
+.klv-map-terrain-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.klv-map-terrain-source {
+  max-width: 13rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.klv-map-terrain-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.klv-map-terrain-status {
+  color: #495057;
+}
+
+.klv-map-terrain-error {
+  color: #c92a2a;
 }

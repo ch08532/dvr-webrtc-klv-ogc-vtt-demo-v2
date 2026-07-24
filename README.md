@@ -102,7 +102,10 @@ DVR output will appear under `./recordings/<streamId>/`:
 - `meta_<segNo>.vtt` (segmented metadata)
 
 ## Notes
-- DVR overlay is driven by the WebVTT track (no websocket sync needed).
+- The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show the sensor/platform position, frame-center position, platform heading, and their connecting line when coordinates are present. Each map centers on its first valid platform position; use **Center map** to recenter on the platform later.
+- The map automatically loads an approximately 100 × 100 mile terrain GeoTIFF region around the platform from the public USGS 3DEP elevation service while the platform is within U.S. coverage. The region is reused until the platform crosses into a new terrain area. Terrain elevations must use the same MSL vertical datum as the KLV sensor altitude. The green terrain target and solid green line are shown only when those KLV fields and terrain coverage are available; the red marker remains the original KLV frame center.
+- The amber footprint polygon uses KLV frame-corner coordinates when present. Feeds without corner tags use a terrain-intersected footprint derived from the KLV sensor position, attitude, and horizontal/vertical FOV.
+- The footprint can be only a few metres wide at the platform-centered zoom. Use **Zoom to footprint** to inspect it without changing the default platform-centered view.
 - Live metadata overlay can be enabled via WS "WS: Live KLV".
 - The ST0601 decoder is partial; extend tags as needed for your feed.
 

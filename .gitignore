@@ -95,3 +95,4 @@ videos/
 db/
 *.sqlite
 *.sqlite3
+.agents

@@ -45,6 +45,8 @@ function App() {
   const [status, setStatus] = useState('Ready. Start Source, then choose Live or DVR. DVR overlay is from segmented WebVTT.');
   const [overlayData, setOverlayData] = useState(null);
   const [activeTab, setActiveTab] = useState('dvr');
+  const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
+  const [liveTelemetryTab, setLiveTelemetryTab] = useState('map');
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [hlsQuality, setHlsQuality] = useState('auto');
@@ -77,7 +79,10 @@ function App() {
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
   const [hostMetrics, setHostMetrics] = useState(null);
-  const activeHlsMode = streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode;
+  const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
+  const activeHlsMode = hlsRuntimeIsActive
+    ? streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode
+    : hlsMode;
   const passthroughFallbackLikely = hlsMode === 'passthrough'
     && !!inputProbe.video?.codec
     && (inputProbe.video.codec.toLowerCase() !== 'h264'
@@ -824,32 +829,6 @@ function App() {
     } catch {
       return String(value);
     }
-  };
-
-  const parseStatusPayload = (value) => {
-    if (value == null) return { entries: [], text: '' };
-    if (typeof value === 'object') {
-      if (Array.isArray(value)) {
-        return { entries: [], text: JSON.stringify(value, null, 2) };
-      }
-      return { entries: Object.entries(value), text: '' };
-    }
-
-    const asText = String(value);
-    const trimmed = asText.trim();
-    if (!trimmed) return { entries: [], text: '' };
-
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return { entries: Object.entries(parsed), text: '' };
-      }
-      return { entries: [], text: JSON.stringify(parsed, null, 2) };
-    } catch {
-      // Fallback to plain text status.
-    }
-
-    return { entries: [], text: asText };
   };
 
   const getActiveHlsPlayer = () => {
@@ -1764,8 +1743,6 @@ function App() {
         ? 'single transcoded rendition'
         : 'source (single rendition)'
       : 'n/a';
-  const statusParsed = parseStatusPayload(status);
-
   return (
     <MantineProvider theme={theme}>
       <AppShell
@@ -1855,11 +1832,9 @@ function App() {
                   onChange={(value) => {
                     const nextMode = value || 'passthrough';
                     setHlsMode(nextMode);
-                    if (nextMode === 'passthrough') {
-                      hlsQualityRef.current = 'auto';
-                      setHlsQuality('auto');
-                      setHlsQualityControlAvailable(false);
-                    }
+                    hlsQualityRef.current = 'auto';
+                    setHlsQuality('auto');
+                    setHlsQualityControlAvailable(false);
                   }}
                   allowDeselect={false}
                 />
@@ -2070,33 +2045,43 @@ function App() {
                       ) : null}
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
-                      <Text size="sm" fw={600}>VTT Overlay</Text>
-                      {dvrOverlayEntries.length ? (
-                        <Stack gap={4} mt="xs">
-                          {dvrOverlayEntries.map(([key, value]) => (
-                            <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
-                              <Text size="xs" fw={600}>{key}</Text>
-                              <Text
-                                size="xs"
-                                style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
-                              >
-                                {formatOverlayValue(value)}
-                              </Text>
-                            </Group>
-                          ))}
-                        </Stack>
-                      ) : (
-                        <Text size="sm" c="dimmed" mt="xs">
-                          No VTT overlay data yet.
-                        </Text>
-                      )}
+                      <Text size="sm" fw={600}>VTT Telemetry</Text>
+                      <Tabs value={dvrTelemetryTab} onChange={setDvrTelemetryTab} mt="xs">
+                        <Tabs.List grow>
+                          <Tabs.Tab value="data">Data</Tabs.Tab>
+                          <Tabs.Tab value="map">Map</Tabs.Tab>
+                        </Tabs.List>
+                        <Tabs.Panel value="data" pt="xs">
+                          {dvrOverlayEntries.length ? (
+                            <Stack gap={4}>
+                              {dvrOverlayEntries.map(([key, value]) => (
+                                <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                                  <Text size="xs" fw={600}>{key}</Text>
+                                  <Text
+                                    size="xs"
+                                    style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                                  >
+                                    {formatOverlayValue(value)}
+                                  </Text>
+                                </Group>
+                              ))}
+                            </Stack>
+                          ) : (
+                            <Text size="sm" c="dimmed">
+                              No VTT overlay data yet.
+                            </Text>
+                          )}
+                        </Tabs.Panel>
+                        <Tabs.Panel value="map" pt="xs">
+                          <Text size="xs" c="dimmed" mb="xs">Following the active WebVTT cue.</Text>
+                          <KlvMap
+                            telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
+                            active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
+                          />
+                        </Tabs.Panel>
+                      </Tabs>
                     </Paper>
                   </Group>
-                  <Paper p="sm" withBorder mt="xs">
-                    <Text size="sm" fw={600}>KLV Map</Text>
-                    <Text size="xs" c="dimmed" mb="xs">Platform position and frame center follow the active WebVTT cue.</Text>
-                    <KlvMap telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null} active={activeTab === 'dvr'} />
-                  </Paper>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
@@ -2113,57 +2098,45 @@ function App() {
                       <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
-                      <Text size="sm" fw={600}>Live KLV Overlay</Text>
-                      {liveKlvOverlayEntries.length ? (
-                        <Stack gap={4} mt="xs">
-                          {liveKlvOverlayEntries.map(([key, value]) => (
-                            <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
-                              <Text size="xs" fw={600}>{key}</Text>
-                              <Text
-                                size="xs"
-                                style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
-                              >
-                                {formatOverlayValue(value)}
-                              </Text>
-                            </Group>
-                          ))}
-                        </Stack>
-                      ) : (
-                        <Text size="sm" c="dimmed" mt="xs">
-                          No live KLV overlay data yet.
-                        </Text>
-                      )}
+                      <Text size="sm" fw={600}>Live KLV Telemetry</Text>
+                      <Tabs value={liveTelemetryTab} onChange={setLiveTelemetryTab} mt="xs">
+                        <Tabs.List grow>
+                          <Tabs.Tab value="data">Data</Tabs.Tab>
+                          <Tabs.Tab value="map">Map</Tabs.Tab>
+                        </Tabs.List>
+                        <Tabs.Panel value="data" pt="xs">
+                          {liveKlvOverlayEntries.length ? (
+                            <Stack gap={4}>
+                              {liveKlvOverlayEntries.map(([key, value]) => (
+                                <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
+                                  <Text size="xs" fw={600}>{key}</Text>
+                                  <Text
+                                    size="xs"
+                                    style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
+                                  >
+                                    {formatOverlayValue(value)}
+                                  </Text>
+                                </Group>
+                              ))}
+                            </Stack>
+                          ) : (
+                            <Text size="sm" c="dimmed">
+                              No live KLV overlay data yet.
+                            </Text>
+                          )}
+                        </Tabs.Panel>
+                        <Tabs.Panel value="map" pt="xs">
+                          <Text size="xs" c="dimmed" mb="xs">Following the live WebSocket KLV feed.</Text>
+                          <KlvMap
+                            telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
+                            active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
+                          />
+                        </Tabs.Panel>
+                      </Tabs>
                     </Paper>
                   </Group>
-                  <Paper p="sm" withBorder mt="xs">
-                    <Text size="sm" fw={600}>Live KLV Map</Text>
-                    <KlvMap telemetry={overlayData?.mode === 'live-ws' ? overlayData : null} active={activeTab === 'live-webrtc'} />
-                  </Paper>
                 </Tabs.Panel>
               </Tabs>
-            </Paper>
-
-            <Paper shadow="xs" p="md">
-              <Text size="lg" fw={500}>Status</Text>
-              {statusParsed.entries.length ? (
-                <Stack gap={4} mt="xs">
-                  {statusParsed.entries.map(([key, value]) => (
-                    <Group key={key} justify="space-between" align="flex-start" wrap="nowrap">
-                      <Text size="xs" fw={600}>{key}</Text>
-                      <Text
-                        size="xs"
-                        style={{ maxWidth: '70%', textAlign: 'right', overflowWrap: 'anywhere' }}
-                      >
-                        {formatOverlayValue(value)}
-                      </Text>
-                    </Group>
-                  ))}
-                </Stack>
-              ) : (
-                <Text size="sm" mt="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                  {statusParsed.text || 'No status yet.'}
-                </Text>
-              )}
             </Paper>
           </Stack>
         </AppShell.Main>

@@ -33,6 +33,10 @@ function mapInt16ToRange(v, min, max) {
   return min + ((v + 32767) / 65534) * (max - min);
 }
 
+function hasCompleteCorners(payload) {
+  return [1, 2, 3, 4].every((index) => Number.isFinite(payload[`frameCorner${index}Lat`]) && Number.isFinite(payload[`frameCorner${index}Lon`]));
+}
+
 export function decodeSt0601LocalSet(lsBuf) {
   const out = {};
   let off = 0;
@@ -76,6 +80,25 @@ export function decodeSt0601LocalSet(lsBuf) {
 
       case 23: if (v.length === 4) out.frameCenterLat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
       case 24: if (v.length === 4) out.frameCenterLon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
+      case 25: if (v.length === 2) out.frameCenterElevationMslM = mapUint16ToRange(v.readUInt16BE(0), -900, 19000); break;
+
+      case 26: if (v.length === 2) out.offsetCorner1Lat = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 27: if (v.length === 2) out.offsetCorner1Lon = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 28: if (v.length === 2) out.offsetCorner2Lat = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 29: if (v.length === 2) out.offsetCorner2Lon = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 30: if (v.length === 2) out.offsetCorner3Lat = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 31: if (v.length === 2) out.offsetCorner3Lon = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 32: if (v.length === 2) out.offsetCorner4Lat = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+      case 33: if (v.length === 2) out.offsetCorner4Lon = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+
+      case 82: if (v.length === 4) out.frameCorner1Lat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
+      case 83: if (v.length === 4) out.frameCorner1Lon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
+      case 84: if (v.length === 4) out.frameCorner2Lat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
+      case 85: if (v.length === 4) out.frameCorner2Lon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
+      case 86: if (v.length === 4) out.frameCorner3Lat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
+      case 87: if (v.length === 4) out.frameCorner3Lon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
+      case 88: if (v.length === 4) out.frameCorner4Lat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
+      case 89: if (v.length === 4) out.frameCorner4Lon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
 
       case 5: if (v.length === 2) out.platformHeadingDeg = mapUint16ToRange(v.readUInt16BE(0), 0, 360); break;
       case 6: if (v.length === 2) out.platformPitchDeg = mapInt16ToRange(v.readInt16BE(0), -20, 20); break;
@@ -85,5 +108,21 @@ export function decodeSt0601LocalSet(lsBuf) {
         break;
     }
   }
+
+  if (hasCompleteCorners(out)) {
+    out.frameCornerSource = 'full';
+    return out;
+  }
+
+  const hasFrameCenter = Number.isFinite(out.frameCenterLat) && Number.isFinite(out.frameCenterLon);
+  const hasCompleteOffsets = [1, 2, 3, 4].every((index) => Number.isFinite(out[`offsetCorner${index}Lat`]) && Number.isFinite(out[`offsetCorner${index}Lon`]));
+  if (hasFrameCenter && hasCompleteOffsets) {
+    for (const index of [1, 2, 3, 4]) {
+      out[`frameCorner${index}Lat`] = out.frameCenterLat + out[`offsetCorner${index}Lat`];
+      out[`frameCorner${index}Lon`] = out.frameCenterLon + out[`offsetCorner${index}Lon`];
+    }
+    out.frameCornerSource = 'offset';
+  }
+
   return out;
 }
