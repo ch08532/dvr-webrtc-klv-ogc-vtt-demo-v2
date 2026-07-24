@@ -19,21 +19,26 @@ import {
 } from './terrain_model.js';
 import 'ol/ol.css';
 
+const normalizeHeading = (value) => {
+  const heading = Number(value);
+  if (!Number.isFinite(heading)) return null;
+  return ((heading % 360) + 360) % 360;
+};
+
 const platformStyle = (heading) => new Style({
   image: new RegularShape({
     points: 3,
     radius: 12,
-    rotation: ((90 - heading) * Math.PI) / 180,
+    rotation: ((90 - (heading ?? 0)) * Math.PI) / 180,
     fill: new Fill({ color: '#228be6' }),
     stroke: new Stroke({ color: '#ffffff', width: 2 })
-  }),
-  text: new Text({
-    text: 'Platform',
-    offsetY: -20,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#1a1b1e', width: 3 })
   })
 });
+
+const platformHeadingLineStyle = [
+  new Style({ stroke: new Stroke({ color: '#ffffff', width: 5 }) }),
+  new Style({ stroke: new Stroke({ color: '#228be6', width: 3 }) })
+];
 
 const frameCenterStyle = new Style({
   image: new CircleStyle({
@@ -103,6 +108,9 @@ export default function KlvMap({ telemetry, active }) {
   const mapRef = useRef(null);
   const sourceRef = useRef(null);
   const platformRef = useRef(null);
+  const platformHeadingLineRef = useRef(null);
+  const platformPositionRef = useRef(null);
+  const platformHeadingRef = useRef(null);
   const frameCenterRef = useRef(null);
   const lineRef = useRef(null);
   const terrainTargetRef = useRef(null);
@@ -135,6 +143,27 @@ export default function KlvMap({ telemetry, active }) {
 
   const centerOnLatestTelemetry = () => centerOnPosition(focusPositionRef.current);
 
+  const updatePlatformHeadingLine = () => {
+    const map = mapRef.current;
+    const line = platformHeadingLineRef.current;
+    const position = platformPositionRef.current;
+    const heading = platformHeadingRef.current;
+    const resolution = map?.getView()?.getResolution();
+    if (!line) return;
+    if (!position || heading == null || !Number.isFinite(resolution)) {
+      line.setGeometry(null);
+      return;
+    }
+
+    const radians = (heading * Math.PI) / 180;
+    const startDistance = resolution * 11;
+    const endDistance = resolution * 42;
+    line.setGeometry(new LineString([
+      [position[0] + Math.sin(radians) * startDistance, position[1] + Math.cos(radians) * startDistance],
+      [position[0] + Math.sin(radians) * endDistance, position[1] + Math.cos(radians) * endDistance]
+    ]));
+  };
+
   const centerOnInitialFrame = (position) => {
     const requestId = ++centerRequestRef.current;
     requestAnimationFrame(() => {
@@ -147,6 +176,7 @@ export default function KlvMap({ telemetry, active }) {
   useEffect(() => {
     const source = new VectorSource();
     const platform = new Feature();
+    const platformHeadingLine = new Feature();
     const frameCenter = new Feature();
     const line = new Feature();
     const terrainTarget = new Feature();
@@ -154,12 +184,13 @@ export default function KlvMap({ telemetry, active }) {
     const frameGeometry = new Feature();
 
     platform.setStyle(platformStyle(0));
+    platformHeadingLine.setStyle(platformHeadingLineStyle);
     frameCenter.setStyle(frameCenterStyle);
     line.setStyle(lineStyle);
     terrainTarget.setStyle(terrainTargetStyle);
     terrainLine.setStyle(terrainLineStyle);
     frameGeometry.setStyle(frameGeometryStyle);
-    source.addFeatures([frameGeometry, line, terrainLine, platform, frameCenter, terrainTarget]);
+    source.addFeatures([frameGeometry, line, terrainLine, platformHeadingLine, platform, frameCenter, terrainTarget]);
 
     const map = new Map({
       target: targetRef.current,
@@ -176,17 +207,23 @@ export default function KlvMap({ telemetry, active }) {
     mapRef.current = map;
     sourceRef.current = source;
     platformRef.current = platform;
+    platformHeadingLineRef.current = platformHeadingLine;
     frameCenterRef.current = frameCenter;
     lineRef.current = line;
     terrainTargetRef.current = terrainTarget;
     terrainLineRef.current = terrainLine;
     frameGeometryRef.current = frameGeometry;
+    const view = map.getView();
+    const onResolutionChange = () => updatePlatformHeadingLine();
+    view.on('change:resolution', onResolutionChange);
 
     return () => {
       resizeObserver.disconnect();
+      view.un('change:resolution', onResolutionChange);
       map.setTarget(undefined);
       mapRef.current = null;
       sourceRef.current = null;
+      platformHeadingLineRef.current = null;
     };
   }, []);
 
@@ -239,6 +276,9 @@ export default function KlvMap({ telemetry, active }) {
 
     if (!sensorAvailable && !frameCenterAvailable) {
       platformRef.current.setGeometry(null);
+      platformPositionRef.current = null;
+      platformHeadingRef.current = null;
+      updatePlatformHeadingLine();
       frameCenterRef.current.setGeometry(null);
       lineRef.current.setGeometry(null);
       terrainTargetRef.current.setGeometry(null);
@@ -253,9 +293,13 @@ export default function KlvMap({ telemetry, active }) {
     const frameCenterPosition = frameCenterAvailable
       ? fromLonLat([Number(telemetry.frameCenterLon), Number(telemetry.frameCenterLat)])
       : null;
+    const platformHeading = normalizeHeading(telemetry?.platformHeadingDeg);
 
     platformRef.current.setGeometry(sensorPosition ? new Point(sensorPosition) : null);
-    platformRef.current.setStyle(platformStyle(Number(telemetry?.platformHeadingDeg) || 0));
+    platformRef.current.setStyle(platformStyle(platformHeading));
+    platformPositionRef.current = sensorPosition;
+    platformHeadingRef.current = platformHeading;
+    updatePlatformHeadingLine();
     frameCenterRef.current.setGeometry(frameCenterPosition ? new Point(frameCenterPosition) : null);
     lineRef.current.setGeometry(sensorPosition && frameCenterPosition
       ? new LineString([sensorPosition, frameCenterPosition])

@@ -285,11 +285,15 @@ function App() {
     return { color: 'gray', label: 'No Media' };
   })();
 
+  const hasActiveKlvFlow = (runtime) => Boolean(runtime?.running && runtime?.klvRunning);
+
   const refreshStreamState = async (targetStreamId = streamId, { updateStatus = false } = {}) => {
     if (!targetStreamId) return;
     const result = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
     if (result?.streamId) {
+      streamRuntimeRef.current = result;
       setStreamRuntime(result);
+      if (!hasActiveKlvFlow(result)) setOverlayData(null);
       if (result.running || result.state === 'ready') setAutoAttachOnDvr(true);
       if (!result.running && result.state !== 'ready') setAutoAttachOnDvr(false);
       if (updateStatus) setStatus(JSON.stringify(result, null, 2));
@@ -817,6 +821,7 @@ function App() {
 
   const showOverlay = (obj, scopeTab = null) => {
     if (scopeTab && activeTabRef.current !== scopeTab) return;
+    if (!hasActiveKlvFlow(streamRuntimeRef.current)) return;
     setOverlayData(obj);
   };
 
@@ -1617,8 +1622,10 @@ function App() {
     if (streamRuntime?.sourceType === 'file' && activeTab === 'live-webrtc') {
       setActiveTab('dvr');
     }
-    if (activeTab === 'live-webrtc' && (streamRuntime?.state === 'stopped' || streamRuntime?.state === 'stopping')) {
+    if (!hasActiveKlvFlow(streamRuntime)) {
       setOverlayData(null);
+    }
+    if (activeTab === 'live-webrtc' && !hasActiveKlvFlow(streamRuntime)) {
       setLiveNotConnected();
     }
   }, [streamRuntime, activeTab]);
@@ -1891,19 +1898,18 @@ function App() {
                 <Badge color={stateColor(streamRuntime?.state)} variant="filled">
                   {streamRuntime?.state || 'unknown'}
                 </Badge>
-                <Text size="sm">{streamRuntime?.running ? 'Running' : 'Not Running'}</Text>
-                  {streamRuntime?.encoder ? (
+                {hlsRuntimeIsActive && streamRuntime?.encoder ? (
                   <Text size="sm" c={streamRuntime?.usingGpu ? 'teal' : 'orange'}>
                     Encoding: {streamRuntime.usingGpu ? 'GPU' : 'CPU'} ({streamRuntime.encoder})
                   </Text>
                   ) : null}
                 <Text size="sm" c="dimmed">
-                  HLS: {streamRuntime?.hlsMode || hlsMode} ({streamRuntime?.hlsEncoderMode || 'pending'})
-                  {streamRuntime?.hlsEffectiveMode && streamRuntime.hlsEffectiveMode !== streamRuntime.hlsMode
+                  HLS: {activeHlsMode} ({hlsRuntimeIsActive ? streamRuntime?.hlsEncoderMode || 'pending' : 'pending'})
+                  {hlsRuntimeIsActive && streamRuntime?.hlsEffectiveMode && streamRuntime.hlsEffectiveMode !== streamRuntime.hlsMode
                     ? ` → ${streamRuntime.hlsEffectiveMode}`
                     : ''}
-                  {streamRuntime?.sourceType !== 'file'
-                    ? ` | WebRTC: ${streamRuntime?.webRtcMode || webRtcMode} (${streamRuntime?.webRtcEncoderMode || 'pending'})`
+                  {(hlsRuntimeIsActive ? streamRuntime?.sourceType : sourceType) !== 'file'
+                    ? ` | WebRTC: ${hlsRuntimeIsActive ? streamRuntime?.webRtcMode || webRtcMode : webRtcMode} (${hlsRuntimeIsActive ? streamRuntime?.webRtcEncoderMode || 'pending' : 'pending'})`
                     : ''}
                 </Text>
               </Group>
@@ -1934,7 +1940,6 @@ function App() {
                       <Text>{s.streamId}</Text>
                       <Group gap="xs">
                         <Badge color={stateColor(s.state)}>{s.state || 'unknown'}</Badge>
-                        <Text size="sm">{s.running ? 'Running' : 'Not Running'}</Text>
                       </Group>
                     </Group>
                     <Text size="xs" c="dimmed">
