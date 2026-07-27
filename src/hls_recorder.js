@@ -1,3 +1,4 @@
+/** Builds and controls the FFmpeg process that records a source as HLS. */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -10,22 +11,26 @@ const TRANSIENT_INPUT_WARNING_RE = /Invalid frame dimensions 0x0\./i;
 const STOP_TERM_WAIT_MS = Number(process.env.FFMPEG_STOP_TERM_WAIT_MS || 1500);
 const STOP_KILL_WAIT_MS = Number(process.env.FFMPEG_STOP_KILL_WAIT_MS || 1500);
 
+/** Converts public HLS mode values to the recorder's internal encoder modes. */
 function normalizeMode(mode) {
   if (!mode || mode === "auto") return "xcode-any";
   return mode;
 }
 
+/** Validates and clamps the requested HLS segment duration. */
 function normalizeSegmentSeconds(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 1;
   return n;
 }
 
+/** Formats a spawned command for safe diagnostic logging. */
 function formatCommand(cmd, args) {
   const parts = [cmd, ...args].map((p) => JSON.stringify(String(p)));
   return parts.join(" ");
 }
 
+/** Waits for FFmpeg to finish, escalating to a forced kill after a timeout. */
 function waitForExit(proc, timeoutMs) {
   if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -43,6 +48,7 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
+/** Extracts FFmpeg's processed media time from a progress key/value record. */
 function progressSeconds(fields) {
   const raw = fields.out_time_us ?? fields.out_time_ms;
   const micros = Number(raw);
@@ -53,11 +59,13 @@ function progressSeconds(fields) {
   return (Number(match[1]) * 3600) + (Number(match[2]) * 60) + Number(match[3]);
 }
 
+/** Parses FFmpeg's human-readable processing speed value. */
 function parseProgressSpeed(value) {
   const speed = Number(String(value || "").replace(/x$/i, ""));
   return Number.isFinite(speed) && speed > 0 ? speed : null;
 }
 
+/** Creates the scaling filter graph for encoded ABR rendition branches. */
 function buildLadderFilter(renditions, copyRenditionIndex = null) {
   const encodedRenditionIndexes = renditions
     .map((_, index) => index)
@@ -83,6 +91,7 @@ function buildLadderFilter(renditions, copyRenditionIndex = null) {
   return filters.join(";");
 }
 
+/** Applies unscoped FFmpeg video options to selected output stream indexes. */
 function scopeVideoArgsToStreams(videoArgs, streamIndexes) {
   const optionBases = {
     "-c:v": "-c:v",
@@ -112,6 +121,7 @@ function scopeVideoArgsToStreams(videoArgs, streamIndexes) {
   return scoped;
 }
 
+/** Starts HLS packaging and returns a handle with process and output metadata. */
 export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId, sourceType = "stream", sourceVideo = null, onProgress }) {
   const requestedMode = normalizeMode(mode);
   const chosen = requestedMode === "copy-h264" || requestedMode === "xcode-single"
@@ -176,12 +186,12 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   ];
 
   const metadataRendition = renditions[0];
+  // This private playlist preserves source video and KLV for server-side KLV
+  // extraction. It is never the browser playback playlist.
   const carrierOutput = [
     "-map", "0:v:0",
-    "-map", "0:a?",
     "-map", "0:d?",
     "-c:v", "copy",
-    "-c:a", "copy",
     "-c:d", "copy",
     "-muxpreload", "0",
     "-muxdelay", "0",
@@ -194,11 +204,11 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-hls_segment_filename", metadataSegmentFilename,
     metadataPlaylist
   ];
+  // Browser playback is intentionally video-only. H.264 passthrough therefore
+  // has no audio compatibility requirement.
   const passthroughVideoOutput = [
     "-map", "0:v:0",
-    "-map", "0:a?",
     "-c:v", "copy",
-    "-c:a", "copy",
     "-muxpreload", "0",
     "-muxdelay", "0",
     "-f", "hls",
@@ -212,13 +222,10 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   ];
   const singleTranscodeOutput = [
     "-map", "0:v:0",
-    "-map", "0:a?",
     ...videoProfile.videoArgs,
     "-b:v", renditions[1].videoBitrate,
     "-maxrate:v", renditions[1].maxRate,
     "-bufsize:v", renditions[1].bufferSize,
-    "-c:a", "aac",
-    "-b:a", "128k",
     "-force_key_frames", sourceAlignedKeyframes,
     "-muxpreload", "0",
     "-muxdelay", "0",
@@ -405,6 +412,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   };
 }
 
+/** Gracefully stops an active HLS FFmpeg process. */
 export async function stopHlsRecorder(hls) {
   if (!hls?.proc) return;
   if (hls.proc.exitCode != null || hls.proc.killed) return;

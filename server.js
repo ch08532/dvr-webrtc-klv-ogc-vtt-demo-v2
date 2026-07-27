@@ -1,3 +1,4 @@
+/** Main service: source lifecycle, media pipelines, APIs, WebSockets, and shutdown. */
 import express from "express";
 import path from "node:path";
 import fs from "node:fs";
@@ -93,54 +94,60 @@ store.startRetentionJob({ maxAgeMs: 2 * 60 * 60 * 1000 }); // keep 2h (demo)
 const sources = new Map();
 const sourceStates = new Map();
 
+/** Tests whether a spawned child process is still active. */
 function isProcessRunning(proc) {
   return !!proc && proc.exitCode == null && !proc.killed;
 }
 
+/** Returns a promise that resolves after a delay. */
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Validates a configured media segment duration. */
 function normalizeSegmentSeconds(value, fallback = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
 }
 
+/** Converts public source type input to stream or file. */
 function normalizeSourceType(value) {
   return value === "file" ? "file" : "stream";
 }
 
+/** Converts public HLS mode input to passthrough or ABR. */
 function normalizeHlsMode(value) {
   return value === "abr" ? "abr" : "passthrough";
 }
 
+/** Converts public WebRTC mode input to auto, copy, or transcode. */
 function normalizeWebRtcMode(value) {
   if (value === "copy" || value === "transcode") return value;
   return "auto";
 }
 
+/** Chooses copy, single-transcode, or ABR HLS processing from input capabilities. */
 function resolveHlsEncodeMode(hlsMode, probe) {
+  // HLS passthrough is video-only: source audio is deliberately not part of
+  // either HLS output, so its codec must not force a video transcode.
   if (hlsMode === "abr") {
     return { encoderMode: "xcode-any", effectiveMode: "abr", fallbackReason: null };
   }
 
   const videoCodec = String(probe?.video?.codec || "").toLowerCase();
-  const audioCodec = String(probe?.audio?.codec || "").toLowerCase();
-  if (videoCodec === "h264" && (!audioCodec || audioCodec === "aac")) {
+  if (videoCodec === "h264") {
     return { encoderMode: "copy-h264", effectiveMode: "passthrough", fallbackReason: null };
   }
 
-  const incompatibilities = [];
-  if (videoCodec !== "h264") incompatibilities.push(`video codec ${videoCodec || "unknown"}`);
-  if (audioCodec && audioCodec !== "aac") incompatibilities.push(`audio codec ${audioCodec}`);
   return {
     encoderMode: "xcode-single",
     effectiveMode: "single-transcode",
-    fallbackReason: `${incompatibilities.join(" and ")} is not browser-compatible for HLS passthrough`
+    fallbackReason: `video codec ${videoCodec || "unknown"} is not browser-compatible for HLS passthrough`
   };
 }
 
+/** Chooses whether the live RTP path can copy H.264 or must transcode. */
 function resolveWebRtcEncodeMode(webRtcMode, probe) {
   if (webRtcMode === "copy") return "copy-h264";
   if (webRtcMode === "transcode") return "xcode-any";
@@ -149,6 +156,7 @@ function resolveWebRtcEncodeMode(webRtcMode, probe) {
     : "xcode-any";
 }
 
+/** Validates and resolves a server-owned uploaded video asset path. */
 function resolveUploadedVideo(assetId) {
   if (typeof assetId !== "string" || !/^[a-f0-9-]{36}\.(?:ts|m2ts|mp4|mov|mkv)$/i.test(assetId)) {
     throw new Error("invalid uploaded video asset ID");
@@ -160,6 +168,7 @@ function resolveUploadedVideo(assetId) {
   return inputUrl;
 }
 
+/** Parses an ffprobe frame-rate fraction into frames per second. */
 function parseFrameRate(rateText) {
   if (!rateText || typeof rateText !== "string") return null;
   const [numText, denText] = rateText.split("/");
@@ -171,6 +180,7 @@ function parseFrameRate(rateText) {
   return Number(value.toFixed(3));
 }
 
+/** Reduces ffprobe output to the codec, timing, KLV, and container fields the UI needs. */
 function normalizeProbePayload(ffprobeJson, inputUrl) {
   const format = ffprobeJson && typeof ffprobeJson === "object" ? ffprobeJson.format : null;
   const streams = Array.isArray(ffprobeJson?.streams) ? ffprobeJson.streams : [];
@@ -237,6 +247,7 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
   };
 }
 
+/** Runs ffprobe with a timeout and returns a normalized source-media description. */
 async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -301,6 +312,7 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
 // but no container duration.  FFprobe consequently reports Duration: N/A,
 // which is insufficient for a file-conversion progress bar.  Estimate the
 // duration from the first and last PCR values without decoding the file.
+/** Estimates a transport-stream file duration from PCR timestamps when needed. */
 async function probeMpegTsDurationFromPcr(inputUrl) {
   if (!/\.(?:ts|m2ts)$/i.test(String(inputUrl || ""))) return null;
 
@@ -386,6 +398,7 @@ async function probeMpegTsDurationFromPcr(inputUrl) {
   }
 }
 
+/** Creates initial empty subtitle artifacts before KLV cues are available. */
 async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
   const segSec = normalizeSegmentSeconds(segmentSeconds, 1);
   const subtitlePlaylistPath = path.join(outDir, "subtitles.m3u8");
@@ -400,6 +413,7 @@ async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
   await fs.promises.writeFile(subtitlePlaylistPath, playlist);
 }
 
+/** Merges a source lifecycle update and broadcasts it to subscribed clients. */
 function setSourceState(streamId, patch) {
   const prev = sourceStates.get(streamId) || {
     streamId,
@@ -418,6 +432,7 @@ function setSourceState(streamId, patch) {
   return next;
 }
 
+/** Returns the current public state object for a source. */
 function currentSourceState(streamId) {
   const tracked = sourceStates.get(streamId);
   if (tracked?.state) return tracked.state;
@@ -425,6 +440,7 @@ function currentSourceState(streamId) {
   return "stopped";
 }
 
+/** Stops a source and deletes its generated media, KLV, and database artifacts. */
 async function purgeSourceArtifacts(streamId) {
   const outDir = path.join(RECORD_ROOT, streamId);
   const sdpFile = path.join(DB_DIR, `${streamId}.sdp`);
@@ -437,6 +453,7 @@ async function purgeSourceArtifacts(streamId) {
   return { outDir, sdpFile, deletedEvents };
 }
 
+/** Returns the internal runtime handle for an active source, if any. */
 function getSourceRuntime(streamId) {
   const tracked = sourceStates.get(streamId);
   const source = sources.get(streamId);
@@ -554,6 +571,7 @@ wss.on("error", (error) => {
   log.error("ws_server_error", { error: serializeError(error) });
 });
 
+/** Broadcasts one decoded live telemetry message to matching WebSocket clients. */
 function wsBroadcastLive(streamId, decoded) {
   const msg = JSON.stringify({ type: "st0601", streamId, ...decoded });
   for (const c of wss.clients) {
@@ -1346,6 +1364,7 @@ app.get("*", (req, res) => {
   res.sendFile(path.resolve("./public/index.html"));
 });
 
+/** Tests whether the HTTP server can bind a requested local port. */
 async function isPortAvailable(port) {
   return await new Promise((resolve) => {
     const probe = net.createServer();
@@ -1357,6 +1376,7 @@ async function isPortAvailable(port) {
   });
 }
 
+/** Selects an available HTTP port from the configured fallback range. */
 async function chooseHttpPort() {
   if (HTTP_PORT_EXPLICIT) return REQUESTED_HTTP_PORT;
 
@@ -1393,11 +1413,13 @@ server.listen(httpPort, () => {
 let shuttingDown = false;
 let shutdownForceKillPids = new Set();
 
+/** Adds a valid child process ID to a tracked PID set. */
 function addPid(targetSet, pid) {
   if (!Number.isInteger(pid) || pid <= 0) return;
   targetSet.add(pid);
 }
 
+/** Captures currently running backend child PIDs for shutdown cleanup. */
 function snapshotBackendChildPids() {
   const pids = new Set();
   try {
@@ -1410,6 +1432,7 @@ function snapshotBackendChildPids() {
   return pids;
 }
 
+/** Force-kills a child process and its descendants on the current platform. */
 function forceKillProcessTree(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -1424,6 +1447,7 @@ function forceKillProcessTree(pid) {
   }
 }
 
+/** Force-kills every process in a tracked PID set and logs the reason. */
 function forceKillPidSet(pidSet, reason) {
   if (!pidSet || !pidSet.size) return;
   const attempted = [];
@@ -1439,6 +1463,7 @@ function forceKillPidSet(pidSet, reason) {
   });
 }
 
+/** Performs ordered service shutdown, including sources, workers, and child processes. */
 async function shutdown(signal) {
   if (shuttingDown) {
     log.warn("shutdown_already_in_progress", { signal });

@@ -1,3 +1,4 @@
+/** Creates the in-process mediasoup SFU used by live browser viewers. */
 import * as mediasoup from "mediasoup";
 import { createServiceLogger } from "./service_logger.js";
 
@@ -5,6 +6,7 @@ const log = createServiceLogger("webrtc_sfu");
 const PLAIN_SOCKET_BUFFER_SIZE = Math.max(64 * 1024, Number(process.env.MEDIASOUP_PLAIN_SOCKET_BUFFER_SIZE || 8 * 1024 * 1024));
 const WEBRTC_SOCKET_BUFFER_SIZE = Math.max(64 * 1024, Number(process.env.MEDIASOUP_WEBRTC_SOCKET_BUFFER_SIZE || 4 * 1024 * 1024));
 
+/** Creates an H.264 mediasoup router and returns source-ingest and viewer APIs. */
 export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
   const worker = await mediasoup.createWorker({ rtcMinPort, rtcMaxPort });
   log.info("worker_created", { pid: worker.pid, rtcMinPort, rtcMaxPort, announcedIp: announcedIp ?? null });
@@ -35,10 +37,12 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
   const ingestProducers = new Map();         // streamId -> producer
   const consumers = new Map();               // consumerId -> { consumer, streamId, transportId }
 
+  /** Returns the router capabilities a browser needs before creating a device. */
   function routerRtpCapabilities() {
     return router.rtpCapabilities;
   }
 
+  /** Creates the UDP plain transport used by FFmpeg for one live source. */
   async function ensureIngest(streamId) {
     if (ingestPlainTransports.has(streamId)) return;
 
@@ -87,6 +91,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     } catch {}
   }
 
+  /** Returns the plain-transport connection details for FFmpeg RTP output. */
   function ingestInfo(streamId) {
     const plain = ingestPlainTransports.get(streamId);
     if (!plain) throw new Error("No ingest transport for streamId");
@@ -102,6 +107,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     };
   }
 
+  /** Creates or replaces the mediasoup producer for FFmpeg's RTP stream. */
   async function setIngestProducer(streamId, rtpParameters) {
     const plain = ingestPlainTransports.get(streamId);
     if (!plain) throw new Error("No ingest transport for streamId");
@@ -132,6 +138,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     return producer.id;
   }
 
+  /** Closes the plain transport and producer associated with a source. */
   async function closeIngest(streamId) {
     const p = ingestProducers.get(streamId);
     if (p) { try { p.close(); } catch {} }
@@ -150,6 +157,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     log.info("ingest_closed", { streamId });
   }
 
+  /** Creates a browser-facing WebRTC transport and tracks its lifecycle. */
   async function createWebRtcTransport() {
     const transport = await router.createWebRtcTransport({
       listenInfos: [
@@ -213,6 +221,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     };
   }
 
+  /** Applies browser DTLS parameters to a previously created transport. */
   async function connectWebRtcTransport(transportId, dtlsParameters) {
     const t = webRtcTransports.get(transportId);
     if (!t) throw new Error("transport not found");
@@ -225,6 +234,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     });
   }
 
+  /** Creates a browser consumer for the selected source when codec support matches. */
   async function consume(streamId, transportId, rtpCapabilities) {
     const t = webRtcTransports.get(transportId);
     if (!t) throw new Error("transport not found");
@@ -292,6 +302,7 @@ export async function createWebRtcSfu({ announcedIp, rtcMinPort, rtcMaxPort }) {
     };
   }
 
+  /** Returns a diagnostic summary of SFU transports, producers, and consumers. */
   function debugSnapshot() {
     const ingest = [];
     for (const [streamId, plain] of ingestPlainTransports.entries()) {

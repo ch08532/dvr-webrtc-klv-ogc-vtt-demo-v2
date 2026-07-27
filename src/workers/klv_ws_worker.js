@@ -1,3 +1,4 @@
+/** Browser worker that reconnects to the live KLV WebSocket without blocking the UI. */
 let ws = null;
 let wsUrl = null;
 let streamId = null;
@@ -7,10 +8,12 @@ let pendingTelemetry = null;
 let telemetryTimer = null;
 let lastTelemetryPostMs = 0;
 
+/** Sends a status or telemetry event back to the browser main thread. */
 function post(type, extra = {}) {
   self.postMessage({ type, ...extra });
 }
 
+/** Clears queued telemetry when a socket is replaced or disconnected. */
 function clearTelemetryQueue() {
   if (telemetryTimer) clearTimeout(telemetryTimer);
   telemetryTimer = null;
@@ -18,6 +21,7 @@ function clearTelemetryQueue() {
   lastTelemetryPostMs = 0;
 }
 
+/** Batches telemetry messages to avoid overwhelming the browser UI thread. */
 function queueTelemetry(payload) {
   pendingTelemetry = payload;
   if (telemetryTimer) return;
@@ -32,6 +36,7 @@ function queueTelemetry(payload) {
   }, delay);
 }
 
+/** Sends the current stream subscription after the WebSocket opens. */
 function sendSubscribe() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
@@ -41,6 +46,7 @@ function sendSubscribe() {
   }
 }
 
+/** Removes handlers from a socket that is about to be discarded. */
 function detachSocketHandlers() {
   if (!ws) return;
   ws.onopen = null;
@@ -49,6 +55,7 @@ function detachSocketHandlers() {
   ws.onclose = null;
 }
 
+/** Closes and clears the active WebSocket connection. */
 function closeSocket() {
   clearTelemetryQueue();
   if (!ws) return;
@@ -57,6 +64,7 @@ function closeSocket() {
   ws = null;
 }
 
+/** Opens the requested live KLV WebSocket and installs reconnect handling. */
 function connect(url) {
   if (typeof url === "string" && url.trim()) {
     wsUrl = url.trim();

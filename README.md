@@ -11,6 +11,8 @@ A runnable Node.js demo that:
 - plays Live via WebRTC (mediasoup) and DVR via HLS
 - exposes OGC API – Moving Features subset endpoints backed by the same SQLite store
 
+For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
+
 ## Prereqs
 - Node.js 18+
 - `ffmpeg` installed and on PATH
@@ -23,8 +25,8 @@ A runnable Node.js demo that:
 - Set `FFMPEG_USE_GPU=0` to force CPU `libx264` fallback.
 
 ### Processing modes
-- **HLS passthrough** is the default: confirmed H.264 video with AAC (or no) audio is copied without video encoding. The browser playlist excludes KLV; a separate copy-only carrier playlist retains KLV for extraction.
-- **HLS compatibility fallback** activates when passthrough input is not H.264/AAC (for example MPEG-2 video): it produces one H.264 playback rendition and retains the original KLV carrier without re-encoding it.
+- **HLS passthrough** is the default: confirmed H.264 video is copied without video encoding; audio is omitted. The browser playlist excludes KLV; a separate copy-only carrier playlist retains KLV for extraction.
+- **HLS compatibility fallback** activates when passthrough input is not H.264 (for example MPEG-2 video): it produces one H.264 playback rendition and retains the original KLV carrier without re-encoding it. Audio is omitted from both outputs.
 - **HLS ABR** creates three renditions: Low (90p), Medium (360p), and High (the source's native resolution). A compatible H.264 source is copied into High; other source codecs are encoded to their native-resolution High rung.
 - **Live WebRTC auto-copy** copies H.264 into RTP when the input probe confirms H.264; it falls back to transcoding for other codecs. File sources are HLS-only.
 

@@ -1,3 +1,4 @@
+/** Converts an input source into RTP that mediasoup can ingest for live WebRTC. */
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -17,11 +18,13 @@ const UDP_BUFFER_SIZE = Math.max(64 * 1024, Number(process.env.FFMPEG_WEBRTC_UDP
 const INPUT_THREAD_QUEUE_SIZE = Math.max(256, Number(process.env.FFMPEG_WEBRTC_THREAD_QUEUE_SIZE || 4096));
 const INPUT_MAX_DELAY_US = Math.max(0, Number(process.env.FFMPEG_WEBRTC_MAX_DELAY_US || 500000));
 
+/** Quotes a command argument for human-readable logging. */
 function formatCommandArg(value) {
   const text = String(value);
   return /[\s"]/u.test(text) ? `"${text.replace(/(["\\])/g, '\\$1')}"` : text;
 }
 
+/** Adds resilient UDP buffering options when the input is a UDP URL. */
 function bufferedInputUrl(inputUrl) {
   if (!/^udp:\/\//i.test(String(inputUrl || ''))) return inputUrl;
   try {
@@ -36,6 +39,7 @@ function bufferedInputUrl(inputUrl) {
   }
 }
 
+/** Builds FFmpeg arguments and an SDP description for the RTP output. */
 function buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode }) {
   const videoProfile = buildVideoArgs(mode, { purpose: "webrtc" });
   const bufferedInput = bufferedInputUrl(inputUrl);
@@ -65,6 +69,7 @@ function buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode }) {
   };
 }
 
+/** Converts FFmpeg-generated SDP fields to mediasoup RTP parameters. */
 function parseSdpToRtpParameters(sdpText) {
   const lines = sdpText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
@@ -116,6 +121,7 @@ function parseSdpToRtpParameters(sdpText) {
   };
 }
 
+/** Waits for an RTP FFmpeg process and force-stops it after the timeout. */
 function waitForExit(proc, timeoutMs) {
   if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -133,6 +139,7 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
+/** Starts FFmpeg RTP output and attaches it to the SFU as a video producer. */
 export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requestId }) {
   const { ip, bindIp, port, rtcpPort } = sfu.ingestInfo(streamId);
 
@@ -256,6 +263,7 @@ export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requ
   throw new Error("Failed to read SDP from ffmpeg (RTP ingest not ready)");
 }
 
+/** Stops the RTP FFmpeg process and removes its temporary SDP file. */
 export async function stopFfmpegRtpIngest(handle) {
   if (!handle?.proc) return;
   if (handle.proc.exitCode != null || handle.proc.killed) return;

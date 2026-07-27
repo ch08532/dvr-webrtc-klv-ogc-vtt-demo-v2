@@ -1,3 +1,4 @@
+/** Vite development-server and production-bundle configuration for the React UI. */
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 

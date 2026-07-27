@@ -1,3 +1,4 @@
+/** Hosts mediasoup outside the HTTP process and dispatches IPC RPC requests. */
 import { createWebRtcSfu } from "../webrtc_sfu.js";
 import { startFfmpegRtpIngest, stopFfmpegRtpIngest } from "../ffmpeg_rtp_ingest.js";
 import { createServiceLogger, serializeError } from "../service_logger.js";
@@ -10,12 +11,14 @@ let initialized = false;
 const ingestHandles = new Map(); // streamId -> { handle, stopping }
 let diagTimer = null;
 
+/** Safely sends an IPC event or RPC response to the parent process. */
 function send(message) {
   try {
     if (process.connected) process.send?.(message);
   } catch {}
 }
 
+/** Creates the SFU once from the parent-provided runtime configuration. */
 async function init(config) {
   if (initialized) return;
   const {
@@ -42,14 +45,17 @@ async function init(config) {
   }
 }
 
+/** Fails an RPC request until SFU initialization has completed. */
 function assertReady() {
   if (!initialized || !sfu) throw new Error("SFU worker not initialized");
 }
 
+/** Tests whether a child process associated with ingest is still running. */
 function isProcessRunning(proc) {
   return !!proc && proc.exitCode == null && !proc.killed;
 }
 
+/** Records a child ingest handle and attaches its exit/error lifecycle events. */
 async function attachIngest(streamId, handle) {
   ingestHandles.set(streamId, { handle, stopping: false });
   handle.proc?.once("exit", async (code, signal) => {
@@ -68,6 +74,7 @@ async function attachIngest(streamId, handle) {
   });
 }
 
+/** Dispatches a parent RPC method to the owned SFU instance. */
 async function rpc(method, params) {
   assertReady();
   switch (method) {
@@ -146,6 +153,7 @@ async function rpc(method, params) {
   }
 }
 
+/** Stops every ingest child, closes the SFU, and releases worker state. */
 async function shutdown() {
   if (diagTimer) {
     clearInterval(diagTimer);

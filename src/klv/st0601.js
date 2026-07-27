@@ -1,3 +1,6 @@
+/** Decodes the MISB ST 0601 local-set payload into usable telemetry fields. */
+
+/** Reads a BER length field from a local-set buffer. */
 function berReadLength(buf, offset) {
   if (offset >= buf.length) return null;
   const first = buf[offset];
@@ -9,6 +12,7 @@ function berReadLength(buf, offset) {
   return { length: len, bytes: 1 + n };
 }
 
+/** Reads a BER OID local-set tag. */
 function berOidReadTag(buf, offset) {
   let tag = 0;
   let i = offset;
@@ -20,23 +24,29 @@ function berOidReadTag(buf, offset) {
   return null;
 }
 
+/** Scales a signed 32-bit MISB value into its physical range. */
 function mapInt32ToRange(v, min, max) {
   if (v === -2147483648) return null;
   const intRange = 2147483647;
   const span = max - min;
   return (v / intRange) * (span / 2) + (min + max) / 2;
 }
+/** Scales an unsigned 16-bit MISB value into its physical range. */
 function mapUint16ToRange(u, min, max) { return min + (u / 65535) * (max - min); }
+/** Scales an unsigned 32-bit MISB value into its physical range. */
 function mapUint32ToRange(u, min, max) { return min + (u / 4294967295) * (max - min); }
+/** Scales a signed 16-bit MISB value into its physical range. */
 function mapInt16ToRange(v, min, max) {
   if (v === -32768) return null;
   return min + ((v + 32767) / 65534) * (max - min);
 }
 
+/** Tests whether every frame-corner coordinate needed for a footprint exists. */
 function hasCompleteCorners(payload) {
   return [1, 2, 3, 4].every((index) => Number.isFinite(payload[`frameCorner${index}Lat`]) && Number.isFinite(payload[`frameCorner${index}Lon`]));
 }
 
+/** Decodes supported ST 0601 tags, retaining raw values for unsupported fields. */
 export function decodeSt0601LocalSet(lsBuf) {
   const out = {};
   let off = 0;

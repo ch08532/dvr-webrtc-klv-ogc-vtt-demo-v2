@@ -1,3 +1,6 @@
+/** Builds consistent FFmpeg video encoder arguments from environment settings. */
+
+/** Reads a boolean-like environment setting while preserving a safe default. */
 function envFlag(name, defaultValue) {
   const raw = process.env[name];
   if (raw == null) return defaultValue;
@@ -8,6 +11,7 @@ function envFlag(name, defaultValue) {
   return defaultValue;
 }
 
+/** Reads a non-empty environment string or returns the supplied default. */
 function envString(name, defaultValue = "") {
   const raw = process.env[name];
   if (raw == null) return defaultValue;
@@ -15,11 +19,13 @@ function envString(name, defaultValue = "") {
   return value || defaultValue;
 }
 
+/** Reads a finite numeric environment setting or returns the supplied default. */
 function envNumber(name, defaultValue) {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? raw : defaultValue;
 }
 
+/** Returns FFmpeg decode/encode options for copy, CPU, GPU, or WebRTC output. */
 export function buildVideoArgs(mode, { gpuPreset, purpose } = {}) {
   const isWebRtc = purpose === "webrtc";
   const webRtcBitrate = envString("FFMPEG_WEBRTC_VIDEO_BITRATE", "2500k");

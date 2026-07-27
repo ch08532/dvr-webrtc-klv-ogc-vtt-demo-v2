@@ -1,13 +1,16 @@
+/** Manages the isolated mediasoup worker process through a small IPC RPC layer. */
 import path from "node:path";
 import { fork } from "node:child_process";
 
 const INIT_TIMEOUT_MS = 10000;
 const RPC_TIMEOUT_MS = 12000;
 
+/** Tests whether the forked SFU worker is still running. */
 function isProcessRunning(proc) {
   return !!proc && proc.exitCode == null && !proc.killed;
 }
 
+/** Removes Node flags that should not be inherited by the forked worker. */
 function sanitizeExecArgv(argv) {
   const out = [];
   for (let i = 0; i < argv.length; i++) {
@@ -23,6 +26,7 @@ function sanitizeExecArgv(argv) {
   return out;
 }
 
+/** Forks the SFU process and returns a client for its RPC operations. */
 export async function startSfuWorkerClient({ config, onEvent }) {
   const workerPath = path.resolve("./src/sfu/sfu_worker.js");
   const execArgv = sanitizeExecArgv(process.execArgv);
@@ -38,6 +42,7 @@ export async function startSfuWorkerClient({ config, onEvent }) {
   let nextId = 1;
   let initialized = false;
 
+  /** Rejects outstanding IPC calls when the child exits or becomes unavailable. */
   function rejectAllPending(reason) {
     for (const { reject, timer } of pending.values()) {
       clearTimeout(timer);
@@ -126,6 +131,7 @@ export async function startSfuWorkerClient({ config, onEvent }) {
   if (!initResult?.ok) throw new Error("SFU worker failed to initialize");
   initialized = true;
 
+  /** Sends one RPC request to the SFU child and resolves its correlated response. */
   function call(method, params = {}, timeoutMs = RPC_TIMEOUT_MS) {
     if (!initialized) return Promise.reject(new Error("SFU client not initialized"));
     if (!isProcessRunning(proc)) return Promise.reject(new Error("SFU worker is not running"));
@@ -141,6 +147,7 @@ export async function startSfuWorkerClient({ config, onEvent }) {
     });
   }
 
+  /** Requests graceful SFU shutdown, then terminates the child if necessary. */
   async function close() {
     initialized = false;
     rejectAllPending(new Error("SFU client closed"));

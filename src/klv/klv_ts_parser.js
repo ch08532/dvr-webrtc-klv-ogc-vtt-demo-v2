@@ -1,3 +1,4 @@
+/** Opens MPEG-TS inputs and extracts ST 0601 KLV packets with source timing. */
 import fs from "node:fs";
 import dgram from "node:dgram";
 import { Transform } from "node:stream";
@@ -13,6 +14,7 @@ const ST0601_KEY = Buffer.from([
   0x0e, 0x01, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00,
 ]);
 
+/** Reads a BER length field while scanning a KLV packet. */
 function berReadLength(buf, offset) {
   if (offset >= buf.length) return null;
   const first = buf[offset];
@@ -24,6 +26,7 @@ function berReadLength(buf, offset) {
   return { length: len, bytes: 1 + n };
 }
 
+/** Reads a BER OID tag while validating a KLV local set. */
 function berOidReadTag(buf, offset) {
   let tag = 0;
   let i = offset;
@@ -35,6 +38,7 @@ function berOidReadTag(buf, offset) {
   return null;
 }
 
+/** Validates the ST 0601 checksum when the local set includes one. */
 function validateSt0601Checksum(packetBuf, payloadBuf, payloadOffsetInPacket) {
   let off = 0;
   while (off < payloadBuf.length) {
@@ -65,8 +69,11 @@ function validateSt0601Checksum(packetBuf, payloadBuf, payloadOffsetInPacket) {
   return { present: false, valid: true };
 }
 
+/** Reassembles arbitrary byte chunks into 188-byte MPEG transport packets. */
 class TsPacketizer extends Transform {
+  /** Initializes an empty byte buffer for incoming transport-stream chunks. */
   constructor() { super({ readableObjectMode: true }); this._buf = Buffer.alloc(0); }
+  /** Splits arbitrary input chunks into complete 188-byte MPEG-TS packets. */
   _transform(chunk, _enc, cb) {
     this._buf = Buffer.concat([this._buf, chunk]);
     while (this._buf.length >= 188) {
@@ -77,11 +84,13 @@ class TsPacketizer extends Transform {
   }
 }
 
+/** Tests whether an address belongs to the IPv4 multicast range. */
 function isIpv4Multicast(address) {
   const first = Number(address.split(".")[0]);
   return Number.isInteger(first) && first >= 224 && first <= 239;
 }
 
+/** Opens a file, unicast UDP, or multicast UDP source as a readable stream. */
 function openInput(inputUrl) {
   if (inputUrl.startsWith("udp://")) {
     const m = inputUrl.match(/^udp:\/\/([^:]+):(\d+)$/);
@@ -125,6 +134,7 @@ function openInput(inputUrl) {
   return fs.createReadStream(inputUrl);
 }
 
+/** Reads the PTS timestamp from a PES payload when present. */
 function readPesPts90k(payload) {
   if (payload.length < 14) return null;
   if (payload[0] !== 0x00 || payload[1] !== 0x00 || payload[2] !== 0x01) return null;
@@ -140,6 +150,7 @@ function readPesPts90k(payload) {
     + ((payload[p + 4] & 0xfe) / 2);
 }
 
+/** Reads the PCR clock value from a transport packet adaptation field. */
 function readPcr90k(packet) {
   const adaptationFieldControl = (packet[3] >> 4) & 0x03;
   if (adaptationFieldControl !== 0x02 && adaptationFieldControl !== 0x03) return null;
@@ -154,6 +165,7 @@ function readPcr90k(packet) {
     + ((((packet[10] & 0x01) * 256) + packet[11]) / 300);
 }
 
+/** Scans reassembled KLV bytes for ST 0601 universal-key packets. */
 function scanForSt0601(buf, onDecoded, context = {}) {
   const { streamId, requestId, pid, pts90k } = context;
   let scanFrom = 0;
@@ -198,6 +210,7 @@ function scanForSt0601(buf, onDecoded, context = {}) {
   }
 }
 
+/** Creates the stateful TS packet handler that discovers and reassembles KLV. */
 function createTsKlvPacketHandler({ streamId, requestId, onDecoded, onPesStart, onPcr }) {
   let pmtPid = null;
   let klvPids = null;
@@ -206,6 +219,7 @@ function createTsKlvPacketHandler({ streamId, requestId, onDecoded, onPesStart, 
   const ptsByPid = new Map();
   const KEEP = 256 * 1024;
 
+  /** Appends one elementary-stream payload and emits complete KLV packets. */
   function append(pid, payload, pusi) {
     const prev = rolling.get(pid) ?? Buffer.alloc(0);
     let buf = Buffer.concat([prev, payload]);
@@ -277,6 +291,7 @@ function createTsKlvPacketHandler({ streamId, requestId, onDecoded, onPesStart, 
   };
 }
 
+/** Starts streaming KLV extraction from a live or file input URL. */
 export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId }) {
   log.info("start", { requestId, streamId, inputUrl });
   const input = openInput(inputUrl);
@@ -297,6 +312,7 @@ export async function startKlvIngest({ streamId, inputUrl, onDecoded, requestId 
   return { streamId, inputUrl, input, packetizer, requestId };
 }
 
+/** Extracts all KLV records from a completed transport-stream file. */
 export async function extractKlvFromTsFile({ streamId, inputPath, requestId }) {
   const decodedItems = [];
   let segmentStartPts90k = null;
@@ -353,6 +369,7 @@ export async function extractKlvFromTsFile({ streamId, inputPath, requestId }) {
   });
 }
 
+/** Closes a running KLV input handle and waits for cleanup. */
 export async function stopKlvIngest(handle) {
   log.info("stop_requested", { requestId: handle?.requestId, streamId: handle?.streamId });
   try { handle?.input?.destroy(); } catch {}

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/** Streams a local transport stream to UDP multicast for PoC integration testing. */
 
 import { Command } from 'commander';
 import { spawn } from 'child_process';
@@ -7,6 +8,7 @@ import path from 'path';
 
 const program = new Command();
 
+/** Parses a required positive-integer command-line option. */
 function parsePositiveInteger(value, optionName) {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -15,6 +17,7 @@ function parsePositiveInteger(value, optionName) {
   return parsed;
 }
 
+/** Creates a transport-packet-aligned temporary copy for repeatable looping. */
 async function ensureTruncatedTsCopy(inputFile, validBytes) {
   const sourceStat = await fs.promises.stat(inputFile);
   if (sourceStat.size < validBytes) {

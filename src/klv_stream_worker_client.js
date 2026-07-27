@@ -1,3 +1,4 @@
+/** Starts and controls the worker that turns recorded KLV into WebVTT segments. */
 import path from "node:path";
 import { fork } from "node:child_process";
 import { createServiceLogger, serializeError } from "./service_logger.js";
@@ -7,6 +8,7 @@ const START_TIMEOUT_MS = 8000;
 const STOP_TIMEOUT_MS = 2000;
 const FINALIZE_TIMEOUT_MS = 30000;
 
+/** Removes inspector flags that cannot safely be inherited by a child worker. */
 function sanitizeExecArgv(argv) {
   const out = [];
   for (let i = 0; i < argv.length; i++) {
@@ -22,6 +24,7 @@ function sanitizeExecArgv(argv) {
   return out;
 }
 
+/** Starts the KLV-to-WebVTT worker and returns its RPC-style control handle. */
 export async function startKlvStreamWorker({
   streamId,
   inputUrl,
@@ -167,6 +170,7 @@ export async function startKlvStreamWorker({
   });
 }
 
+/** Requests a worker stop and terminates it if it does not exit promptly. */
 export async function stopKlvStreamWorker(handle) {
   if (!handle?.proc) return;
   if (handle.proc.exitCode != null || handle.proc.killed) return;
@@ -198,6 +202,7 @@ export async function stopKlvStreamWorker(handle) {
   });
 }
 
+/** Flushes a finite-file worker and waits for its subtitle artifacts to finish. */
 export async function finalizeKlvStreamWorker(handle) {
   if (!handle?.proc || handle.proc.exitCode != null || handle.proc.killed) {
     throw new Error("KLV worker is not available for finalization");

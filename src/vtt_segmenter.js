@@ -1,8 +1,11 @@
+/** Writes time-aligned KLV metadata as a rolling segmented WebVTT track. */
 import fs from "node:fs";
 import path from "node:path";
 
+/** Left-pads a number for stable HLS/WebVTT segment filenames. */
 function pad(n, w) { return String(n).padStart(w, "0"); }
 
+/** Formats seconds using WebVTT cue timestamp syntax. */
 function vttTime(seconds) {
   const s = Math.max(0, seconds);
   const hh = Math.floor(s / 3600);
@@ -12,9 +15,12 @@ function vttTime(seconds) {
   return `${pad(hh,2)}:${pad(mm,2)}:${pad(ss,2)}.${pad(ms,3)}`;
 }
 
+/** Serializes decoded KLV payloads for cue text. */
 function safeJson(obj) { return JSON.stringify(obj); }
 
+/** Formats a millisecond timestamp for HLS program-date-time tags. */
 function iso(ms) { return new Date(ms).toISOString(); }
+/** Limits a value to an inclusive range. */
 function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
 /**
@@ -27,6 +33,7 @@ function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
  * - "Closes" segments once they are behind the current live edge to avoid rewriting old files.
  */
 export class SegmentedVttWriter {
+  /** Initializes a WebVTT writer with segment, cue-rate, and duration safeguards. */
   constructor({
     outDir,
     segmentSeconds = 5,
@@ -65,6 +72,7 @@ export class SegmentedVttWriter {
     this._flushTimer = null;
   }
 
+  /** Updates the currently playable HLS time window for cue alignment. */
   setWindow(windowStartMs, windowEndMs) {
     if (!Number.isFinite(windowStartMs) || !Number.isFinite(windowEndMs)) return;
 
@@ -97,6 +105,7 @@ export class SegmentedVttWriter {
     }
   }
 
+  /** Adds a decoded telemetry payload to the appropriate WebVTT cue segment. */
   addKlv({ klvUnixMs, payload }) {
     if (!Number.isFinite(klvUnixMs)) return;
 
@@ -174,6 +183,7 @@ export class SegmentedVttWriter {
     this._scheduleFlush();
   }
 
+  /** Immediately writes pending cues and refreshes the subtitle playlist. */
   async flushNow() {
     for (const [segNo, seg] of this._segments.entries()) {
       if (!seg.dirty) continue;
@@ -205,6 +215,7 @@ export class SegmentedVttWriter {
     this._writeSubtitlePlaylist();
   }
 
+  /** Debounces disk writes after new telemetry arrives. */
   _scheduleFlush() {
     if (this._flushTimer) return;
     this._flushTimer = setTimeout(() => {
@@ -213,9 +224,12 @@ export class SegmentedVttWriter {
     }, 200);
   }
 
+  /** Returns the file name for a VTT segment number. */
   _segFilename(segNo) { return `${this.filePrefix}${segNo}.vtt`; }
+  /** Resolves the on-disk path for a VTT segment number. */
   _segPath(segNo) { return path.join(this.outDir, this._segFilename(segNo)); }
 
+  /** Rewrites the subtitle media playlist to reference the current VTT window. */
   _writeSubtitlePlaylist() {
     const w = this._window;
     if (!w) return;

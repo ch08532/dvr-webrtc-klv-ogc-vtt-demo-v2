@@ -1,3 +1,6 @@
+/** Parses MPEG-TS PSI tables to locate the elementary KLV PID. */
+
+/** Extracts PID and payload offsets from one 188-byte transport packet. */
 export function parseTsHeader(pkt) {
   if (pkt.length !== 188 || pkt[0] !== 0x47) return null;
 
@@ -17,6 +20,7 @@ export function parseTsHeader(pkt) {
   return { tei, pusi, pid, payload };
 }
 
+/** Reads a Program Association Table and returns program-to-PMT mappings. */
 export function parsePat(payload) {
   if (payload.length < 1) return null;
   let off = 0;
@@ -39,6 +43,7 @@ export function parsePat(payload) {
   return programs;
 }
 
+/** Reads a Program Map Table and returns its elementary stream descriptors. */
 export function parsePmt(payload) {
   if (payload.length < 1) return null;
   let off = 0;
@@ -65,6 +70,7 @@ export function parsePmt(payload) {
   return streams;
 }
 
+/** Detects the KLVA registration descriptor in an elementary stream. */
 export function hasKlvaRegistration(esInfo) {
   let i = 0;
   while (i + 2 <= esInfo.length) {
@@ -82,6 +88,7 @@ export function hasKlvaRegistration(esInfo) {
   return false;
 }
 
+/** Chooses the most likely KLV PID from PMT elementary stream entries. */
 export function chooseKlvPidFromPmt(streams) {
   const candidates = streams.filter(s => s.streamType === 0x06);
   const klva = candidates.find(s => hasKlvaRegistration(s.esInfo));

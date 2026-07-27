@@ -99,8 +99,7 @@ function App() {
     : HLS_RENDITIONS;
   const passthroughFallbackLikely = hlsMode === 'passthrough'
     && !!inputProbe.video?.codec
-    && (inputProbe.video.codec.toLowerCase() !== 'h264'
-      || (inputProbe.audio?.codec && inputProbe.audio.codec.toLowerCase() !== 'aac'));
+    && inputProbe.video.codec.toLowerCase() !== 'h264';
   const hlsQualityOptions = activeHlsMode === 'abr'
     ? hlsQualityOptionsFor(activeHlsRenditions)
     : [{ value: 'auto', label: 'Auto (source)' }];
@@ -1966,7 +1965,7 @@ function App() {
               <Group grow mt="xs">
                 <Select
                   label="HLS mode"
-                  description="Passthrough copies browser-compatible H.264/AAC; other sources use one H.264 fallback stream. ABR creates three streams."
+                  description="Passthrough copies H.264 video and omits audio; other sources use one H.264 fallback stream. ABR creates three streams."
                   data={[
                     { value: 'passthrough', label: 'Passthrough (source quality)' },
                     { value: 'abr', label: 'Full ABR ladder' }
@@ -1997,7 +1996,7 @@ function App() {
               </Group>
               {passthroughFallbackLikely ? (
                 <Text size="xs" mt="xs" c="yellow">
-                  Passthrough fallback: this source is not H.264/AAC, so one H.264 playback stream will be encoded. KLV remains copy-only.
+                  Passthrough fallback: this source is not H.264, so one H.264 playback stream will be encoded. KLV remains copy-only.
                 </Text>
               ) : null}
               <Group mt="sm">

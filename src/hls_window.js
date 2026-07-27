@@ -1,5 +1,7 @@
+/** Reads the playable time range from HLS program-date-time tags. */
 import fs from "node:fs";
 
+/** Returns the first and last program-date-time values in an HLS media playlist. */
 export function readHlsPdtWindowMs(videoPlaylistPath) {
   try {
     const txt = fs.readFileSync(videoPlaylistPath, "utf8");

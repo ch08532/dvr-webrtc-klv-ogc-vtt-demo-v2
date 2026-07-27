@@ -1,3 +1,4 @@
+/** Queries NVIDIA GPU utilization for the runtime status endpoint. */
 import { execFile } from "node:child_process";
 
 const CACHE_MS = 1_000;
@@ -9,11 +10,13 @@ const NVIDIA_SMI_ARGS = [
 let cached = { expiresAt: 0, value: { available: false, gpus: [] } };
 let pending = null;
 
+/** Converts a command-line metric field to a number, if possible. */
 function parseNumber(value) {
   const number = Number(String(value || "").trim());
   return Number.isFinite(number) ? number : null;
 }
 
+/** Runs nvidia-smi and resolves the selected utilization metrics. */
 function queryNvidiaSmi() {
   return new Promise((resolve) => {
     execFile("nvidia-smi", NVIDIA_SMI_ARGS, { timeout: 2_000, windowsHide: true }, (error, stdout) => {
@@ -42,6 +45,7 @@ function queryNvidiaSmi() {
   });
 }
 
+/** Returns GPU metrics when available, otherwise a non-fatal unavailable result. */
 export async function getGpuMetrics() {
   if (Date.now() < cached.expiresAt) return cached.value;
   if (pending) return pending;

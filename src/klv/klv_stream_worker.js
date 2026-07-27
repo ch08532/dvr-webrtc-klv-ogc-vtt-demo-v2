@@ -1,3 +1,4 @@
+/** Child process that aligns parsed KLV with HLS segments and writes WebVTT. */
 import fs from "node:fs";
 import path from "node:path";
 import { extractKlvFromTsFile, startKlvIngest, stopKlvIngest } from "./klv_ts_parser.js";
@@ -9,9 +10,12 @@ const SEGMENT_POLL_MS = Number(process.env.KLV_SEGMENT_POLL_MS || 500);
 
 let runtime = null;
 
+/** Left-pads a segment number for stable artifact names. */
 function pad(n, w) { return String(n).padStart(w, "0"); }
+/** Limits a value to an inclusive range. */
 function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
+/** Formats seconds as a WebVTT cue timestamp. */
 function vttTime(seconds) {
   const s = Math.max(0, seconds);
   const hh = Math.floor(s / 3600);
@@ -21,8 +25,10 @@ function vttTime(seconds) {
   return `${pad(hh, 2)}:${pad(mm, 2)}:${pad(ss, 2)}.${pad(ms, 3)}`;
 }
 
+/** Serializes decoded KLV payloads for WebVTT cue text. */
 function safeJson(obj) { return JSON.stringify(obj); }
 
+/** Reads HLS media-playlist timing entries used to align KLV with video. */
 function parseVideoPlaylist(playlistPath) {
   try {
     const txt = fs.readFileSync(playlistPath, "utf8");
@@ -84,11 +90,13 @@ function parseVideoPlaylist(playlistPath) {
   }
 }
 
+/** Maps an HLS segment URI to its paired VTT artifact name. */
 function vttFilenameForSegment(segmentUri) {
   const base = path.basename(segmentUri, path.extname(segmentUri));
   return `meta_${base}.vtt`;
 }
 
+/** Writes the VTT HLS playlist for the currently available video window. */
 function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entries, endList = false }) {
   const subtitlePlaylistPath = path.join(outDir, "subtitles.m3u8");
   const target = Math.max(1, Math.ceil(Number(targetDurationSec) || 1));
@@ -123,6 +131,7 @@ function writeSubtitlePlaylist({ outDir, mediaSequence, targetDurationSec, entri
   fs.writeFileSync(subtitlePlaylistPath, txt);
 }
 
+/** Normalizes decoded KLV timestamps before they are stored or emitted. */
 function enrichDecodedTimestamp(decoded) {
   const nowMs = Date.now();
   const ingestMs = nowMs;
@@ -158,12 +167,14 @@ function enrichDecodedTimestamp(decoded) {
   };
 }
 
+/** Posts a structured event from the worker back to its parent client. */
 function send(msg) {
   try {
     if (process.connected) process.send?.(msg);
   } catch {}
 }
 
+/** Builds the compact cue payload consumed by the browser telemetry view. */
 function buildVttCuePayload(payload) {
   return {
     timestampIso: payload.timestampIso,
@@ -194,6 +205,7 @@ function buildVttCuePayload(payload) {
   };
 }
 
+/** Writes one VTT file from KLV records that fall within a video segment. */
 function writeSegmentVtt({
   outPath,
   durationSec,
@@ -300,6 +312,7 @@ function writeSegmentVtt({
   fs.writeFileSync(outPath, content);
 }
 
+/** Finds the KLV-carrier segment corresponding to a browser video segment. */
 function findCarrierEntry(videoEntry, carrierEntries) {
   const sameSequence = carrierEntries.find((entry) => entry.sequence === videoEntry.sequence);
   if (sameSequence) return sameSequence;
@@ -321,6 +334,7 @@ function findCarrierEntry(videoEntry, carrierEntries) {
   return closestDifferenceMs <= maxDifferenceMs ? closest : null;
 }
 
+/** Parses one completed carrier segment and writes its paired VTT file. */
 async function processSegmentEntry(current, videoEntry, carrierEntry, videoSegmentOffsetSec) {
   const tsPath = path.join(current.outDir, carrierEntry.uri);
   if (!fs.existsSync(tsPath)) return false;
@@ -387,6 +401,7 @@ async function processSegmentEntry(current, videoEntry, carrierEntry, videoSegme
   return true;
 }
 
+/** Derives the source-time offset of a video segment from HLS timing data. */
 function getVideoSegmentOffsetSec(current, videoEntry) {
   if (current.timelineBaseSequence == null) current.timelineBaseSequence = videoEntry.sequence;
   if (current.timelineBasePdtMs == null && Number.isFinite(videoEntry.pdtMs)) {
@@ -399,6 +414,7 @@ function getVideoSegmentOffsetSec(current, videoEntry) {
   return Math.max(0, (videoEntry.sequence - current.timelineBaseSequence) * durationSec);
 }
 
+/** Polls playlists and processes every video segment not handled yet. */
 async function processPendingSegments() {
   const current = runtime;
   if (!current || current.processing) return;
@@ -438,6 +454,7 @@ async function processPendingSegments() {
   }
 }
 
+/** Initializes worker state and begins polling HLS artifacts for new segments. */
 async function start(message) {
   const {
     streamId,
@@ -507,6 +524,7 @@ async function start(message) {
   send({ type: "started", streamId });
 }
 
+/** Stops playlist polling and releases active worker resources. */
 async function stop() {
   if (!runtime) return;
   const current = runtime;
@@ -519,6 +537,7 @@ async function stop() {
   send({ type: "stopped", streamId: current.streamId });
 }
 
+/** Processes remaining finite-file segments and writes final HLS end markers. */
 async function finalize(finalizeId) {
   const current = runtime;
   if (!current) throw new Error("worker is not started");

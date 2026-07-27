@@ -1,3 +1,6 @@
+/** Registers the small OGC API Moving Features subset backed by KLV storage. */
+
+/** Parses an ISO date/time string into milliseconds, if valid. */
 function parseTime(x) {
   if (x == null) return NaN;
   const s = String(x).trim();
@@ -7,6 +10,7 @@ function parseTime(x) {
   return Number.isFinite(t) ? t : NaN;
 }
 
+/** Parses an OGC datetime instant or interval query parameter. */
 function parseDatetimeParam(datetime) {
   const DEFAULT_WINDOW_MS = 60_000;
   if (!datetime) {
@@ -25,8 +29,10 @@ function parseDatetimeParam(datetime) {
   return { fromMs: Math.min(a, b), toMs: Math.max(a, b) };
 }
 
+/** Converts a stored millisecond timestamp to an OGC-compatible ISO timestamp. */
 function toIso(ms) { return new Date(ms).toISOString(); }
 
+/** Selects the requested KLV-derived geometry for an OGC moving feature. */
 function pickGeometry(mFeatureId, decoded) {
   if (mFeatureId === "platform") {
     const lat = decoded.sensorLat;
@@ -43,6 +49,7 @@ function pickGeometry(mFeatureId, decoded) {
   return null;
 }
 
+/** Creates the OGC collection metadata for one supported moving-feature track. */
 function featureItem(collectionId, mFeatureId) {
   return {
     type: "Feature",
@@ -62,6 +69,7 @@ function featureItem(collectionId, mFeatureId) {
   };
 }
 
+/** Adds discovery, collection, feature, and trajectory routes to Express. */
 export function registerOgcMovingFeaturesRoutes(app, { sources, store }) {
   app.get("/ogc", (req, res) => {
     res.json({

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/** Generates a small MPEG-TS sample with synthetic ST 0601 KLV for local testing. */
 
 import { Command } from 'commander';
 import { spawn } from 'child_process';
@@ -22,7 +23,7 @@ program.parse();
 
 const options = program.opts();
 
-// Generate ST0601 KLV data
+/** Encodes a minimal ST 0601 local set containing time, position, and altitude. */
 function generateSt0601Klv(lat, lon, alt, timestamp) {
   // ST0601 Local Set with basic metadata
   const timestampMicros = BigInt(timestamp * 1000000);

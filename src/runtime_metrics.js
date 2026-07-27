@@ -1,4 +1,5 @@
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+/** Collects lightweight host and Node process metrics for the status endpoint. */
 import os from "node:os";
 
 const lagHistogram = monitorEventLoopDelay({ resolution: 20 });
@@ -6,10 +7,12 @@ lagHistogram.enable();
 let eluPrev = performance.eventLoopUtilization();
 let previousCpuTicks = null;
 
+/** Converts a Node high-resolution timer tuple to milliseconds. */
 function nsToMs(value) {
   return Number(value) / 1e6;
 }
 
+/** Rounds a finite duration for display and omits invalid values. */
 function safeMs(value) {
   if (!Number.isFinite(value)) return 0;
   if (value < 0) return 0;
@@ -17,6 +20,7 @@ function safeMs(value) {
   return Number(value.toFixed(3));
 }
 
+/** Estimates current host CPU utilization from cumulative CPU times. */
 function hostCpuPercent() {
   const ticks = os.cpus().reduce((total, cpu) => {
     total.idle += cpu.times.idle;
@@ -33,6 +37,7 @@ function hostCpuPercent() {
   return Number(Math.max(0, Math.min(100, ((totalDelta - idleDelta) / totalDelta) * 100)).toFixed(1));
 }
 
+/** Returns a point-in-time metrics object for the UI and diagnostics. */
 export function getRuntimeMetricsSnapshot() {
   const eluNow = performance.eventLoopUtilization(eluPrev);
   eluPrev = performance.eventLoopUtilization();

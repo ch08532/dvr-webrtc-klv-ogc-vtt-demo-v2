@@ -1,3 +1,4 @@
+/** Loads GeoTIFF terrain and derives terrain-intersected KLV target geometry. */
 import { fromArrayBuffer } from 'geotiff';
 
 const EARTH_RADIUS_M = 6371008.8;
@@ -7,9 +8,12 @@ const USGS_TERRAIN_TILE_MILES = 100;
 const MILES_PER_LATITUDE_DEGREE = 69;
 const USGS_TERRAIN_IMAGE_SIZE = 2048;
 
+/** Tests whether a value can safely be used as a finite numeric coordinate. */
 const isFiniteNumber = (value) => Number.isFinite(Number(value));
+/** Limits a numeric value to an inclusive range. */
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
 
+/** Returns a latitude/longitude reached by travelling a distance on the Earth. */
 const destinationPoint = (lat, lon, bearingDeg, distanceM) => {
   const angularDistance = distanceM / EARTH_RADIUS_M;
   const bearing = bearingDeg * DEG_TO_RAD;
@@ -29,6 +33,7 @@ const destinationPoint = (lat, lon, bearingDeg, distanceM) => {
   };
 };
 
+/** Decodes a GeoTIFF response into a model that supports elevation sampling. */
 const terrainModelFromArrayBuffer = async (arrayBuffer) => {
   const tiff = await fromArrayBuffer(arrayBuffer);
   const image = await tiff.getImage();
@@ -92,6 +97,7 @@ export const loadTerrainModelFromUrl = async (url) => {
   return terrainModelFromArrayBuffer(await response.arrayBuffer());
 };
 
+/** Samples terrain elevation at a longitude/latitude point, if covered. */
 export async function getTerrainElevation(model, lon, lat) {
   if (
     !model
@@ -112,6 +118,7 @@ export async function getTerrainElevation(model, lon, lat) {
   return elevation;
 }
 
+/** Ray-marches the sensor look direction until it intersects the terrain model. */
 export async function findTerrainIntersection(model, telemetry, { azimuthOffsetDeg = 0, elevationOffsetDeg = 0 } = {}) {
   const sensorLat = Number(telemetry?.sensorLat);
   const sensorLon = Number(telemetry?.sensorLon);
@@ -168,6 +175,7 @@ export async function findTerrainIntersection(model, telemetry, { azimuthOffsetD
   return destinationPoint(sensorLat, sensorLon, bearingDeg, (lowerDistanceM + upperDistanceM) / 2);
 }
 
+/** Calculates the four terrain intersections that approximate a video footprint. */
 export async function findTerrainFootprint(model, telemetry) {
   const horizontalFovDeg = Number(telemetry?.sensorHfovDeg);
   const verticalFovDeg = Number(telemetry?.sensorVfovDeg);

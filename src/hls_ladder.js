@@ -1,3 +1,5 @@
+/** Defines the HLS rendition ladder and creates matching master playlists. */
+
 export const HLS_RENDITIONS = [
   {
     id: "360p",
@@ -37,6 +39,7 @@ export const HLS_RENDITIONS = [
   }
 ];
 
+/** Builds the native-resolution ABR rung and marks whether it can be copied. */
 function topRenditionForSource(sourceVideo) {
   const width = Number(sourceVideo?.width);
   const height = Number(sourceVideo?.height);
@@ -66,6 +69,7 @@ function topRenditionForSource(sourceVideo) {
   };
 }
 
+/** Selects the fixed ladder plus a source-native top rung when dimensions exist. */
 export function resolveHlsRenditions(sourceVideo) {
   const sourceTop = topRenditionForSource(sourceVideo);
   if (!sourceTop) {
@@ -83,6 +87,7 @@ export function resolveHlsRenditions(sourceVideo) {
   };
 }
 
+/** Serializes an ABR HLS master playlist with the KLV WebVTT subtitle group. */
 export function createHlsMasterPlaylist(renditions = HLS_RENDITIONS) {
   const subtitleGroup = '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="KLV",AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subtitles.m3u8"';
   const variants = [...renditions]
@@ -102,6 +107,7 @@ export function createHlsMasterPlaylist(renditions = HLS_RENDITIONS) {
   ].join("\n");
 }
 
+/** Serializes the one-rendition master playlist used by HLS passthrough. */
 export function createPassthroughHlsMasterPlaylist() {
   return [
     "#EXTM3U",
