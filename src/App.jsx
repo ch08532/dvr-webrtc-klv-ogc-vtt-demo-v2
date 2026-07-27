@@ -69,6 +69,10 @@ function App() {
   const [hlsQuality, setHlsQuality] = useState('auto');
   const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
+  const [clipStartSeconds, setClipStartSeconds] = useState(0);
+  const [clipEndSeconds, setClipEndSeconds] = useState(0);
+  const [clipInFlight, setClipInFlight] = useState(false);
+  const [clipResult, setClipResult] = useState(null);
   const [dvrDiag, setDvrDiag] = useState({
     currentSrc: null,
     currentPlaylistUri: null,
@@ -119,6 +123,9 @@ function App() {
   const hlsRetryTokenRef = useRef(0);
   const hlsQualityRef = useRef('auto');
   const appliedHlsQualityRef = useRef({ player: null, quality: null, representations: null });
+  const clipRangeStreamRef = useRef(null);
+  const clipDragBoundaryRef = useRef(null);
+  const clipTrimShellRef = useRef(null);
   const webrtcRetryTimerRef = useRef(null);
   const webrtcRetryTokenRef = useRef(0);
   const webrtcTransportRef = useRef(null);
@@ -273,6 +280,19 @@ function App() {
   const canStartSource = serverOnline && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
   const currentSourceIsFile = streamRuntime?.sourceType === 'file';
+  const clipSourceIsActive = currentSourceIsFile && !['stopping', 'stopped', 'error', 'offline'].includes(streamRuntime?.state);
+  const sourceDurationSeconds = Number(streamRuntime?.durationSeconds);
+  const clipTimelineEndSeconds = Number.isFinite(sourceDurationSeconds) && sourceDurationSeconds > 0
+    ? sourceDurationSeconds
+    : null;
+  const clipDurationSeconds = Math.max(0, clipEndSeconds - clipStartSeconds);
+  const clipWidgetReady = Boolean(
+    currentSourceIsFile
+    && hlsMediaLoaded
+    && Number.isFinite(clipTimelineEndSeconds)
+    && clipTimelineEndSeconds >= 0.25
+  );
+  const clipExportReady = clipWidgetReady && streamRuntime?.state === 'ready';
 
   const webrtcBadge = (() => {
     const statusText = String(liveStatus || '').toLowerCase();
@@ -688,6 +708,10 @@ function App() {
     try {
       let assetId = null;
       if (sourceType === 'file') {
+        clipRangeStreamRef.current = null;
+        setClipStartSeconds(0);
+        setClipEndSeconds(0);
+        setClipResult(null);
         setStatus(`Uploading ${videoFile.name}...`);
         const uploadResult = await api('/uploads/video', {
           method: 'POST',
@@ -755,6 +779,10 @@ function App() {
     if (!canStopSource) return;
     setStopRequestInFlight(true);
     setOverlayData(null);
+    clipRangeStreamRef.current = null;
+    setClipStartSeconds(0);
+    setClipEndSeconds(0);
+    setClipResult(null);
     disconnectWs();
     setStreamRuntime((prev) => ({ ...prev, streamId, state: 'stopping', running: false, ingestRunning: false }));
     try {
@@ -1076,6 +1104,106 @@ function App() {
       player.play().catch(() => {});
     } else {
       player.pause?.();
+    }
+  };
+
+  const previewClipTime = (seconds) => {
+    const player = getActiveHlsPlayer();
+    if (!player) return;
+    const { start, end } = getHlsSeekBounds(player);
+    player.currentTime(clampToBounds(seconds, start, end));
+  };
+
+  const updateClipBoundary = (boundary, rawValue) => {
+    const timelineEnd = clipTimelineEndSeconds;
+    const value = Number(rawValue);
+    if (!Number.isFinite(timelineEnd) || timelineEnd <= 0 || !Number.isFinite(value)) return;
+    const minDuration = 0.25;
+    if (boundary === 'start') {
+      const next = Math.max(0, Math.min(value, clipEndSeconds - minDuration));
+      setClipStartSeconds(next);
+      previewClipTime(next);
+    } else {
+      const next = Math.min(timelineEnd, Math.max(value, clipStartSeconds + minDuration));
+      setClipEndSeconds(next);
+      previewClipTime(next);
+    }
+  };
+
+  const clipTimeFromPointerEvent = (event) => {
+    const timelineEnd = clipTimelineEndSeconds;
+    const rect = clipTrimShellRef.current?.getBoundingClientRect();
+    if (!Number.isFinite(timelineEnd) || timelineEnd <= 0 || !rect || rect.width <= 0) return null;
+    const position = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    return (position / rect.width) * timelineEnd;
+  };
+
+  const beginClipPointerDrag = (event, forcedBoundary = null) => {
+    if (!clipWidgetReady) return;
+    const time = clipTimeFromPointerEvent(event);
+    if (time == null) return;
+    const boundary = forcedBoundary || (Math.abs(time - clipStartSeconds) <= Math.abs(time - clipEndSeconds)
+      ? 'start'
+      : 'end');
+    clipDragBoundaryRef.current = boundary;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    updateClipBoundary(boundary, time);
+  };
+
+  const moveClipPointerDrag = (event) => {
+    const boundary = clipDragBoundaryRef.current;
+    if (!boundary) return;
+    const time = clipTimeFromPointerEvent(event);
+    if (time != null) updateClipBoundary(boundary, time);
+  };
+
+  const endClipPointerDrag = (event) => {
+    if (!clipDragBoundaryRef.current) return;
+    clipDragBoundaryRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    }
+  };
+
+  const setClipBoundaryAtPlayhead = (boundary) => {
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus('HLS player is not ready.');
+      return;
+    }
+    updateClipBoundary(boundary, Number(player.currentTime?.() || 0));
+  };
+
+  const createClip = async () => {
+    if (!currentSourceIsFile || streamRuntime?.state !== 'ready') {
+      setStatus('Clipping is available only after an uploaded video is ready.');
+      return;
+    }
+    setClipInFlight(true);
+    setClipResult(null);
+    try {
+      const result = await api(`/sources/${encodeURIComponent(streamId)}/clips`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ startSeconds: clipStartSeconds, endSeconds: clipEndSeconds })
+      });
+      if (!result?.ok || !result?.clip?.downloadUrl) {
+        throw new Error(result?.error || 'Clip creation failed');
+      }
+      setClipResult(result.clip);
+      setStatus(`Clip ready: ${result.clip.filename}. Video copied at keyframe boundaries; KLV embedded: ${result.clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
+      const download = document.createElement('a');
+      download.href = result.clip.downloadUrl;
+      download.download = result.clip.filename;
+      document.body.appendChild(download);
+      download.click();
+      download.remove();
+    } catch (error) {
+      setStatus(`Clip creation failed: ${String(error?.message || error)}`);
+    } finally {
+      setClipInFlight(false);
     }
   };
 
@@ -1401,6 +1529,12 @@ function App() {
       });
       window.player.on('loadedmetadata', () => {
         forceHideCaptionTracks(window.player);
+        // File-backed HLS is a VOD asset. Video.js can otherwise position at
+        // the end of a full-history playlist as though it were live DVR.
+        if (streamRuntimeRef.current?.sourceType === 'file') {
+          const { start } = getHlsSeekBounds(window.player);
+          window.player.currentTime(start);
+        }
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(window.player);
@@ -1754,6 +1888,21 @@ function App() {
       setLiveNotConnected();
     }
   }, [streamRuntime, activeTab]);
+
+  useEffect(() => {
+    // A server restart or a new run can reuse stream1. Initialize as soon as
+    // the file duration is known so trimming can begin during HLS packaging;
+    // clip creation itself still waits until the source is ready.
+    if (!currentSourceIsFile || !Number.isFinite(clipTimelineEndSeconds) || clipTimelineEndSeconds <= 0) {
+      clipRangeStreamRef.current = null;
+      return;
+    }
+    if (clipRangeStreamRef.current === streamId) return;
+    clipRangeStreamRef.current = streamId;
+    setClipStartSeconds(0);
+    setClipEndSeconds(clipTimelineEndSeconds);
+    setClipResult(null);
+  }, [currentSourceIsFile, streamId, clipTimelineEndSeconds]);
 
   useEffect(() => {
     if (hlsQuality === 'auto') return;
@@ -2182,10 +2331,83 @@ function App() {
                         <Text size="xs" c="red" mb="xs">error: {dvrDiag.error}</Text>
                       ) : null}
                       <div ref={dvrVideoHostRef} style={{ width: '100%', minHeight: '180px' }} />
-                      <Text size="xs" c="dimmed" mt="xs">
-                        player time: {formatPlayerTime(dvrDiag.currentTimeSec)} / {formatPlayerTime(dvrDiag.durationSec)}
-                      </Text>
-                      {activeTab === 'dvr' && hlsMediaLoaded ? (
+                       <Text size="xs" c="dimmed" mt="xs">
+                         player time: {formatPlayerTime(dvrDiag.currentTimeSec)} / {formatPlayerTime(dvrDiag.durationSec)}
+                       </Text>
+                       {clipSourceIsActive ? (
+                         <div className="clip-widget" aria-label="Video clip selection">
+                           <Group justify="space-between" align="center" mb={4}>
+                             <div>
+                               <Text size="sm" fw={700}>Create video clip</Text>
+                               <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports snap to source keyframes without re-encoding.</Text>
+                             </div>
+                             <Badge color={streamRuntime?.klvProbe?.available ? 'teal' : 'gray'} variant="light">
+                               {streamRuntime?.klvProbe?.available ? 'KLV preserved' : 'No KLV detected'}
+                             </Badge>
+                           </Group>
+                           <div
+                             ref={clipTrimShellRef}
+                             className={`clip-trim-shell${clipWidgetReady ? '' : ' is-disabled'}`}
+                             onPointerDown={beginClipPointerDrag}
+                             onPointerMove={moveClipPointerDrag}
+                             onPointerUp={endClipPointerDrag}
+                             onPointerCancel={endClipPointerDrag}
+                            >
+                              <div className="clip-filmstrip" aria-hidden="true">
+                               {Array.from({ length: 12 }, (_, index) => <span key={index} />)}
+                             </div>
+                             {clipWidgetReady ? (
+                               <>
+                                 <div
+                                   className="clip-selection"
+                                   style={{
+                                     left: `${(clipStartSeconds / clipTimelineEndSeconds) * 100}%`,
+                                     width: `${(clipDurationSeconds / clipTimelineEndSeconds) * 100}%`
+                                   }}
+                                 />
+                                  <button
+                                    type="button"
+                                    className="clip-drag-handle clip-drag-handle-start"
+                                    style={{ left: `calc(${(clipStartSeconds / clipTimelineEndSeconds) * 100}% - 9px)` }}
+                                    onPointerDown={(event) => beginClipPointerDrag(event, 'start')}
+                                    aria-label="Clip start time"
+                                  />
+                                  <button
+                                    type="button"
+                                    className="clip-drag-handle clip-drag-handle-end"
+                                    style={{ left: `calc(${(clipEndSeconds / clipTimelineEndSeconds) * 100}% - 9px)` }}
+                                    onPointerDown={(event) => beginClipPointerDrag(event, 'end')}
+                                    aria-label="Clip end time"
+                                  />
+                               </>
+                             ) : null}
+                           </div>
+                           <Group justify="space-between" className="clip-time-readout">
+                             <span><b>Start</b> {formatPlayerTime(clipStartSeconds)}</span>
+                             <span><b>Length</b> {formatPlayerTime(clipDurationSeconds)}</span>
+                             <span><b>End</b> {formatPlayerTime(clipEndSeconds)}</span>
+                           </Group>
+                           <Group mt="xs" gap="xs" wrap="wrap">
+                             <Button size="xs" variant="default" onClick={() => setClipBoundaryAtPlayhead('start')} disabled={!clipWidgetReady || clipInFlight}>Set start at playhead</Button>
+                             <Button size="xs" variant="default" onClick={() => setClipBoundaryAtPlayhead('end')} disabled={!clipWidgetReady || clipInFlight}>Set end at playhead</Button>
+                             <Button size="xs" color="dark" onClick={createClip} loading={clipInFlight} disabled={!clipExportReady || clipDurationSeconds < 0.25}>
+                               Create &amp; download clip
+                             </Button>
+                           </Group>
+                           {!clipExportReady ? (
+                             <Text size="xs" c="yellow" mt="xs">You can set clip boundaries now. Download becomes available when file packaging completes.</Text>
+                           ) : null}
+                           <Text size="xs" c="dimmed" mt="xs">
+                             Downloads as MPEG-TS with copied video, audio, and KLV. Start positions snap to source keyframes; live streams cannot be clipped.
+                           </Text>
+                           {clipResult ? (
+                             <Text size="xs" c="teal" mt={4}>Ready: {clipResult.filename} · keyframe copied · embedded KLV: {clipResult.klvEmbedded ? 'yes' : 'not present in source'}</Text>
+                           ) : null}
+                         </div>
+                       ) : (
+                         <Text size="xs" c="dimmed" mt="sm">Clip creation is available only for uploaded, file-backed video. Live streams remain view-only.</Text>
+                       )}
+                       {activeTab === 'dvr' && hlsMediaLoaded ? (
                         <Group mt="xs">
                           <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
                           <Button variant="light" onClick={() => seekHlsBySeconds(-15)}>Rewind 15s</Button>

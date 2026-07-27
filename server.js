@@ -40,6 +40,10 @@ const DB_DIR = path.resolve("./db");
 const VIDEO_ROOT = path.resolve("./videos");
 const MAX_UPLOAD_BYTES = Math.max(1, Number(process.env.MAX_VIDEO_UPLOAD_MB || 10_240)) * 1024 * 1024;
 const VIDEO_UPLOAD_EXTENSIONS = new Set([".ts", ".m2ts", ".mp4", ".mov", ".mkv"]);
+const CLIP_MIN_DURATION_SECONDS = 0.25;
+// Leave clip duration unrestricted by default. Deployments that need a policy
+// limit can set MAX_CLIP_DURATION_SECONDS to a positive number.
+const CLIP_MAX_DURATION_SECONDS = Number(process.env.MAX_CLIP_DURATION_SECONDS || 0);
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
@@ -306,6 +310,48 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
       }
     });
   });
+}
+
+/** Runs FFmpeg and includes its useful error text when clipping fails. */
+async function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 12_000) stderr = stderr.slice(-12_000);
+    });
+    proc.on("error", reject);
+    proc.on("close", (code, signal) => {
+      if (code === 0) return resolve();
+      const detail = stderr.trim() || `ffmpeg exited with code ${String(code)}`;
+      reject(new Error(`clip export failed${signal ? ` (${signal})` : ""}: ${detail}`));
+    });
+  });
+}
+
+/** Validates a requested HLS-relative time range against a file source. */
+function normalizeClipRange({ startSeconds, endSeconds, durationSeconds = null }) {
+  const start = Number(startSeconds);
+  const end = Number(endSeconds);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
+    throw new Error("clip start and end must be valid times with end after start");
+  }
+  const duration = end - start;
+  if (duration < CLIP_MIN_DURATION_SECONDS) {
+    throw new Error(`clip must be at least ${CLIP_MIN_DURATION_SECONDS}s long`);
+  }
+  if (Number.isFinite(CLIP_MAX_DURATION_SECONDS) && CLIP_MAX_DURATION_SECONDS > 0 && duration > CLIP_MAX_DURATION_SECONDS) {
+    throw new Error(`clip must be no longer than ${CLIP_MAX_DURATION_SECONDS}s`);
+  }
+  if (Number.isFinite(durationSeconds) && end > durationSeconds + 0.05) {
+    throw new Error("clip end is outside the uploaded video duration");
+  }
+  return {
+    start: Number(start.toFixed(3)),
+    end: Number(end.toFixed(3)),
+    duration: Number(duration.toFixed(3))
+  };
 }
 
 // Some MPEG-TS files (including MX15 recordings) have valid media timestamps
@@ -765,6 +811,110 @@ app.get("/sources/:streamId/state", (req, res) => {
   res.json(getSourceRuntime(req.params.streamId));
 });
 
+// ---------- API: file-backed clips ----------
+// Clips always come from the uploaded source file, rather than from browser HLS.
+// MPEG-TS is used as the download container because it carries the source KLV data
+// stream alongside a keyframe-aligned copy of the original video.
+app.post("/sources/:streamId/clips", async (req, res) => {
+  const streamId = req.params.streamId;
+  const source = sources.get(streamId);
+  if (!source || source.sourceType !== "file") {
+    return res.status(409).json({ ok: false, error: "clipping is available only for an uploaded video source" });
+  }
+  if (currentSourceState(streamId) !== "ready") {
+    return res.status(409).json({ ok: false, error: "wait for the uploaded video to finish packaging before creating a clip" });
+  }
+
+  let range;
+  try {
+    range = normalizeClipRange({
+      startSeconds: req.body?.startSeconds,
+      endSeconds: req.body?.endSeconds,
+      durationSeconds: sourceStates.get(streamId)?.durationSeconds
+    });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+
+  const clipId = randomUUID();
+  const clipDir = path.join(RECORD_ROOT, streamId, "clips");
+  const filename = `${streamId}-clip-${clipId.slice(0, 8)}.ts`;
+  const outputPath = path.join(clipDir, filename);
+  const inputHasKlv = source.klvProbe?.available === true;
+
+  try {
+    await fs.promises.mkdir(clipDir, { recursive: true });
+    const args = [
+      "-hide_banner",
+      "-loglevel", "error",
+      // Required for KLV/private data streams that FFmpeg does not otherwise map.
+      "-copy_unknown",
+      // Input-side seeking makes stream-copy clipping immediate. FFmpeg starts
+      // at the closest preceding seekable keyframe, which keeps the output
+      // decodable without re-encoding the video.
+      "-ss", String(range.start),
+      "-i", source.inputUrl,
+      "-t", String(range.duration),
+      "-map", "0:v:0",
+      "-map", "0:a?",
+      "-map", "0:d?",
+      "-map_metadata", "0",
+      "-c:v", "copy",
+      "-c:a", "copy",
+      "-c:d", "copy",
+      "-muxpreload", "0",
+      "-muxdelay", "0",
+      "-avoid_negative_ts", "make_zero",
+      "-f", "mpegts",
+      outputPath
+    ];
+    log.info("clip_export_start", { streamId, clipId, startSeconds: range.start, endSeconds: range.end, inputHasKlv });
+    await runFfmpeg(args);
+
+    const outputProbe = await probeInputWithFfprobe(outputPath);
+    if (!outputProbe.hasVideo) throw new Error("clip export did not contain a video stream");
+    if (inputHasKlv && !outputProbe.klv?.available) {
+      throw new Error("clip export did not retain the source KLV data stream");
+    }
+
+    const clip = {
+      clipId,
+      filename,
+      path: outputPath,
+      startSeconds: range.start,
+      endSeconds: range.end,
+      durationSeconds: outputProbe.durationSeconds ?? range.duration,
+      trimMode: "keyframe-copy",
+      klvEmbedded: !!outputProbe.klv?.available,
+      createdAt: new Date().toISOString()
+    };
+    if (!source.clips) source.clips = new Map();
+    source.clips.set(clipId, clip);
+    log.info("clip_export_complete", { streamId, clipId, durationSeconds: clip.durationSeconds, klvEmbedded: clip.klvEmbedded });
+    return res.status(201).json({
+      ok: true,
+      clip: {
+        ...clip,
+        downloadUrl: `/sources/${encodeURIComponent(streamId)}/clips/${encodeURIComponent(clipId)}/download`
+      }
+    });
+  } catch (error) {
+    await fs.promises.rm(outputPath, { force: true }).catch(() => {});
+    const message = String(error?.message || error);
+    log.warn("clip_export_error", { streamId, clipId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: message });
+  }
+});
+
+app.get("/sources/:streamId/clips/:clipId/download", async (req, res) => {
+  const source = sources.get(req.params.streamId);
+  const clip = source?.clips?.get(req.params.clipId);
+  if (!clip || !fs.existsSync(clip.path)) {
+    return res.status(404).json({ ok: false, error: "clip not found" });
+  }
+  return res.download(clip.path, clip.filename);
+});
+
 app.post("/sources", async (req, res) => {
   let requestedStreamId = null;
   let hls = null;
@@ -1040,6 +1190,7 @@ app.post("/sources", async (req, res) => {
       copyNativeTopRung: hls.copyNativeTopRung,
       klvProbe: sourceProbe?.klv || null,
       hls, klvWorker,
+      clips: new Map(),
       webrtc: sourceType === "file" ? null : { ingestRunning: true, producerId }
     });
 
