@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress, Tooltip } from '@mantine/core';
+import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress, Tooltip, Menu } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
@@ -24,6 +24,9 @@ function hlsQualityOptionsFor(renditions) {
   }))
   ];
 }
+
+const HLS_PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+const formatHlsPlaybackRate = (rate) => `${rate}×`;
 
 function emptyWebRtcDiag() {
   return {
@@ -79,6 +82,7 @@ function App() {
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [hlsQuality, setHlsQuality] = useState('auto');
+  const [hlsPlaybackRate, setHlsPlaybackRate] = useState(1);
   const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
   const [clipStartSeconds, setClipStartSeconds] = useState(0);
@@ -140,6 +144,7 @@ function App() {
   const hlsRecoveryTimerRef = useRef(null);
   const hlsRecoveryPendingRef = useRef(false);
   const hlsQualityRef = useRef('auto');
+  const hlsPlaybackRateRef = useRef(1);
   const appliedHlsQualityRef = useRef({ player: null, quality: null, representations: null });
   const clipRangeStreamRef = useRef(null);
   const clipDragBoundaryRef = useRef(null);
@@ -1228,6 +1233,16 @@ function App() {
     }
   };
 
+  const setHlsPlaybackSpeed = (value) => {
+    const rate = Number(value);
+    if (!HLS_PLAYBACK_RATES.includes(rate)) return;
+    hlsPlaybackRateRef.current = rate;
+    setHlsPlaybackRate(rate);
+    const player = getActiveHlsPlayer();
+    try { player?.playbackRate?.(rate); } catch {}
+    setStatus(`HLS playback speed set to ${rate}×.`);
+  };
+
   /** Captures the currently decoded video frame and downloads it as a PNG. */
   const downloadVideoSnapshot = (video, playbackKind) => {
     const width = Number(video?.videoWidth);
@@ -1660,6 +1675,7 @@ function App() {
         setDvrDiag((prev) => ({ ...prev, error: null }));
         refreshDvrPlaybackInfo(window.player);
         applyHlsQuality(hlsQualityRef.current);
+        try { window.player.playbackRate?.(hlsPlaybackRateRef.current); } catch {}
         window.player.play().catch(() => {});
         hookVttOverlaySoon();
         return;
@@ -1747,6 +1763,7 @@ function App() {
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(player);
         applyHlsQuality(hlsQualityRef.current);
+        try { player.playbackRate?.(hlsPlaybackRateRef.current); } catch {}
       });
       player.on('canplay', () => {
         if (window.player !== player) return;
@@ -1827,6 +1844,7 @@ function App() {
         if (window.player !== player) return;
         forceHideCaptionTracks(player);
         applyHlsQuality(hlsQualityRef.current);
+        try { player.playbackRate?.(hlsPlaybackRateRef.current); } catch {}
         player.play().catch(() => {});
         refreshDvrPlaybackInfo(player);
         hookVttOverlaySoon();
@@ -2595,6 +2613,27 @@ function App() {
                           <Tooltip label="Pause or play" withArrow><ActionIcon variant="light" size="lg" onClick={toggleHlsPlayPause} aria-label="Pause or play"><PlaybackControlIcon name="playPause" /></ActionIcon></Tooltip>
                           <Tooltip label="Fast-forward 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(15)} aria-label="Fast-forward 15 seconds"><PlaybackControlIcon name="forward" /></ActionIcon></Tooltip>
                           <Tooltip label="Go to end" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToEnd} aria-label="Go to end"><PlaybackControlIcon name="end" /></ActionIcon></Tooltip>
+                          <Menu shadow="md" width={152} position="top" withArrow>
+                            <Menu.Target>
+                              <Tooltip label="Playback speed" withArrow>
+                                <ActionIcon variant="light" size="lg" aria-label="HLS playback speed">
+                                  <Text size="xs" fw={700}>{formatHlsPlaybackRate(hlsPlaybackRate)}</Text>
+                                </ActionIcon>
+                              </Tooltip>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                              <Menu.Label>Playback speed</Menu.Label>
+                              {HLS_PLAYBACK_RATES.map((rate) => (
+                                <Menu.Item
+                                  key={rate}
+                                  onClick={() => setHlsPlaybackSpeed(rate)}
+                                  rightSection={rate === hlsPlaybackRate ? '✓' : null}
+                                >
+                                  {formatHlsPlaybackRate(rate)}
+                                </Menu.Item>
+                              ))}
+                            </Menu.Dropdown>
+                          </Menu>
                           <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>
                         </Group>
                       ) : null}
