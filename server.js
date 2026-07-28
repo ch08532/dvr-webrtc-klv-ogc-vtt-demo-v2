@@ -47,6 +47,7 @@ const CLIP_MIN_DURATION_SECONDS = 0.25;
 const CLIP_MAX_DURATION_SECONDS = Number(process.env.MAX_CLIP_DURATION_SECONDS || 0);
 const SOURCE_POSTER_WIDTH = Math.max(96, Math.min(320, Number(process.env.SOURCE_POSTER_WIDTH || 160)));
 const SOURCE_POSTER_TIMEOUT_MS = Math.max(3000, Number(process.env.SOURCE_POSTER_TIMEOUT_MS || 15000));
+const AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS = Math.max(3000, Number(process.env.AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MIN_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_MIN_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE_MS_PER_SEGMENT || 500));
 const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
@@ -1029,6 +1030,66 @@ app.get("/sources/:streamId/clips/:clipId/download", async (req, res) => {
     return res.status(404).json({ ok: false, error: "clip not found" });
   }
   return res.download(clip.path, clip.filename);
+});
+
+// ---------- API: authoritative file snapshots ----------
+// File sources can be captured from the original uploaded asset rather than
+// from the browser's currently decoded HLS frame.
+app.post("/sources/:streamId/snapshot", async (req, res) => {
+  const streamId = req.params.streamId;
+  const source = sources.get(streamId);
+  if (!source || source.sourceType !== "file") {
+    return res.status(409).json({ ok: false, error: "authoritative snapshots are available only for an uploaded video source" });
+  }
+
+  const timeSeconds = Number(req.body?.timeSeconds);
+  const sourceDurationSeconds = Number(sourceStates.get(streamId)?.durationSeconds);
+  if (!Number.isFinite(timeSeconds) || timeSeconds < 0) {
+    return res.status(400).json({ ok: false, error: "snapshot time must be a valid non-negative media time" });
+  }
+  if (Number.isFinite(sourceDurationSeconds) && timeSeconds > sourceDurationSeconds + 0.05) {
+    return res.status(400).json({ ok: false, error: "snapshot time is outside the uploaded video duration" });
+  }
+
+  const sourceInputPath = path.resolve(String(source.inputUrl || ""));
+  if (!sourceInputPath.startsWith(`${VIDEO_ROOT}${path.sep}`) || !fs.existsSync(sourceInputPath)) {
+    return res.status(409).json({ ok: false, error: "uploaded source file is unavailable" });
+  }
+
+  const snapshotId = randomUUID();
+  const snapshotDir = path.join(RECORD_ROOT, streamId, "snapshots");
+  const filename = `${streamId}-source-snapshot-${snapshotId.slice(0, 8)}.jpg`;
+  const outputPath = path.join(snapshotDir, filename);
+  const normalizedTimeSeconds = Number(timeSeconds.toFixed(3));
+
+  try {
+    await fs.promises.mkdir(snapshotDir, { recursive: true });
+    await runFfmpeg([
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      "-i", sourceInputPath,
+      // Output-side seeking decodes to the requested media time, avoiding a
+      // keyframe-only browser-frame approximation for file snapshots.
+      "-ss", String(normalizedTimeSeconds),
+      "-map", "0:v:0",
+      "-frames:v", "1",
+      "-q:v", "2",
+      outputPath
+    ], { label: "authoritative snapshot", timeoutMs: AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS });
+
+    log.info("authoritative_snapshot_ready", { streamId, snapshotId, sourceInputPath, timeSeconds: normalizedTimeSeconds });
+    return res.download(outputPath, filename, (error) => {
+      void fs.promises.rm(outputPath, { force: true }).catch(() => {});
+      if (error && !res.headersSent) {
+        res.status(500).json({ ok: false, error: String(error.message || error) });
+      }
+    });
+  } catch (error) {
+    await fs.promises.rm(outputPath, { force: true }).catch(() => {});
+    log.warn("authoritative_snapshot_error", { streamId, snapshotId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
 });
 
 app.post("/sources", async (req, res) => {

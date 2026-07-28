@@ -91,6 +91,7 @@ function App() {
   const [clipEndSeconds, setClipEndSeconds] = useState(0);
   const [clipInFlight, setClipInFlight] = useState(false);
   const [clipResult, setClipResult] = useState(null);
+  const [authoritativeSnapshotInFlight, setAuthoritativeSnapshotInFlight] = useState(false);
   const [fileStartProgress, setFileStartProgress] = useState(null);
   const [dvrDiag, setDvrDiag] = useState({
     currentSrc: null,
@@ -1300,6 +1301,50 @@ function App() {
 
   const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS');
   const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC');
+
+  const downloadAuthoritativeSnapshot = async () => {
+    if (!currentSourceIsFile || authoritativeSnapshotInFlight) return;
+    const player = getActiveHlsPlayer();
+    const timeSeconds = Number(player?.currentTime?.());
+    if (!Number.isFinite(timeSeconds) || timeSeconds < 0) {
+      setStatus('The player must be ready before creating an authoritative snapshot.');
+      return;
+    }
+
+    setAuthoritativeSnapshotInFlight(true);
+    setStatus('Creating authoritative source snapshot…');
+    let response = null;
+    try {
+      response = await fetch(`/sources/${encodeURIComponent(streamId)}/snapshot`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ timeSeconds })
+      });
+      markServerOnline();
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || `Snapshot request failed (HTTP ${response.status})`);
+      }
+      const blob = await response.blob();
+      if (!blob.size) throw new Error('The authoritative snapshot was empty.');
+      const safeStreamId = String(streamId || 'stream').replace(/[^a-z0-9_-]+/gi, '_');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const href = URL.createObjectURL(blob);
+      const download = document.createElement('a');
+      download.href = href;
+      download.download = `${safeStreamId}-authoritative-snapshot-${timestamp}.jpg`;
+      document.body.appendChild(download);
+      download.click();
+      download.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 1000);
+      setStatus('Authoritative source snapshot downloaded.');
+    } catch (error) {
+      if (!response) markServerOffline(error);
+      setStatus(`Authoritative snapshot failed: ${String(error?.message || error)}`);
+    } finally {
+      setAuthoritativeSnapshotInFlight(false);
+    }
+  };
 
   const previewClipTime = (seconds) => {
     const player = getActiveHlsPlayer();
@@ -2653,7 +2698,24 @@ function App() {
                               ))}
                             </Menu.Dropdown>
                           </Menu>
-                          <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>
+                          {currentSourceIsFile ? (
+                            <Menu shadow="md" width={235} position="top" withArrow>
+                              <Menu.Target>
+                                <Tooltip label="Download snapshot" withArrow>
+                                  <ActionIcon variant="light" size="lg" aria-label="Download snapshot">
+                                    <PlaybackControlIcon name="snapshot" />
+                                  </ActionIcon>
+                                </Tooltip>
+                              </Menu.Target>
+                              <Menu.Dropdown>
+                                <Menu.Label>Download snapshot</Menu.Label>
+                                <Menu.Item onClick={downloadAuthoritativeSnapshot} disabled={!hlsMediaLoaded || authoritativeSnapshotInFlight}>
+                                  {authoritativeSnapshotInFlight ? 'Creating authoritative snapshot…' : 'Authoritative uploaded source (FFmpeg)'}
+                                </Menu.Item>
+                                <Menu.Item onClick={downloadHlsSnapshot} disabled={!hlsMediaLoaded}>Displayed HLS player frame</Menu.Item>
+                              </Menu.Dropdown>
+                            </Menu>
+                          ) : <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>}
                         </Group>
                       ) : null}
                        {clipSourceIsActive ? (

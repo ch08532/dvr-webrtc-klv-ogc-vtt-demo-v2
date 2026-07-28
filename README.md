@@ -110,6 +110,10 @@ DVR output will appear under `./recordings/<streamId>/`:
 
 The DVR **Create video clip** control is available only for an uploaded file source. Drag either edge to preview the HLS start/end positions, then export. FFmpeg seeks in the authoritative uploaded file, stream-copies every source stream (video, audio, and KLV/data), and writes a downloadable MPEG-TS clip. The start can move to a nearby preceding decodable keyframe; there is no re-encode or fixed maximum duration by default. Set `MAX_CLIP_DURATION_SECONDS` to impose one.
 
+### Snapshots
+
+For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which captures the current media time directly from the uploaded file, and **Displayed HLS player frame**, which captures the browser-decoded frame. Live streams retain the browser-frame snapshot only.
+
 ## Notes
 - The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint. Source frame corners are preferred; when source offsets are missing or all zero, a `computed-flat` estimate uses sensor pose, FOV, range, and a flat-ground approximation. Each map centers on its first valid frame center; use **Center map** to recenter later.
 - The Data tabs display all decoded telemetry in the active cue, including `missionId` when ST 0601 tag 3 is present. The KLV `timestampIso` is displayed beneath each map.
