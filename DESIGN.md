@@ -45,7 +45,7 @@ The browser does not render KLV directly from the media container. Instead, it r
 | `src/webrtc_sfu.js`, `src/sfu/`, `src/ffmpeg_rtp_ingest.js` | mediasoup worker/client and FFmpeg RTP ingest for live WebRTC. |
 | `src/vtt_segmenter.js` | Builds VTT cues and subtitle playlists aligned to HLS segment timing. |
 | `src/App.jsx` | React/Mantine control surface: source setup, upload progress, playback, active-source previews, telemetry, clip controls, and system utilization. |
-| `src/KlvMap.jsx` | OpenLayers map of direct KLV geometry only. |
+| `src/KlvMap.jsx` | OpenLayers map of source KLV geometry and computed-flat fallback footprints. |
 | `src/ogc_moving_features.js` | Minimal OGC Moving Features discovery, temporal geometry, and temporal-property routes. |
 
 The top-level Node service owns the source map and public runtime state. The KLV and SFU components run out-of-process so their failures can be reported independently and do not execute within the request handler process.
@@ -93,7 +93,7 @@ The initial probe selects the safest HLS path:
 
 - **Passthrough:** an H.264 source is copied into browser HLS without video re-encoding.
 - **Compatibility fallback:** a non-H.264 source receives one H.264 playback rendition.
-- **ABR:** produces low (90p), medium (360p), and native-resolution renditions. A compatible H.264 native rung may be copied; other rungs are encoded.
+- **ABR:** produces low (90p), medium (360p), and a source-native top rendition. A compatible H.264 native rung may be copied; other rungs are encoded. If a live source's short probe has not yet seen a video header, the server performs one longer resolution-focused probe before using the 1920×1080 fallback ladder.
 
 Browser HLS is deliberately video-only. Source audio does not control HLS compatibility. GPU encoding is enabled by default for transcode paths when the selected FFmpeg encoder is available; setting `FFMPEG_USE_GPU=0` forces the CPU fallback.
 
@@ -122,7 +122,7 @@ The parser identifies KLV data streams in the transport stream, extracts local s
 - Mission ID (tag 3, `missionId`).
 - Sensor position, altitude, horizontal/vertical FOV, and relative orientation.
 - Platform heading, pitch, and roll.
-- Slant range, frame center, and full or offset-derived frame corners.
+- Slant range, frame center, and full or offset-derived frame corners. When source offsets are missing or all zero, a `computed-flat` footprint can be estimated from sensor pose, FOV, and range.
 
 The decoder is intentionally partial. Unsupported tags are not a claim that the source has no such metadata; they are simply not represented in the decoded UI object.
 
@@ -158,7 +158,7 @@ GET /streams/:streamId/klv?fromMs=<epoch-ms>&toMs=<epoch-ms>
 
 ### 7.1 DVR
 
-The DVR tab uses Video.js/HLS. A file-backed playlist is explicitly positioned at its beginning after metadata loads so it does not inherit a live-DVR end position. A stream-backed HLS playlist is explicitly positioned at the Video.js live-tracker time (or the seekable-range end when unavailable) so HLS playback starts at its newest available point despite retaining DVR history. File sources show absolute `player time: current / total`; stream HLS shows `Playback delay: <time> behind HLS edge · DVR window: <duration>` from the seekable range. This avoids conflating HLS latency with the separate low-latency WebRTC **Live** path. The selected rendition, segment, subtitle segment, and playback diagnostics are visible in the UI.
+The DVR tab uses Video.js/HLS. A file-backed playlist is explicitly positioned at its beginning after metadata loads so it does not inherit a live-DVR end position. A stream-backed HLS playlist is explicitly positioned at the Video.js live-tracker time (or the seekable-range end when unavailable) so HLS playback starts at its newest available point despite retaining DVR history. File sources show absolute `player time: current / total`; stream HLS shows `Playback delay: <time> behind HLS edge · DVR window: <duration>` from the seekable range. This avoids conflating HLS latency with the separate low-latency WebRTC **Live** path. Playback diagnostics report **coded** dimensions (source/active HLS rendition pixels) and **display** dimensions (browser dimensions after sample-aspect-ratio handling). The selected rendition, segment, and subtitle segment are also visible.
 
 The Data tab renders fields from the active WebVTT cue, including `missionId` when present. The Map tab shows `timestampIso` beneath the map and preserves the latest valid cue during `finalizing` and `ready` file states.
 
@@ -168,13 +168,13 @@ For live sources, the browser obtains router RTP capabilities, creates/connects 
 
 ### 7.3 Map
 
-The OpenLayers map intentionally renders **only direct KLV geometry**:
+The OpenLayers map renders source KLV geometry, with a bounded `computed-flat` fallback when the source lacks usable corner offsets:
 
 - Sensor/platform marker and heading.
 - Frame-center marker and line from sensor to frame center.
-- An amber footprint when complete KLV frame-corner coordinates are present (full corners or decoded offsets).
+- An amber footprint from complete source frame corners (full corners or meaningful decoded offsets), or from a `computed-flat` estimate based on sensor pose, FOV, range, and a flat-ground approximation.
 
-No terrain model is downloaded. There is no terrain correction, terrain target, or terrain-derived footprint. **Center map** recenters on the latest valid frame-center position.
+No terrain model is downloaded. There is no terrain correction, terrain target, or terrain-derived footprint. The computed-flat fallback is an approximation and may be less accurate over uneven terrain. **Center map** recenters on the latest valid frame-center position.
 
 ## 8. File clips and KLV preservation
 

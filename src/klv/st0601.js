@@ -46,6 +46,101 @@ function hasCompleteCorners(payload) {
   return [1, 2, 3, 4].every((index) => Number.isFinite(payload[`frameCorner${index}Lat`]) && Number.isFinite(payload[`frameCorner${index}Lon`]));
 }
 
+const EARTH_RADIUS_M = 6371008.8;
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+
+/** Returns the initial bearing from one geographic point to another. */
+function bearingBetween(lat1, lon1, lat2, lon2) {
+  const startLat = lat1 * DEG_TO_RAD;
+  const endLat = lat2 * DEG_TO_RAD;
+  const deltaLon = (lon2 - lon1) * DEG_TO_RAD;
+  const y = Math.sin(deltaLon) * Math.cos(endLat);
+  const x = Math.cos(startLat) * Math.sin(endLat)
+    - Math.sin(startLat) * Math.cos(endLat) * Math.cos(deltaLon);
+  return ((Math.atan2(y, x) * RAD_TO_DEG) + 360) % 360;
+}
+
+/** Returns a point reached by travelling a distance from a latitude/longitude. */
+function destinationPoint(lat, lon, bearingDeg, distanceM) {
+  const angularDistance = distanceM / EARTH_RADIUS_M;
+  const bearing = bearingDeg * DEG_TO_RAD;
+  const startLat = lat * DEG_TO_RAD;
+  const startLon = lon * DEG_TO_RAD;
+  const endLat = Math.asin(
+    Math.sin(startLat) * Math.cos(angularDistance)
+    + Math.cos(startLat) * Math.sin(angularDistance) * Math.cos(bearing)
+  );
+  const endLon = startLon + Math.atan2(
+    Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(startLat),
+    Math.cos(angularDistance) - Math.sin(startLat) * Math.sin(endLat)
+  );
+  return {
+    lat: endLat * RAD_TO_DEG,
+    lon: ((endLon * RAD_TO_DEG + 540) % 360) - 180
+  };
+}
+
+/** Tests whether the source supplied offset-corner values describe any footprint extent. */
+function hasMeaningfulOffsets(payload) {
+  const keys = [1, 2, 3, 4].flatMap((index) => [`offsetCorner${index}Lat`, `offsetCorner${index}Lon`]);
+  return keys.every((key) => Number.isFinite(payload[key]))
+    && keys.some((key) => Math.abs(payload[key]) > 1e-9);
+}
+
+/**
+ * Estimates frame corners on a flat local ground plane when the source omits
+ * usable corner offsets. This is an approximation, not terrain correction.
+ */
+function computeFlatFrameCorners(payload) {
+  const sensorLat = Number(payload.sensorLat);
+  const sensorLon = Number(payload.sensorLon);
+  const sensorAltitudeM = Number(payload.sensorAltMslM);
+  const frameCenterLat = Number(payload.frameCenterLat);
+  const frameCenterLon = Number(payload.frameCenterLon);
+  const slantRangeM = Number(payload.slantRangeM);
+  const horizontalFovDeg = Number(payload.sensorHfovDeg);
+  const verticalFovDeg = Number(payload.sensorVfovDeg);
+  const sensorRelativeElevationDeg = Number(payload.sensorRelElDeg);
+  const platformPitchDeg = Number(payload.platformPitchDeg || 0);
+  const sensorRollDeg = Number(payload.sensorRelRollDeg || 0);
+
+  if (![sensorLat, sensorLon, sensorAltitudeM, frameCenterLat, frameCenterLon, slantRangeM, horizontalFovDeg, verticalFovDeg, sensorRelativeElevationDeg, platformPitchDeg, sensorRollDeg].every(Number.isFinite)) {
+    return null;
+  }
+  if (slantRangeM <= 0 || horizontalFovDeg <= 0 || verticalFovDeg <= 0) return null;
+
+  const centerElevationDeg = sensorRelativeElevationDeg + platformPitchDeg;
+  if (centerElevationDeg >= -0.01) return null;
+  const centerElevationRad = centerElevationDeg * DEG_TO_RAD;
+  const groundAltitudeM = Number.isFinite(Number(payload.frameCenterElevationMslM))
+    ? Number(payload.frameCenterElevationMslM)
+    : sensorAltitudeM + slantRangeM * Math.sin(centerElevationRad);
+  const altitudeAboveGroundM = sensorAltitudeM - groundAltitudeM;
+  if (!Number.isFinite(altitudeAboveGroundM) || altitudeAboveGroundM <= 0) return null;
+
+  const lookBearingDeg = bearingBetween(sensorLat, sensorLon, frameCenterLat, frameCenterLon);
+  const halfHorizontal = horizontalFovDeg / 2;
+  const halfVertical = verticalFovDeg / 2;
+  const rollRad = sensorRollDeg * DEG_TO_RAD;
+  const corners = [
+    { horizontal: -halfHorizontal, vertical: halfVertical },
+    { horizontal: halfHorizontal, vertical: halfVertical },
+    { horizontal: halfHorizontal, vertical: -halfVertical },
+    { horizontal: -halfHorizontal, vertical: -halfVertical }
+  ].map(({ horizontal, vertical }) => {
+    const rotatedHorizontal = horizontal * Math.cos(rollRad) - vertical * Math.sin(rollRad);
+    const rotatedVertical = horizontal * Math.sin(rollRad) + vertical * Math.cos(rollRad);
+    const elevationRad = (centerElevationDeg + rotatedVertical) * DEG_TO_RAD;
+    if (elevationRad >= -0.001) return null;
+    const groundDistanceM = altitudeAboveGroundM / Math.tan(-elevationRad);
+    if (!Number.isFinite(groundDistanceM) || groundDistanceM <= 0) return null;
+    return destinationPoint(sensorLat, sensorLon, lookBearingDeg + rotatedHorizontal, groundDistanceM);
+  });
+
+  return corners.every(Boolean) ? corners : null;
+}
+
 /** Decodes supported ST 0601 tags, retaining raw values for unsupported fields. */
 export function decodeSt0601LocalSet(lsBuf) {
   const out = {};
@@ -132,13 +227,23 @@ export function decodeSt0601LocalSet(lsBuf) {
   }
 
   const hasFrameCenter = Number.isFinite(out.frameCenterLat) && Number.isFinite(out.frameCenterLon);
-  const hasCompleteOffsets = [1, 2, 3, 4].every((index) => Number.isFinite(out[`offsetCorner${index}Lat`]) && Number.isFinite(out[`offsetCorner${index}Lon`]));
-  if (hasFrameCenter && hasCompleteOffsets) {
+  if (hasFrameCenter && hasMeaningfulOffsets(out)) {
     for (const index of [1, 2, 3, 4]) {
       out[`frameCorner${index}Lat`] = out.frameCenterLat + out[`offsetCorner${index}Lat`];
       out[`frameCorner${index}Lon`] = out.frameCenterLon + out[`offsetCorner${index}Lon`];
     }
     out.frameCornerSource = 'offset';
+    return out;
+  }
+
+  const computedCorners = computeFlatFrameCorners(out);
+  if (computedCorners) {
+    computedCorners.forEach((corner, index) => {
+      const cornerIndex = index + 1;
+      out[`frameCorner${cornerIndex}Lat`] = corner.lat;
+      out[`frameCorner${cornerIndex}Lon`] = corner.lon;
+    });
+    out.frameCornerSource = 'computed-flat';
   }
 
   return out;

@@ -32,6 +32,7 @@ const WS_PATH = process.env.WS_PATH || "/ws";
 const WEBRTC_ANNOUNCED_IP = process.env.WEBRTC_ANNOUNCED_IP || "127.0.0.1";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
 const INPUT_PROBE_TIMEOUT_MS = Math.max(1000, Number(process.env.INPUT_PROBE_TIMEOUT_MS || 7000));
+const LIVE_DIMENSION_PROBE_TIMEOUT_MS = Math.max(INPUT_PROBE_TIMEOUT_MS, Number(process.env.LIVE_DIMENSION_PROBE_TIMEOUT_MS || 15000));
 const SHUTDOWN_FORCE_EXIT_MS = Math.max(1000, Number(process.env.SHUTDOWN_FORCE_EXIT_MS || 10000));
 const log = createServiceLogger("server");
 
@@ -234,6 +235,8 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
     profile: firstVideo.profile || null,
     width: Number.isFinite(Number(firstVideo.width)) ? Number(firstVideo.width) : null,
     height: Number.isFinite(Number(firstVideo.height)) ? Number(firstVideo.height) : null,
+    sampleAspectRatio: firstVideo.sample_aspect_ratio || null,
+    displayAspectRatio: firstVideo.display_aspect_ratio || null,
     fps
   } : null;
   const audio = firstAudio ? {
@@ -266,18 +269,23 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
   };
 }
 
-/** Runs ffprobe with a timeout and returns a normalized source-media description. */
-async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT_MS } = {}) {
+/** Runs ffprobe with bounded analysis and returns a normalized source-media description. */
+async function probeInputWithFfprobe(inputUrl, {
+  timeoutMs = INPUT_PROBE_TIMEOUT_MS,
+  analyzeDurationUs = 3_000_000,
+  probeSizeBytes = 5_000_000,
+  readInterval = "%+3"
+} = {}) {
   return new Promise((resolve, reject) => {
     const args = [
       "-v", "error",
       "-print_format", "json",
       "-show_format",
       "-show_streams",
-      "-show_entries", "format=format_name,format_long_name,duration:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,avg_frame_rate,r_frame_rate,profile:stream_tags",
-      "-analyzeduration", "3000000",
-      "-probesize", "5000000",
-      "-read_intervals", "%+3",
+      "-show_entries", "format=format_name,format_long_name,duration:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,sample_aspect_ratio,display_aspect_ratio,avg_frame_rate,r_frame_rate,profile:stream_tags",
+      "-analyzeduration", String(analyzeDurationUs),
+      "-probesize", String(probeSizeBytes),
+      ...(readInterval ? ["-read_intervals", readInterval] : []),
       inputUrl
     ];
 
@@ -325,6 +333,25 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
       }
     });
   });
+}
+
+/** Returns whether a probe has a usable source frame size for HLS ladder selection. */
+function hasVideoDimensions(probe) {
+  return Number.isInteger(probe?.video?.width)
+    && probe.video.width > 0
+    && Number.isInteger(probe?.video?.height)
+    && probe.video.height > 0;
+}
+
+/** Merges a follow-up live probe without discarding earlier KLV/audio information. */
+function mergeLiveProbe(initialProbe, dimensionProbe) {
+  return {
+    ...initialProbe,
+    ...dimensionProbe,
+    video: { ...initialProbe?.video, ...dimensionProbe?.video },
+    audio: dimensionProbe?.audio || initialProbe?.audio || null,
+    klv: initialProbe?.klv?.available ? initialProbe.klv : (dimensionProbe?.klv || initialProbe?.klv || null)
+  };
 }
 
 /** Runs FFmpeg and includes its useful error text when a media job fails. */
@@ -547,6 +574,7 @@ function getSourceRuntime(streamId) {
       hlsRenditions: tracked?.hlsRenditions || null,
       copyNativeTopRung: tracked?.copyNativeTopRung === true,
       klvProbe: tracked?.klvProbe || null,
+      sourceVideo: tracked?.sourceVideo || null,
       stage: tracked?.stage || null,
       durationSeconds: tracked?.durationSeconds ?? null,
       processedSeconds: tracked?.processedSeconds ?? null,
@@ -593,6 +621,7 @@ function getSourceRuntime(streamId) {
     hlsRenditions: source.hlsRenditions || tracked?.hlsRenditions || null,
     copyNativeTopRung: source.copyNativeTopRung === true,
     klvProbe: source.klvProbe || tracked?.klvProbe || null,
+    sourceVideo: source.sourceVideo || tracked?.sourceVideo || null,
     stage: tracked?.stage || null,
     durationSeconds: tracked?.durationSeconds ?? null,
     processedSeconds: tracked?.processedSeconds ?? null,
@@ -1035,6 +1064,29 @@ app.post("/sources", async (req, res) => {
     } catch (error) {
       log.warn("source_probe_error", { streamId, sourceType, error: serializeError(error) });
     }
+    // A UDP stream can start before its next video header/keyframe reaches the
+    // short general probe. Retry only when dimensions are missing so ABR uses
+    // the true source-native top rung instead of the 1920x1080 fallback.
+    if (sourceType === "stream" && !hasVideoDimensions(sourceProbe)) {
+      try {
+        const dimensionProbe = await probeInputWithFfprobe(resolvedInputUrl, {
+          timeoutMs: LIVE_DIMENSION_PROBE_TIMEOUT_MS,
+          analyzeDurationUs: 10_000_000,
+          probeSizeBytes: 32_000_000,
+          readInterval: "%+10"
+        });
+        if (hasVideoDimensions(dimensionProbe)) {
+          sourceProbe = mergeLiveProbe(sourceProbe, dimensionProbe);
+          log.info("source_dimension_probe_complete", {
+            streamId,
+            width: sourceProbe.video.width,
+            height: sourceProbe.video.height
+          });
+        }
+      } catch (error) {
+        log.warn("source_dimension_probe_error", { streamId, error: serializeError(error) });
+      }
+    }
     const hlsResolution = resolveHlsEncodeMode(hlsMode, sourceProbe);
     const hlsEncoderMode = hlsResolution.encoderMode;
     const hlsEffectiveMode = hlsResolution.effectiveMode;
@@ -1078,6 +1130,7 @@ app.post("/sources", async (req, res) => {
       hlsEncoderMode,
       webRtcEncoderMode,
       klvProbe: sourceProbe?.klv || null,
+      sourceVideo: sourceProbe?.video || null,
       durationSeconds: fileDurationSeconds,
       processedSeconds: sourceType === "file" ? 0 : null,
       progressPercent: sourceType === "file" ? 0 : null,
@@ -1263,6 +1316,7 @@ app.post("/sources", async (req, res) => {
       hlsRenditions: hls.renditions,
       copyNativeTopRung: hls.copyNativeTopRung,
       klvProbe: sourceProbe?.klv || null,
+      sourceVideo: sourceProbe?.video || null,
       hls, klvWorker,
       clips: new Map(),
       poster: { state: "pending", updatedAt: new Date().toISOString(), error: null },

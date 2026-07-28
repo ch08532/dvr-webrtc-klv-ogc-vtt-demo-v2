@@ -299,6 +299,19 @@ function App() {
     && Number.isFinite(dvrDiag.seekEndSec)
     ? Math.max(0, Number(dvrDiag.seekEndSec) - Number(dvrDiag.currentTimeSec))
     : null;
+  const hlsCodedDimensions = (() => {
+    const sourceWidth = Number(streamRuntime?.sourceVideo?.width);
+    const sourceHeight = Number(streamRuntime?.sourceVideo?.height);
+    if (activeHlsMode === 'passthrough' || activeHlsMode === 'single-transcode') {
+      return Number.isFinite(sourceWidth) && sourceWidth > 0 && Number.isFinite(sourceHeight) && sourceHeight > 0
+        ? `${sourceWidth}×${sourceHeight}`
+        : 'n/a';
+    }
+
+    const playlistUri = String(dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri || '');
+    const rendition = activeHlsRenditions.find((item) => playlistUri.includes(item.playlist));
+    return rendition?.width && rendition?.height ? `${rendition.width}×${rendition.height}` : 'n/a';
+  })();
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -2408,7 +2421,7 @@ function App() {
                         source: {dvrDiag.currentSrc || 'n/a'} | playlist: {dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri || 'n/a'}
                       </Text>
                       <Text size="xs" c="dimmed" mb="xs">
-                        active rendition: {activeHlsRenditionLabel} | decoded: {dvrDiag.decodedVideoWidth && dvrDiag.decodedVideoHeight
+                        active rendition: {activeHlsRenditionLabel} | coded: {hlsCodedDimensions} | display: {dvrDiag.decodedVideoWidth && dvrDiag.decodedVideoHeight
                           ? `${dvrDiag.decodedVideoWidth}×${dvrDiag.decodedVideoHeight}`
                           : 'n/a'}
                       </Text>
