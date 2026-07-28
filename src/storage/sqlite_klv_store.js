@@ -72,6 +72,38 @@ export class SqliteKlvStore {
     ]);
   }
 
+  /** Stores a group of decoded events in one SQLite transaction. */
+  async addMany(streamId, decodedItems) {
+    if (!Array.isArray(decodedItems) || !decodedItems.length) return 0;
+    const rows = decodedItems.map((decoded) => {
+      const tMs = decoded.timestampUnixMicros
+        ? Number(BigInt(decoded.timestampUnixMicros) / 1000n)
+        : Date.now();
+      return [streamId, tMs, JSON.stringify(decoded)];
+    });
+    // SQLite commonly permits 999 bind variables, so keep each statement well
+    // under that ceiling (three variables per telemetry event).
+    const rowsPerStatement = 300;
+
+    await run(this.db, "BEGIN IMMEDIATE");
+    try {
+      for (let offset = 0; offset < rows.length; offset += rowsPerStatement) {
+        const chunk = rows.slice(offset, offset + rowsPerStatement);
+        const placeholders = chunk.map(() => "(?,?,?)").join(",");
+        await run(
+          this.db,
+          `INSERT INTO klv_events(stream_id, t_ms, json) VALUES ${placeholders}`,
+          chunk.flat()
+        );
+      }
+      await run(this.db, "COMMIT");
+      return rows.length;
+    } catch (error) {
+      try { await run(this.db, "ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
   /** Returns decoded telemetry for one source over an inclusive time window. */
   async query(streamId, fromMs, toMs) {
     const rows = await all(this.db,

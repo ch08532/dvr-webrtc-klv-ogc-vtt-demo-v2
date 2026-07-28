@@ -44,6 +44,11 @@ const CLIP_MIN_DURATION_SECONDS = 0.25;
 // Leave clip duration unrestricted by default. Deployments that need a policy
 // limit can set MAX_CLIP_DURATION_SECONDS to a positive number.
 const CLIP_MAX_DURATION_SECONDS = Number(process.env.MAX_CLIP_DURATION_SECONDS || 0);
+const SOURCE_POSTER_WIDTH = Math.max(96, Math.min(320, Number(process.env.SOURCE_POSTER_WIDTH || 160)));
+const SOURCE_POSTER_TIMEOUT_MS = Math.max(3000, Number(process.env.SOURCE_POSTER_TIMEOUT_MS || 15000));
+const KLV_FINALIZE_MIN_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_MIN_TIMEOUT_MS || 30000));
+const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE_MS_PER_SEGMENT || 500));
+const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
@@ -113,6 +118,16 @@ function normalizeSegmentSeconds(value, fallback = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
+}
+
+/** Gives large file sources enough time to flush their remaining KLV/VTT segments. */
+function estimateKlvFinalizeTimeoutMs(durationSeconds, segmentSeconds) {
+  const duration = Number(durationSeconds);
+  const segment = normalizeSegmentSeconds(segmentSeconds, 5);
+  if (!Number.isFinite(duration) || duration <= 0) return KLV_FINALIZE_MIN_TIMEOUT_MS;
+  const estimatedSegments = Math.max(1, Math.ceil(duration / segment));
+  const estimatedMs = estimatedSegments * KLV_FINALIZE_MS_PER_SEGMENT;
+  return Math.min(KLV_FINALIZE_MAX_TIMEOUT_MS, Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, estimatedMs));
 }
 
 /** Converts public source type input to stream or file. */
@@ -312,20 +327,32 @@ async function probeInputWithFfprobe(inputUrl, { timeoutMs = INPUT_PROBE_TIMEOUT
   });
 }
 
-/** Runs FFmpeg and includes its useful error text when clipping fails. */
-async function runFfmpeg(args) {
+/** Runs FFmpeg and includes its useful error text when a media job fails. */
+async function runFfmpeg(args, { label = "FFmpeg job", timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
+    let finished = false;
+    const finish = (error = null) => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch {}
+      finish(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs) : null;
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
       if (stderr.length > 12_000) stderr = stderr.slice(-12_000);
     });
-    proc.on("error", reject);
+    proc.on("error", (error) => finish(error));
     proc.on("close", (code, signal) => {
-      if (code === 0) return resolve();
+      if (code === 0) return finish();
       const detail = stderr.trim() || `ffmpeg exited with code ${String(code)}`;
-      reject(new Error(`clip export failed${signal ? ` (${signal})` : ""}: ${detail}`));
+      finish(new Error(`${label} failed${signal ? ` (${signal})` : ""}: ${detail}`));
     });
   });
 }
@@ -582,6 +609,51 @@ function getSourceRuntime(streamId) {
   };
 }
 
+/** Captures one lightweight poster frame for the Active Sources list. */
+async function generateSourcePoster(streamId) {
+  const source = sources.get(streamId);
+  if (!source || source.poster?.state === "generating" || source.poster?.state === "ready") return;
+
+  const outDir = path.join(RECORD_ROOT, streamId);
+  const posterPath = path.join(outDir, "poster.jpg");
+  const durationSeconds = Number(sourceStates.get(streamId)?.durationSeconds);
+  const captureSeconds = source.sourceType === "file" && Number.isFinite(durationSeconds) && durationSeconds > 0
+    ? Math.min(5, Math.max(0, durationSeconds * 0.05))
+    : null;
+  source.poster = { state: "generating", updatedAt: new Date().toISOString(), error: null };
+
+  try {
+    await fs.promises.mkdir(outDir, { recursive: true });
+    await runFfmpeg([
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      ...(captureSeconds != null ? ["-ss", String(Number(captureSeconds.toFixed(3)))] : []),
+      "-i", source.inputUrl,
+      "-frames:v", "1",
+      "-vf", `scale=${SOURCE_POSTER_WIDTH}:-2`,
+      "-q:v", "4",
+      posterPath
+    ], { label: "source poster capture", timeoutMs: SOURCE_POSTER_TIMEOUT_MS });
+
+    if (sources.get(streamId) !== source) {
+      await fs.promises.rm(posterPath, { force: true }).catch(() => {});
+      return;
+    }
+    source.poster = { state: "ready", updatedAt: new Date().toISOString(), error: null };
+    log.info("source_poster_ready", { streamId, captureSeconds });
+  } catch (error) {
+    if (sources.get(streamId) !== source) return;
+    source.poster = { state: "error", updatedAt: new Date().toISOString(), error: String(error?.message || error) };
+    log.warn("source_poster_error", { streamId, error: serializeError(error) });
+  }
+}
+
+/** Queues poster capture without delaying HLS, KLV, or WebRTC start. */
+function queueSourcePoster(streamId) {
+  void generateSourcePoster(streamId);
+}
+
 // ---------- SFU worker ----------
 const sfuClient = await startSfuWorkerClient({
   config: {
@@ -778,6 +850,8 @@ app.get("/sources", (req, res) => {
     hlsSegmentSeconds: s.hlsSegmentSeconds,
     vttSegmentSeconds: s.vttSegmentSeconds,
     hlsMasterUrl: `/hls/${s.streamId}/master.m3u8`,
+    posterUrl: s.poster?.state === "ready" ? `/hls/${encodeURIComponent(s.streamId)}/poster.jpg?v=${encodeURIComponent(s.poster.updatedAt)}` : null,
+    posterState: s.poster?.state || "pending",
     webrtcReady: !!s.webrtc?.producerId,
     ...getSourceRuntime(s.streamId)
   }));
@@ -869,7 +943,7 @@ app.post("/sources/:streamId/clips", async (req, res) => {
       outputPath
     ];
     log.info("clip_export_start", { streamId, clipId, startSeconds: range.start, endSeconds: range.end, inputHasKlv });
-    await runFfmpeg(args);
+    await runFfmpeg(args, { label: "clip export" });
 
     const outputProbe = await probeInputWithFfprobe(outputPath);
     if (!outputProbe.hasVideo) throw new Error("clip export did not contain a video stream");
@@ -1191,15 +1265,22 @@ app.post("/sources", async (req, res) => {
       klvProbe: sourceProbe?.klv || null,
       hls, klvWorker,
       clips: new Map(),
+      poster: { state: "pending", updatedAt: new Date().toISOString(), error: null },
       webrtc: sourceType === "file" ? null : { ingestRunning: true, producerId }
     });
+    queueSourcePoster(streamId);
 
     const finalizeFileSource = async () => {
       const source = sources.get(streamId);
       if (!source || source.sourceType !== "file") return;
       setSourceState(streamId, { state: "finalizing", running: false, ingestRunning: false, stage: "finalizing_vtt" });
       try {
-        await finalizeKlvStreamWorker(source.klvWorker);
+        const finalizeTimeoutMs = estimateKlvFinalizeTimeoutMs(
+          sourceStates.get(streamId)?.durationSeconds,
+          source.hlsSegmentSeconds
+        );
+        log.info("file_klv_finalization_start", { streamId, finalizeTimeoutMs });
+        await finalizeKlvStreamWorker(source.klvWorker, { timeoutMs: finalizeTimeoutMs });
         await stopKlvStreamWorker(source.klvWorker);
         source.klvWorker = null;
         setSourceState(streamId, {

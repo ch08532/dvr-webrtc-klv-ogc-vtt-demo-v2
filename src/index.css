@@ -54,36 +54,6 @@
   pointer-events: none;
 }
 
-.klv-map-terrain-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-  font-size: 0.75rem;
-}
-
-.klv-map-terrain-source {
-  max-width: 13rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.klv-map-terrain-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-}
-
-.klv-map-terrain-status {
-  color: #495057;
-}
-
-.klv-map-terrain-error {
-  color: #c92a2a;
-}
-
 /* File-only clip trim control: intentionally compact, tactile, and iOS-inspired. */
 .clip-widget {
   margin-top: 1rem;
@@ -169,4 +139,23 @@
   color: #5b616d;
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
+}
+
+.source-poster {
+  width: 120px;
+  height: 68px;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  background: #1f2933;
+}
+
+.source-poster-placeholder {
+  display: grid;
+  place-items: center;
+  padding: 0.4rem;
+  color: #d0d7de;
+  font-size: 0.7rem;
+  text-align: center;
 }

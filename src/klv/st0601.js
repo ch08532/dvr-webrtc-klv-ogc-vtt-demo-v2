@@ -75,6 +75,13 @@ export function decodeSt0601LocalSet(lsBuf) {
         }
         break;
 
+      // MISB ST 0601 tag 3: Mission ID, encoded as a UTF-8 string.
+      case 3: {
+        const missionId = v.toString('utf8').replace(/\0+$/g, '').trim();
+        if (missionId) out.missionId = missionId;
+        break;
+      }
+
       case 13: if (v.length === 4) out.sensorLat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
       case 14: if (v.length === 4) out.sensorLon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
       case 15: if (v.length === 2) out.sensorAltMslM = mapUint16ToRange(v.readUInt16BE(0), -900, 19000); break;

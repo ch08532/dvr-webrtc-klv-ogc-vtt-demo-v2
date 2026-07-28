@@ -6,7 +6,7 @@ import { createServiceLogger, serializeError } from "./service_logger.js";
 const log = createServiceLogger("klv_stream_worker_client");
 const START_TIMEOUT_MS = 8000;
 const STOP_TIMEOUT_MS = 2000;
-const FINALIZE_TIMEOUT_MS = 30000;
+const FINALIZE_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_TIMEOUT_MS || 30000));
 
 /** Removes inspector flags that cannot safely be inherited by a child worker. */
 function sanitizeExecArgv(argv) {
@@ -203,10 +203,12 @@ export async function stopKlvStreamWorker(handle) {
 }
 
 /** Flushes a finite-file worker and waits for its subtitle artifacts to finish. */
-export async function finalizeKlvStreamWorker(handle) {
+export async function finalizeKlvStreamWorker(handle, { timeoutMs = FINALIZE_TIMEOUT_MS } = {}) {
   if (!handle?.proc || handle.proc.exitCode != null || handle.proc.killed) {
     throw new Error("KLV worker is not available for finalization");
   }
+
+  const effectiveTimeoutMs = Math.max(30000, Number(timeoutMs) || FINALIZE_TIMEOUT_MS);
 
   const finalizeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   log.info("finalize_requested", { requestId: handle.requestId, streamId: handle.streamId });
@@ -225,7 +227,10 @@ export async function finalizeKlvStreamWorker(handle) {
       if (message?.type !== "finalized" || message.finalizeId !== finalizeId) return;
       finish();
     };
-    const timer = setTimeout(() => finish(new Error(`KLV worker finalization timed out for stream ${handle.streamId}`)), FINALIZE_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => finish(new Error(`KLV worker finalization timed out for stream ${handle.streamId} after ${effectiveTimeoutMs}ms`)),
+      effectiveTimeoutMs
+    );
 
     handle.proc.on("message", onMessage);
     try {

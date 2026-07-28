@@ -11,12 +11,6 @@ import OSM from 'ol/source/OSM.js';
 import VectorSource from 'ol/source/Vector.js';
 import { fromLonLat } from 'ol/proj.js';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from 'ol/style.js';
-import {
-  findTerrainIntersection,
-  findTerrainFootprint,
-  getUsgsTerrainRequest,
-  loadTerrainModelFromUrl
-} from './terrain_model.js';
 import 'ol/ol.css';
 
 const normalizeHeading = (value) => {
@@ -58,24 +52,6 @@ const lineStyle = new Style({
   stroke: new Stroke({ color: 'rgba(250, 82, 82, 0.8)', width: 2, lineDash: [8, 6] })
 });
 
-const terrainTargetStyle = new Style({
-  image: new CircleStyle({
-    radius: 7,
-    fill: new Fill({ color: '#40c057' }),
-    stroke: new Stroke({ color: '#ffffff', width: 2 })
-  }),
-  text: new Text({
-    text: 'Terrain target',
-    offsetY: -18,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#1a1b1e', width: 3 })
-  })
-});
-
-const terrainLineStyle = new Style({
-  stroke: new Stroke({ color: 'rgba(64, 192, 87, 0.9)', width: 2 })
-});
-
 const frameGeometryStyle = new Style({
   fill: new Fill({ color: 'rgba(252, 196, 25, 0.22)' }),
   stroke: new Stroke({ color: '#f08c00', width: 3 }),
@@ -113,22 +89,12 @@ export default function KlvMap({ telemetry, active }) {
   const platformHeadingRef = useRef(null);
   const frameCenterRef = useRef(null);
   const lineRef = useRef(null);
-  const terrainTargetRef = useRef(null);
-  const terrainLineRef = useRef(null);
   const frameGeometryRef = useRef(null);
   const focusPositionRef = useRef(null);
   const hasCenteredRef = useRef(false);
   const centerRequestRef = useRef(0);
-  const terrainRequestRef = useRef(0);
-  const lastTerrainCalculationRef = useRef(0);
   const [hasCoordinates, setHasCoordinates] = useState(false);
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
-  const [terrainModel, setTerrainModel] = useState(null);
-  const [terrainLoading, setTerrainLoading] = useState(false);
-  const [terrainError, setTerrainError] = useState(null);
-  const [terrainEnabled, setTerrainEnabled] = useState(false);
-  const automaticTerrainRequest = getUsgsTerrainRequest(telemetry?.sensorLat, telemetry?.sensorLon);
-  const terrainRequestKey = automaticTerrainRequest?.key || null;
 
   const centerOnPosition = (position) => {
     const map = mapRef.current;
@@ -179,18 +145,14 @@ export default function KlvMap({ telemetry, active }) {
     const platformHeadingLine = new Feature();
     const frameCenter = new Feature();
     const line = new Feature();
-    const terrainTarget = new Feature();
-    const terrainLine = new Feature();
     const frameGeometry = new Feature();
 
     platform.setStyle(platformStyle(0));
     platformHeadingLine.setStyle(platformHeadingLineStyle);
     frameCenter.setStyle(frameCenterStyle);
     line.setStyle(lineStyle);
-    terrainTarget.setStyle(terrainTargetStyle);
-    terrainLine.setStyle(terrainLineStyle);
     frameGeometry.setStyle(frameGeometryStyle);
-    source.addFeatures([frameGeometry, line, terrainLine, platformHeadingLine, platform, frameCenter, terrainTarget]);
+    source.addFeatures([frameGeometry, line, platformHeadingLine, platform, frameCenter]);
 
     const map = new Map({
       target: targetRef.current,
@@ -210,8 +172,6 @@ export default function KlvMap({ telemetry, active }) {
     platformHeadingLineRef.current = platformHeadingLine;
     frameCenterRef.current = frameCenter;
     lineRef.current = line;
-    terrainTargetRef.current = terrainTarget;
-    terrainLineRef.current = terrainLine;
     frameGeometryRef.current = frameGeometry;
     const view = map.getView();
     const onResolutionChange = () => updatePlatformHeadingLine();
@@ -226,40 +186,6 @@ export default function KlvMap({ telemetry, active }) {
       platformHeadingLineRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    lastTerrainCalculationRef.current = 0;
-
-    if (!terrainRequestKey) {
-      setTerrainModel(null);
-      setTerrainLoading(false);
-      setTerrainError(null);
-      return undefined;
-    }
-    if (!active) return undefined;
-
-    setTerrainLoading(true);
-    setTerrainModel(null);
-    setTerrainError(null);
-    loadTerrainModelFromUrl(automaticTerrainRequest.url)
-      .then((model) => {
-        if (!cancelled) setTerrainModel(model);
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setTerrainModel(null);
-          setTerrainError(String(error?.message || error));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setTerrainLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [active, terrainRequestKey]);
 
   useEffect(() => {
     hasCenteredRef.current = false;
@@ -281,8 +207,6 @@ export default function KlvMap({ telemetry, active }) {
       updatePlatformHeadingLine();
       frameCenterRef.current.setGeometry(null);
       lineRef.current.setGeometry(null);
-      terrainTargetRef.current.setGeometry(null);
-      terrainLineRef.current.setGeometry(null);
       frameGeometryRef.current.setGeometry(null);
       return;
     }
@@ -317,52 +241,6 @@ export default function KlvMap({ telemetry, active }) {
   }, [telemetry, active]);
 
   useEffect(() => {
-    const klvFrameCorners = getKlvFrameCorners(telemetry);
-    if (!active || !terrainModel || !terrainEnabled || !telemetry || !terrainTargetRef.current || !terrainLineRef.current || !frameGeometryRef.current) {
-      terrainRequestRef.current += 1;
-      terrainTargetRef.current?.setGeometry(null);
-      terrainLineRef.current?.setGeometry(null);
-      if (!klvFrameCorners) {
-        frameGeometryRef.current?.setGeometry(null);
-      }
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastTerrainCalculationRef.current < 500) return;
-    lastTerrainCalculationRef.current = now;
-    const requestId = ++terrainRequestRef.current;
-
-    Promise.all([
-      findTerrainIntersection(terrainModel, telemetry),
-      klvFrameCorners ? Promise.resolve(null) : findTerrainFootprint(terrainModel, telemetry)
-    ])
-      .then(([terrainPoint, terrainFootprint]) => {
-        if (requestId !== terrainRequestRef.current) return;
-        const sensorAvailable = isCoordinate(telemetry.sensorLat, telemetry.sensorLon);
-        const sensorPosition = sensorAvailable
-          ? fromLonLat([Number(telemetry.sensorLon), Number(telemetry.sensorLat)])
-          : null;
-        const terrainPosition = terrainPoint ? fromLonLat([terrainPoint.lon, terrainPoint.lat]) : null;
-        terrainTargetRef.current.setGeometry(terrainPosition ? new Point(terrainPosition) : null);
-        terrainLineRef.current.setGeometry(sensorPosition && terrainPosition ? new LineString([sensorPosition, terrainPosition]) : null);
-        if (!klvFrameCorners) {
-          frameGeometryRef.current.setGeometry(terrainFootprint
-            ? new Polygon([[...terrainFootprint.map((corner) => fromLonLat([corner.lon, corner.lat])), fromLonLat([terrainFootprint[0].lon, terrainFootprint[0].lat])]])
-            : null);
-        }
-      })
-      .catch(() => {
-        if (requestId !== terrainRequestRef.current) return;
-        terrainTargetRef.current.setGeometry(null);
-        terrainLineRef.current.setGeometry(null);
-        if (!klvFrameCorners) {
-          frameGeometryRef.current.setGeometry(null);
-        }
-      });
-  }, [telemetry, active, terrainEnabled, terrainModel]);
-
-  useEffect(() => {
     if (active) mapRef.current?.updateSize();
   }, [active]);
 
@@ -378,21 +256,6 @@ export default function KlvMap({ telemetry, active }) {
         Center map
       </button>
       {!hasCoordinates ? <div className="klv-map-empty">Waiting for KLV coordinates…</div> : null}
-      <div className="klv-map-terrain-controls">
-        <span className="klv-map-terrain-source">USGS 3DEP: automatic</span>
-        <label className="klv-map-terrain-toggle">
-          <input
-            type="checkbox"
-            checked={terrainEnabled}
-            onChange={(event) => setTerrainEnabled(event.currentTarget.checked)}
-            disabled={!terrainModel}
-          />
-          Terrain correction
-        </label>
-        {terrainLoading ? <span className="klv-map-terrain-status">Loading terrain…</span> : null}
-        {terrainError ? <span className="klv-map-terrain-error">{terrainError}</span> : null}
-        {terrainModel && !terrainLoading && !terrainError ? <span className="klv-map-terrain-status">Terrain ready</span> : null}
-      </div>
     </div>
   );
 }

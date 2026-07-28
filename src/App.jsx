@@ -73,6 +73,7 @@ function App() {
   const [clipEndSeconds, setClipEndSeconds] = useState(0);
   const [clipInFlight, setClipInFlight] = useState(false);
   const [clipResult, setClipResult] = useState(null);
+  const [fileStartProgress, setFileStartProgress] = useState(null);
   const [dvrDiag, setDvrDiag] = useState({
     currentSrc: null,
     currentPlaylistUri: null,
@@ -322,10 +323,10 @@ function App() {
   })();
 
   const hasActiveKlvFlow = (runtime) => Boolean(runtime?.running && runtime?.klvRunning);
-  // File conversion intentionally stops the KLV worker once its VTT sidecars
-  // are finalized.  Those cues remain valid and must stay visible in DVR.
+  // File conversion can enter finalization after HLS has stopped. Preserve the
+  // latest valid cue during that phase and after the VTT sidecars are complete.
   const hasCompletedFileDvrTelemetry = (runtime) => Boolean(
-    runtime?.sourceType === 'file' && runtime?.state === 'ready'
+    runtime?.sourceType === 'file' && ['finalizing', 'ready'].includes(runtime?.state)
   );
   const hasDvrKlvTelemetry = (runtime) => hasActiveKlvFlow(runtime) || hasCompletedFileDvrTelemetry(runtime);
 
@@ -512,6 +513,33 @@ function App() {
     webrtcBrowserStatsRef.current = null;
     setWebrtcDiag(emptyWebRtcDiag());
   };
+
+  const uploadVideoFile = (file) => new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', '/uploads/video');
+    request.setRequestHeader('content-type', file.type || 'application/octet-stream');
+    request.setRequestHeader('x-upload-filename', encodeURIComponent(file.name));
+    request.responseType = 'text';
+    request.upload.onprogress = (event) => {
+      setFileStartProgress({
+        phase: 'uploading',
+        loadedBytes: event.loaded,
+        totalBytes: event.lengthComputable ? event.total : file.size
+      });
+    };
+    request.onerror = () => reject(new Error('Video upload failed (network error)'));
+    request.onload = () => {
+      let result = null;
+      try { result = JSON.parse(request.responseText || '{}'); } catch {}
+      if (request.status >= 200 && request.status < 300) {
+        markServerOnline();
+        resolve(result || {});
+        return;
+      }
+      reject(new Error(result?.error || `Video upload failed (HTTP ${request.status})`));
+    };
+    request.send(file);
+  });
 
   const setLiveNotConnected = () => {
     clearWebRtcDiag();
@@ -700,6 +728,7 @@ function App() {
   const startSource = async () => {
     if (!canStartSource) return;
     setStartRequestInFlight(true);
+    setFileStartProgress(null);
     setHlsMediaLoaded(false);
     hlsQualityRef.current = 'auto';
     setHlsQuality('auto');
@@ -712,21 +741,18 @@ function App() {
         setClipStartSeconds(0);
         setClipEndSeconds(0);
         setClipResult(null);
+        setFileStartProgress({ phase: 'uploading', loadedBytes: 0, totalBytes: videoFile.size });
         setStatus(`Uploading ${videoFile.name}...`);
-        const uploadResult = await api('/uploads/video', {
-          method: 'POST',
-          headers: {
-            'content-type': videoFile.type || 'application/octet-stream',
-            'x-upload-filename': encodeURIComponent(videoFile.name)
-          },
-          body: videoFile
-        });
+        const uploadResult = await uploadVideoFile(videoFile);
         if (!uploadResult?.ok || !uploadResult.assetId) {
           throw new Error(uploadResult?.error || 'Video upload failed');
         }
         assetId = uploadResult.assetId;
+        setFileStartProgress({ phase: 'analyzing', loadedBytes: videoFile.size, totalBytes: videoFile.size });
+        setStatus('Upload complete. Analyzing video streams and KLV metadata...');
         setActiveTab('dvr');
       }
+      if (sourceType === 'file') setStatus('Starting file conversion and KLV processing...');
       const result = await api("/sources", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -745,6 +771,7 @@ function App() {
           purgeBeforeStart
         })
       });
+      setFileStartProgress(null);
       setStatus(JSON.stringify(result, null, 2));
       if (result?.state?.streamId) setStreamRuntime(result.state);
       await refreshStreamState(streamId);
@@ -762,6 +789,7 @@ function App() {
         startWebRtcAutoAttach(streamId);
       }
     } catch (error) {
+      setFileStartProgress(null);
       setStatus(`Start source failed: ${String(error?.message || error)}`);
       setStreamRuntime((prev) => ({
         ...prev,
@@ -2173,9 +2201,40 @@ function App() {
                 onChange={(event) => setPurgeBeforeStart(event.currentTarget.checked)}
               />
               <Group mt="md">
-                <Button onClick={startSource} disabled={!canStartSource}>Start Source</Button>
+                <Button onClick={startSource} disabled={!canStartSource} loading={startRequestInFlight}>Start Source</Button>
                 <Button onClick={stopSource} color="red" disabled={!canStopSource}>Stop Source</Button>
               </Group>
+
+              {fileStartProgress ? (
+                <Stack gap={4} mt="xs">
+                  {fileStartProgress.phase === 'uploading' ? (
+                    <>
+                      <Group justify="space-between">
+                        <Text size="xs">Uploading video file…</Text>
+                        <Text size="xs" c="dimmed">
+                          {Number.isFinite(Number(fileStartProgress.totalBytes)) && fileStartProgress.totalBytes > 0
+                            ? `${((fileStartProgress.loadedBytes / fileStartProgress.totalBytes) * 100).toFixed(1)}%`
+                            : 'Starting…'}
+                        </Text>
+                      </Group>
+                      <Progress
+                        value={Number.isFinite(Number(fileStartProgress.totalBytes)) && fileStartProgress.totalBytes > 0
+                          ? (fileStartProgress.loadedBytes / fileStartProgress.totalBytes) * 100
+                          : 0}
+                        animated
+                      />
+                      <Text size="xs" c="dimmed">
+                        {formatBytes(fileStartProgress.loadedBytes)} / {formatBytes(fileStartProgress.totalBytes)} · Source setup starts once this transfer completes.
+                      </Text>
+                    </>
+                  ) : (
+                    <Group gap="xs">
+                      <Badge color="yellow" variant="light">Preparing file</Badge>
+                      <Text size="xs" c="dimmed">Upload complete. Analyzing video streams and KLV metadata…</Text>
+                    </Group>
+                  )}
+                </Stack>
+              ) : null}
 
               <Group mt="md" align="center">
                 <Text size="sm">Current Stream State:</Text>
@@ -2233,27 +2292,36 @@ function App() {
                         <Badge color={stateColor(s.state)}>{s.state || 'unknown'}</Badge>
                       </Group>
                     </Group>
-                    <Text size="xs" c="dimmed">
-                      type: {s.sourceType || 'stream'} | hls: {s.hlsRunning ? 'up' : 'down'} | klv: {s.klvRunning ? 'up' : 'down'} | ingest: {s.ingestRunning ? 'up' : 'down'}
-                      {s.hlsMode ? ` | HLS mode: ${s.hlsMode}` : ''}
-                      {s.hlsEffectiveMode && s.hlsEffectiveMode !== s.hlsMode ? ` → ${s.hlsEffectiveMode}` : ''}
-                      {s.webRtcMode && s.sourceType !== 'file' ? ` | WebRTC mode: ${s.webRtcMode}` : ''}
-                      {s.encoder ? ` | encoder: ${s.usingGpu ? 'GPU' : 'CPU'} (${s.encoder})` : ''}
-                    </Text>
-                    {s.sourceType === 'file' ? (
-                      <Stack gap={3} mt="xs">
-                        {(() => {
-                          const klvStatus = klvProbeStatus(s);
-                          return <Badge color={klvStatus.color} variant="light" w="fit-content">{klvStatus.label}</Badge>;
-                        })()}
+                    <Group mt="xs" align="flex-start" wrap="nowrap">
+                      {s.posterUrl ? (
+                        <img className="source-poster" src={s.posterUrl} alt={`Preview of ${s.streamId}`} />
+                      ) : (
+                        <div className="source-poster source-poster-placeholder">Preview pending</div>
+                      )}
+                      <Stack gap={3} style={{ flex: 1, minWidth: 0 }}>
                         <Text size="xs" c="dimmed">
-                          conversion: {conversionProgress(s) != null ? `${conversionProgress(s).toFixed(1)}%` : 'preparing'} · {formatConversionTime(s.processedSeconds)} / {formatConversionTime(s.durationSeconds)}
-                          {Number.isFinite(Number(s.encodeSpeed)) ? ` · ${Number(s.encodeSpeed).toFixed(2)}x` : ''}
-                          {Number.isFinite(Number(s.etaSeconds)) ? ` · ETA ${formatConversionTime(s.etaSeconds)}` : ''}
+                          type: {s.sourceType || 'stream'} | hls: {s.hlsRunning ? 'up' : 'down'} | klv: {s.klvRunning ? 'up' : 'down'} | ingest: {s.ingestRunning ? 'up' : 'down'}
+                          {s.hlsMode ? ` | HLS mode: ${s.hlsMode}` : ''}
+                          {s.hlsEffectiveMode && s.hlsEffectiveMode !== s.hlsMode ? ` → ${s.hlsEffectiveMode}` : ''}
+                          {s.webRtcMode && s.sourceType !== 'file' ? ` | WebRTC mode: ${s.webRtcMode}` : ''}
+                          {s.encoder ? ` | encoder: ${s.usingGpu ? 'GPU' : 'CPU'} (${s.encoder})` : ''}
                         </Text>
-                        <Progress value={conversionProgress(s) || 0} animated={s.state === 'running'} size="sm" />
+                        {s.sourceType === 'file' ? (
+                          <>
+                            {(() => {
+                              const klvStatus = klvProbeStatus(s);
+                              return <Badge color={klvStatus.color} variant="light" w="fit-content">{klvStatus.label}</Badge>;
+                            })()}
+                            <Text size="xs" c="dimmed">
+                              conversion: {conversionProgress(s) != null ? `${conversionProgress(s).toFixed(1)}%` : 'preparing'} · {formatConversionTime(s.processedSeconds)} / {formatConversionTime(s.durationSeconds)}
+                              {Number.isFinite(Number(s.encodeSpeed)) ? ` · ${Number(s.encodeSpeed).toFixed(2)}x` : ''}
+                              {Number.isFinite(Number(s.etaSeconds)) ? ` · ETA ${formatConversionTime(s.etaSeconds)}` : ''}
+                            </Text>
+                            <Progress value={conversionProgress(s) || 0} animated={s.state === 'running'} size="sm" />
+                          </>
+                        ) : null}
                       </Stack>
-                    ) : null}
+                    </Group>
                   </Paper>
                 )) : <Text size="sm" c="dimmed">No active sources</Text>}
               </Stack>
@@ -2451,6 +2519,9 @@ function App() {
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
                           />
+                          <Text size="xs" c="dimmed" mt="xs">
+                            timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
+                          </Text>
                         </Tabs.Panel>
                       </Tabs>
                     </Paper>
@@ -2513,6 +2584,9 @@ function App() {
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
                           />
+                          <Text size="xs" c="dimmed" mt="xs">
+                            timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
+                          </Text>
                         </Tabs.Panel>
                       </Tabs>
                     </Paper>

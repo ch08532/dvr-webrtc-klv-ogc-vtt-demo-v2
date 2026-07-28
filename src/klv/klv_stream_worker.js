@@ -7,6 +7,11 @@ import { createServiceLogger, serializeError } from "../service_logger.js";
 
 const log = createServiceLogger("klv_stream_worker");
 const SEGMENT_POLL_MS = Number(process.env.KLV_SEGMENT_POLL_MS || 500);
+const SEGMENT_DECODE_WORKERS = Math.max(1, Math.min(8, Number(process.env.KLV_SEGMENT_DECODE_WORKERS || 4)));
+const SEGMENT_DECODE_BATCH_SIZE = Math.max(
+  SEGMENT_DECODE_WORKERS,
+  Math.min(64, Number(process.env.KLV_SEGMENT_DECODE_BATCH_SIZE || (SEGMENT_DECODE_WORKERS * 4)))
+);
 
 let runtime = null;
 
@@ -334,23 +339,28 @@ function findCarrierEntry(videoEntry, carrierEntries) {
   return closestDifferenceMs <= maxDifferenceMs ? closest : null;
 }
 
-/** Parses one completed carrier segment and writes its paired VTT file. */
-async function processSegmentEntry(current, videoEntry, carrierEntry, videoSegmentOffsetSec) {
+/** Parses one completed carrier segment without mutating ordered timeline state. */
+async function decodeSegmentEntry(current, videoEntry, carrierEntry) {
   const tsPath = path.join(current.outDir, carrierEntry.uri);
-  if (!fs.existsSync(tsPath)) return false;
-
-  const vttFile = vttFilenameForSegment(videoEntry.uri);
-  const vttPath = path.join(current.outDir, vttFile);
+  if (!fs.existsSync(tsPath)) return null;
   const decodedItems = await extractKlvFromTsFile({
     streamId: current.streamId,
     inputPath: tsPath,
     requestId: current.requestId
   });
+  return { videoEntry, carrierEntry, decodedItems };
+}
+
+/** Prepares one decoded segment in playlist order so timeline alignment stays stable. */
+function prepareSegmentEntry(current, decodedSegment) {
+  const { videoEntry, carrierEntry, decodedItems } = decodedSegment;
+  const videoSegmentOffsetSec = getVideoSegmentOffsetSec(current, videoEntry);
+  const vttFile = vttFilenameForSegment(videoEntry.uri);
+  const vttPath = path.join(current.outDir, vttFile);
 
   const records = [];
   for (const decoded of decodedItems) {
     const enriched = enrichDecodedTimestamp(decoded);
-    await current.store.add(current.streamId, enriched.decoded);
     records.push({
       decoded: enriched.decoded,
       klvUnixMs: enriched.klvUnixMs,
@@ -375,15 +385,20 @@ async function processSegmentEntry(current, videoEntry, carrierEntry, videoSegme
     current.transportTimelineBasePts90k = firstTransportRecord.transportSegmentStartPts90k;
   }
 
+  return { videoEntry, vttFile, vttPath, videoSegmentOffsetSec, carrierOffsetSec, records };
+}
+
+/** Writes VTT for an already decoded and storage-committed segment. */
+function writePreparedSegmentVtt(current, prepared) {
   writeSegmentVtt({
-    outPath: vttPath,
-    durationSec: videoEntry.durationSec,
-    carrierOffsetSec,
+    outPath: prepared.vttPath,
+    durationSec: prepared.videoEntry.durationSec,
+    carrierOffsetSec: prepared.carrierOffsetSec,
     sourceTimelineBaseMs: current.sourceTimelineBaseMs,
     sourceTimelineStartSec: current.sourceTimelineStartSec,
-    videoSegmentOffsetSec,
+    videoSegmentOffsetSec: prepared.videoSegmentOffsetSec,
     transportTimelineBasePts90k: current.transportTimelineBasePts90k,
-    records,
+    records: prepared.records,
     maxCuesPerSecond: current.maxCuesPerSecond,
     minCueDurSec: current.minCueDurSec,
     maxCueDurSec: current.maxCueDurSec
@@ -392,13 +407,26 @@ async function processSegmentEntry(current, videoEntry, carrierEntry, videoSegme
   log.debug("segment_processed", {
     requestId: current.requestId,
     streamId: current.streamId,
-    tsFile: carrierEntry.uri,
-    vttFile,
-    videoSequence: videoEntry.sequence,
-    carrierSequence: carrierEntry.sequence,
-    decodedCount: decodedItems.length
+    vttFile: prepared.vttFile,
+    videoSequence: prepared.videoEntry.sequence,
+    decodedCount: prepared.records.length
   });
-  return true;
+}
+
+/** Runs asynchronous segment parsing with a bounded pool to limit disk pressure. */
+async function decodeSegmentBatch(current, entries) {
+  const results = new Array(entries.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(SEGMENT_DECODE_WORKERS, entries.length) }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= entries.length) return;
+      const entry = entries[index];
+      results[index] = await decodeSegmentEntry(current, entry.videoEntry, entry.carrierEntry);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 /** Derives the source-time offset of a video segment from HLS timing data. */
@@ -424,17 +452,32 @@ async function processPendingSegments() {
     const carrierPlaylist = parseVideoPlaylist(current.carrierPlaylistPath);
     if (!videoPlaylist || !carrierPlaylist || !videoPlaylist.entries.length || !carrierPlaylist.entries.length) return;
 
-    for (const videoEntry of videoPlaylist.entries) {
-      if (current.lastProcessedSequence != null && videoEntry.sequence <= current.lastProcessedSequence) {
-        continue;
+    while (true) {
+      const batch = [];
+      for (const videoEntry of videoPlaylist.entries) {
+        if (current.lastProcessedSequence != null && videoEntry.sequence <= current.lastProcessedSequence) continue;
+        const carrierEntry = findCarrierEntry(videoEntry, carrierPlaylist.entries);
+        if (!carrierEntry || !fs.existsSync(path.join(current.outDir, carrierEntry.uri))) break;
+        batch.push({ videoEntry, carrierEntry });
+        if (batch.length >= SEGMENT_DECODE_BATCH_SIZE) break;
       }
-      const carrierEntry = findCarrierEntry(videoEntry, carrierPlaylist.entries);
-      if (!carrierEntry) break;
-      const videoSegmentOffsetSec = getVideoSegmentOffsetSec(current, videoEntry);
+      if (!batch.length) break;
 
-      const done = await processSegmentEntry(current, videoEntry, carrierEntry, videoSegmentOffsetSec);
-      if (!done) break;
-      current.lastProcessedSequence = videoEntry.sequence;
+      const decodedBatch = await decodeSegmentBatch(current, batch);
+      if (decodedBatch.some((item) => !item)) break;
+
+      // Build timing state in sequence order, then persist every decoded item
+      // as one transaction before publishing the corresponding VTT sidecars.
+      const preparedBatch = decodedBatch.map((item) => prepareSegmentEntry(current, item));
+      const decodedForStorage = preparedBatch.flatMap((item) => item.records.map((record) => record.decoded));
+      await current.store.addMany(current.streamId, decodedForStorage);
+
+      for (const prepared of preparedBatch) {
+        writePreparedSegmentVtt(current, prepared);
+        current.lastProcessedSequence = prepared.videoEntry.sequence;
+      }
+
+      if (batch.length < SEGMENT_DECODE_BATCH_SIZE) break;
     }
 
     writeSubtitlePlaylist({
