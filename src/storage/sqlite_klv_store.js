@@ -3,6 +3,34 @@ import sqlite3 from "sqlite3";
 import { createServiceLogger, serializeError } from "../service_logger.js";
 
 const log = createServiceLogger("sqlite_klv_store");
+const SQLITE_BUSY_TIMEOUT_MS = Math.max(1000, Number(process.env.SQLITE_BUSY_TIMEOUT_MS || 15000));
+const SQLITE_BUSY_RETRIES = Math.max(0, Number(process.env.SQLITE_BUSY_RETRIES || 5));
+
+/** Returns true for SQLite's transient inter-process writer-contention errors. */
+function isSqliteBusy(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || error || "");
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /database is locked|database table is locked/i.test(message);
+}
+
+/** Delays an operation with a small amount of jitter to avoid lockstep retries. */
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retries a complete write operation when another process temporarily owns SQLite's writer lock. */
+async function retryBusyWrite(label, operation) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isSqliteBusy(error) || attempt >= SQLITE_BUSY_RETRIES) throw error;
+      const delayMs = Math.min(2000, 75 * (2 ** attempt)) + Math.floor(Math.random() * 75);
+      log.warn("sqlite_write_busy_retry", { label, attempt: attempt + 1, retries: SQLITE_BUSY_RETRIES, delayMs });
+      await wait(delayMs);
+    }
+  }
+}
 
 /** Opens a SQLite database as a promise. */
 function openDb(dbPath) {
@@ -50,15 +78,21 @@ export class SqliteKlvStore {
     this.db = await openDb(this.dbPath);
     await run(this.db, `PRAGMA journal_mode=WAL;`);
     await run(this.db, `PRAGMA synchronous=NORMAL;`);
-    await run(this.db, `PRAGMA busy_timeout=5000;`);
+    await run(this.db, `PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS};`);
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS klv_events (
         stream_id TEXT NOT NULL,
         t_ms INTEGER NOT NULL,
-        json TEXT NOT NULL
+        json TEXT NOT NULL,
+        is_ephemeral INTEGER NOT NULL DEFAULT 1
       );
     `);
+    const columns = await all(this.db, `PRAGMA table_info(klv_events)`);
+    if (!columns.some((column) => column.name === "is_ephemeral")) {
+      await run(this.db, `ALTER TABLE klv_events ADD COLUMN is_ephemeral INTEGER NOT NULL DEFAULT 1;`);
+    }
     await run(this.db, `CREATE INDEX IF NOT EXISTS idx_klv_stream_time ON klv_events(stream_id, t_ms);`);
+    await run(this.db, `CREATE INDEX IF NOT EXISTS idx_klv_retention ON klv_events(is_ephemeral, t_ms);`);
     log.info("init_complete", { dbPath: this.dbPath });
   }
 
@@ -67,41 +101,48 @@ export class SqliteKlvStore {
     const tMs = decoded.timestampUnixMicros
       ? Number(BigInt(decoded.timestampUnixMicros) / 1000n)
       : Date.now();
-    await run(this.db, `INSERT INTO klv_events(stream_id, t_ms, json) VALUES(?,?,?)`, [
+    await retryBusyWrite("add", () => run(this.db, `INSERT INTO klv_events(stream_id, t_ms, json, is_ephemeral) VALUES(?,?,?,1)`, [
       streamId, tMs, JSON.stringify(decoded)
-    ]);
+    ]));
   }
 
-  /** Stores a group of decoded events in one SQLite transaction. */
-  async addMany(streamId, decodedItems) {
+  /** Stores a group of decoded events in one transaction, preserving file telemetry from live retention. */
+  async addMany(streamId, decodedItems, { isEphemeral = true } = {}) {
     if (!Array.isArray(decodedItems) || !decodedItems.length) return 0;
     const rows = decodedItems.map((decoded) => {
       const tMs = decoded.timestampUnixMicros
         ? Number(BigInt(decoded.timestampUnixMicros) / 1000n)
         : Date.now();
-      return [streamId, tMs, JSON.stringify(decoded)];
+      return [streamId, tMs, JSON.stringify(decoded), isEphemeral ? 1 : 0];
     });
     // SQLite commonly permits 999 bind variables, so keep each statement well
-    // under that ceiling (three variables per telemetry event).
-    const rowsPerStatement = 300;
+    // under that ceiling (four variables per telemetry event).
+    const rowsPerStatement = 200;
 
-    await run(this.db, "BEGIN IMMEDIATE");
-    try {
-      for (let offset = 0; offset < rows.length; offset += rowsPerStatement) {
-        const chunk = rows.slice(offset, offset + rowsPerStatement);
-        const placeholders = chunk.map(() => "(?,?,?)").join(",");
-        await run(
-          this.db,
-          `INSERT INTO klv_events(stream_id, t_ms, json) VALUES ${placeholders}`,
-          chunk.flat()
-        );
+    return retryBusyWrite("add_many", async () => {
+      let transactionOpen = false;
+      try {
+        await run(this.db, "BEGIN IMMEDIATE");
+        transactionOpen = true;
+        for (let offset = 0; offset < rows.length; offset += rowsPerStatement) {
+          const chunk = rows.slice(offset, offset + rowsPerStatement);
+          const placeholders = chunk.map(() => "(?,?,?,?)").join(",");
+          await run(
+            this.db,
+            `INSERT INTO klv_events(stream_id, t_ms, json, is_ephemeral) VALUES ${placeholders}`,
+            chunk.flat()
+          );
+        }
+        await run(this.db, "COMMIT");
+        transactionOpen = false;
+        return rows.length;
+      } catch (error) {
+        if (transactionOpen) {
+          try { await run(this.db, "ROLLBACK"); } catch {}
+        }
+        throw error;
       }
-      await run(this.db, "COMMIT");
-      return rows.length;
-    } catch (error) {
-      try { await run(this.db, "ROLLBACK"); } catch {}
-      throw error;
-    }
+    });
   }
 
   /** Returns decoded telemetry for one source over an inclusive time window. */
@@ -125,7 +166,7 @@ export class SqliteKlvStore {
 
   /** Deletes all persisted telemetry associated with a source. */
   async purgeStream(streamId) {
-    const result = await run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]);
+    const result = await retryBusyWrite("purge_stream", () => run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]));
     const deleted = result?.changes ?? 0;
     log.info("purge_stream", { streamId, deleted });
     return deleted;
@@ -139,7 +180,7 @@ export class SqliteKlvStore {
     this._retentionTimer = setInterval(async () => {
       const cutoff = Date.now() - maxAgeMs;
       try {
-        const result = await run(this.db, `DELETE FROM klv_events WHERE t_ms < ?`, [cutoff]);
+        const result = await retryBusyWrite("retention_delete", () => run(this.db, `DELETE FROM klv_events WHERE is_ephemeral=1 AND t_ms < ?`, [cutoff]));
         if ((result?.changes ?? 0) > 0) {
           log.debug("retention_deleted", { deleted: result.changes, cutoff });
         }

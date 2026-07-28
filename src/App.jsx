@@ -124,6 +124,9 @@ function App() {
   const vttDiscoverTimerRef = useRef(null);
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
+  const hlsStallTimerRef = useRef(null);
+  const hlsRecoveryTimerRef = useRef(null);
+  const hlsRecoveryPendingRef = useRef(false);
   const hlsQualityRef = useRef('auto');
   const appliedHlsQualityRef = useRef({ player: null, quality: null, representations: null });
   const clipRangeStreamRef = useRef(null);
@@ -425,6 +428,21 @@ function App() {
     }
   };
 
+  const clearHlsStallTimer = () => {
+    if (hlsStallTimerRef.current) {
+      clearTimeout(hlsStallTimerRef.current);
+      hlsStallTimerRef.current = null;
+    }
+  };
+
+  const clearHlsRecoveryTimer = () => {
+    if (hlsRecoveryTimerRef.current) {
+      clearTimeout(hlsRecoveryTimerRef.current);
+      hlsRecoveryTimerRef.current = null;
+    }
+    hlsRecoveryPendingRef.current = false;
+  };
+
   const clearVttPollLoop = () => {
     if (vttPollTimerRef.current) {
       clearInterval(vttPollTimerRef.current);
@@ -467,6 +485,8 @@ function App() {
   };
 
   const clearDvrPlayerInstance = () => {
+    clearHlsStallTimer();
+    clearHlsRecoveryTimer();
     clearVttOverlayHooks();
     if (window.player && !window.player.isDisposed?.()) {
       try { window.player.dispose(); } catch {}
@@ -502,15 +522,38 @@ function App() {
     const root = `/hls/${encodeURIComponent(targetStreamId)}`;
     const token = Date.now();
     const masterUrl = `${root}/master.m3u8?_=${token}`;
-    const mediaUrl = `${root}/playlist.m3u8?_=${token}`;
     try {
-      const [masterRes, mediaRes] = await Promise.all([
-        fetch(masterUrl, { cache: 'no-store' }),
-        fetch(mediaUrl, { cache: 'no-store' })
-      ]);
-      if (!masterRes.ok || !mediaRes.ok) return false;
-      const mediaTxt = await mediaRes.text();
-      return mediaTxt.includes('#EXTM3U');
+      const masterRes = await fetch(masterUrl, { cache: 'no-store' });
+      if (!masterRes.ok) return false;
+      const masterText = await masterRes.text();
+      const masterLines = masterText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const streamInfoIndex = masterLines.findIndex((line) => line.startsWith('#EXT-X-STREAM-INF'));
+      const variantPath = streamInfoIndex >= 0
+        ? masterLines.slice(streamInfoIndex + 1).find((line) => !line.startsWith('#'))
+        : null;
+      if (!variantPath) return false;
+
+      // The browser plays a rendition under v*/index.m3u8, not the private
+      // KLV carrier playlist. Wait until that exact rendition has a published
+      // media segment so the first VHS request cannot race FFmpeg output.
+      const variantUrl = new URL(variantPath, `${window.location.origin}${root}/master.m3u8`);
+      variantUrl.searchParams.set('_', String(token));
+      const variantRes = await fetch(variantUrl, { cache: 'no-store' });
+      if (!variantRes.ok) return false;
+      const variantText = await variantRes.text();
+      const variantLines = variantText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const segmentInfoIndex = variantLines.reduce(
+        (lastIndex, line, index) => (line.startsWith('#EXTINF') ? index : lastIndex),
+        -1
+      );
+      const segmentPath = segmentInfoIndex >= 0
+        ? variantLines.slice(segmentInfoIndex + 1).find((line) => !line.startsWith('#'))
+        : null;
+      if (!variantText.includes('#EXTM3U') || !segmentPath) return false;
+
+      const segmentUrl = new URL(segmentPath, variantUrl);
+      const segmentRes = await fetch(segmentUrl, { method: 'HEAD', cache: 'no-store' });
+      return segmentRes.ok;
     } catch {
       return false;
     }
@@ -1502,6 +1545,37 @@ function App() {
     wsWorkerRef.current = null;
   };
 
+  // A fresh VHS instance is required after some playlist/segment failures;
+  // calling play() again on the same instance can leave it stuck buffering.
+  const scheduleHlsRecovery = (targetStreamId, reason) => {
+    if (streamRuntimeRef.current?.sourceType === 'file') return;
+    if (activeTabRef.current !== 'dvr' || streamIdRef.current !== targetStreamId) return;
+    if (hlsRecoveryPendingRef.current) return;
+
+    hlsRecoveryPendingRef.current = true;
+    clearHlsStallTimer();
+    setHlsMediaLoaded(false);
+    setDvrStatus(`Reconnecting HLS (${reason})...`);
+    hlsRecoveryTimerRef.current = setTimeout(() => {
+      hlsRecoveryTimerRef.current = null;
+      hlsRecoveryPendingRef.current = false;
+      if (!serverOnlineRef.current || activeTabRef.current !== 'dvr' || streamIdRef.current !== targetStreamId) return;
+      clearDvrPlayerInstance();
+      setDvrStatus('Reconnecting HLS...');
+      startHlsAutoAttach(targetStreamId);
+    }, 250);
+  };
+
+  const armHlsStallRecovery = (targetStreamId, player) => {
+    if (streamRuntimeRef.current?.sourceType === 'file' || player?.paused?.()) return;
+    clearHlsStallTimer();
+    hlsStallTimerRef.current = setTimeout(() => {
+      hlsStallTimerRef.current = null;
+      if (window.player !== player || player?.isDisposed?.() || player?.paused?.()) return;
+      scheduleHlsRecovery(targetStreamId, 'buffering timeout');
+    }, 12_000);
+  };
+
   const attachHlsDvr = (streamId, retryCount = 0) => {
     const maxRetries = 50; // Stop after 50 retries (~5 seconds)
 
@@ -1587,98 +1661,121 @@ function App() {
           }
         }
       });
+      const player = window.player;
       appliedHlsQualityRef.current = { player: null, quality: null, representations: null };
 
-      window.player.src({
+      player.src({
         src: url,
         type: 'application/x-mpegURL'
       });
       setHlsMediaLoaded(false);
       setDvrStatus('Loading playlist...');
 
-      window.player.on('loadstart', () => {
+      player.on('loadstart', () => {
         forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(false);
         setDvrStatus('Loading playlist...');
         setDvrDiag((prev) => ({ ...prev, error: null }));
-        refreshDvrPlaybackInfo(window.player);
+        refreshDvrPlaybackInfo(player);
       });
-      window.player.on('loadedmetadata', () => {
-        forceHideCaptionTracks(window.player);
+      player.on('loadedmetadata', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
+        forceHideCaptionTracks(player);
         // File-backed HLS is a VOD asset. Video.js can otherwise position at
         // the end of a full-history playlist as though it were live DVR.
         if (streamRuntimeRef.current?.sourceType === 'file') {
-          const { start } = getHlsSeekBounds(window.player);
-          window.player.currentTime(start);
+          const { start } = getHlsSeekBounds(player);
+          player.currentTime(start);
         } else {
-          seekHlsToLivePosition(window.player);
+          seekHlsToLivePosition(player);
         }
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
-        refreshDvrPlaybackInfo(window.player);
+        refreshDvrPlaybackInfo(player);
         applyHlsQuality(hlsQualityRef.current);
       });
-      window.player.on('canplay', () => {
-        forceHideCaptionTracks(window.player);
+      player.on('canplay', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
+        forceHideCaptionTracks(player);
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
-        refreshDvrPlaybackInfo(window.player);
+        refreshDvrPlaybackInfo(player);
       });
-      window.player.on('playing', () => {
+      player.on('playing', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
         setHlsMediaLoaded(true);
         setDvrStatus('Playing');
         setDvrDiag((prev) => ({ ...prev, error: null }));
-        refreshDvrPlaybackInfo(window.player);
+        refreshDvrPlaybackInfo(player);
       });
-      window.player.on('waiting', () => {
+      player.on('waiting', () => {
+        if (window.player !== player) return;
         setDvrStatus('Buffering...');
-        refreshDvrPlaybackInfo(window.player);
+        refreshDvrPlaybackInfo(player);
+        armHlsStallRecovery(streamId, player);
       });
-      window.player.on('stalled', () => {
+      player.on('stalled', () => {
+        if (window.player !== player) return;
         setDvrStatus('Buffering...');
+        armHlsStallRecovery(streamId, player);
       });
-      window.player.on('seeking', () => {
+      player.on('seeking', () => {
+        if (window.player !== player) return;
         setDvrStatus('Seeking...');
       });
-      window.player.on('seeked', () => {
-        setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
-        refreshDvrPlaybackInfo(window.player);
+      player.on('seeked', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
+        setDvrStatus(player.paused?.() ? 'Paused' : 'Playing');
+        refreshDvrPlaybackInfo(player);
       });
-      window.player.on('timeupdate', () => {
-        refreshDvrPlaybackInfo(window.player);
+      player.on('timeupdate', () => {
+        if (window.player !== player) return;
+        refreshDvrPlaybackInfo(player);
       });
-      window.player.on('pause', () => {
-        if (!window.player.ended?.()) setDvrStatus('Paused');
+      player.on('pause', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
+        if (!player.ended?.()) setDvrStatus('Paused');
       });
-      window.player.on('ended', () => {
+      player.on('ended', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
         setDvrStatus('Ended');
       });
-      window.player.on('emptied', () => {
+      player.on('emptied', () => {
+        if (window.player !== player) return;
+        clearHlsStallTimer();
         setHlsMediaLoaded(false);
         setDvrStatus('Idle');
       });
-      window.player.on('dispose', () => {
+      player.on('dispose', () => {
+        clearHlsStallTimer();
         setHlsMediaLoaded(false);
         setHlsQualityControlAvailable(false);
         setDvrStatus('Idle');
       });
 
-      window.player.on('error', () => {
+      player.on('error', () => {
+        if (window.player !== player) return;
         setHlsMediaLoaded(false);
-        const err = window.player?.error?.();
+        const err = player.error?.();
         const msg = err?.message || `code=${String(err?.code || 'n/a')}`;
         setDvrStatus('Playback error. Reconnecting...');
         setDvrDiag((prev) => ({ ...prev, error: msg }));
-        refreshDvrPlaybackInfo(window.player);
-        // If the playlist is not yet ready, keep retrying in the background.
-        startHlsAutoAttach(streamId);
+        refreshDvrPlaybackInfo(player);
+        scheduleHlsRecovery(streamId, 'playback error');
       });
 
-      window.player.ready(() => {
-        forceHideCaptionTracks(window.player);
+      player.ready(() => {
+        if (window.player !== player) return;
+        forceHideCaptionTracks(player);
         applyHlsQuality(hlsQualityRef.current);
-        window.player.play().catch(() => {});
-        refreshDvrPlaybackInfo(window.player);
+        player.play().catch(() => {});
+        refreshDvrPlaybackInfo(player);
         hookVttOverlaySoon();
       });
     } catch (error) {
@@ -1834,7 +1931,8 @@ function App() {
 
     const run = async () => {
       if (token !== hlsRetryTokenRef.current) return;
-      if (activeTab !== 'dvr') return;
+      if (activeTabRef.current !== 'dvr') return;
+      if (streamIdRef.current !== targetStreamId) return;
       if (!serverOnlineRef.current) return;
 
       const available = await probeHlsReady(targetStreamId);

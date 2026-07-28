@@ -23,12 +23,24 @@
   overflow: hidden;
 }
 
-.klv-map-center-button {
+.klv-map-controls {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
   z-index: 1;
-  padding: 0.45rem 0.65rem;
+  display: grid;
+  gap: 0.35rem;
+  justify-items: end;
+}
+
+.klv-map-control-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
   border: 1px solid #ced4da;
   border-radius: 4px;
   color: #212529;
@@ -37,8 +49,43 @@
   cursor: pointer;
 }
 
-.klv-map-center-button:disabled,
-.klv-map-center-button:disabled {
+.klv-map-control-button svg {
+  display: block;
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.klv-map-control-button::after {
+  position: absolute;
+  right: calc(100% + 0.45rem);
+  top: 50%;
+  width: max-content;
+  max-width: 12rem;
+  transform: translateY(-50%);
+  padding: 0.3rem 0.45rem;
+  border-radius: 3px;
+  background: rgba(26, 27, 30, 0.94);
+  color: #ffffff;
+  content: attr(data-tooltip);
+  font-size: 0.75rem;
+  line-height: 1.15;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.klv-map-control-button:hover::after,
+.klv-map-control-button:focus-visible::after {
+  opacity: 1;
+}
+
+.klv-map-control-button.is-active {
+  border-color: #1971c2;
+  background: #228be6;
+  color: #ffffff;
+}
+
+.klv-map-control-button:disabled {
   color: #868e96;
   cursor: not-allowed;
 }

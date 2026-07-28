@@ -1253,6 +1253,7 @@ app.post("/sources", async (req, res) => {
     klvWorker = await startKlvStreamWorker({
       streamId,
       inputUrl: resolvedInputUrl,
+      sourceType,
       outDir,
       videoPlaylistName: hls.videoPlaylistName,
       segmentSeconds: effectiveSegmentSeconds,

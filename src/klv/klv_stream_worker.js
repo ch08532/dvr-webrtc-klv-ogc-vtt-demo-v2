@@ -470,7 +470,9 @@ async function processPendingSegments() {
       // as one transaction before publishing the corresponding VTT sidecars.
       const preparedBatch = decodedBatch.map((item) => prepareSegmentEntry(current, item));
       const decodedForStorage = preparedBatch.flatMap((item) => item.records.map((record) => record.decoded));
-      await current.store.addMany(current.streamId, decodedForStorage);
+      await current.store.addMany(current.streamId, decodedForStorage, {
+        isEphemeral: current.sourceType !== "file"
+      });
 
       for (const prepared of preparedBatch) {
         writePreparedSegmentVtt(current, prepared);
@@ -502,6 +504,7 @@ async function start(message) {
   const {
     streamId,
     inputUrl,
+    sourceType,
     outDir,
     videoPlaylistName,
     segmentSeconds,
@@ -527,6 +530,7 @@ async function start(message) {
     streamId,
     requestId,
     inputUrl,
+    sourceType: sourceType === "file" ? "file" : "stream",
     outDir,
     videoPlaylistPath,
     carrierPlaylistPath,

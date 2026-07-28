@@ -127,7 +127,7 @@ These parameters affect only the WebVTT sidecar overlay. All decoded KLV is stil
 
 ## File KLV finalization tuning
 
-Completed file segments are decoded in bounded batches and their SQLite records are inserted transactionally before ordered WebVTT sidecars are published. The defaults are four concurrent decode tasks and batches of sixteen segments. Tune only when profiling a particular machine or storage device:
+Completed file segments are decoded in bounded batches and their SQLite records are inserted transactionally before ordered WebVTT sidecars are published. SQLite writer contention is retried with bounded backoff, and uploaded-file telemetry is excluded from live-stream retention. The defaults are four concurrent decode tasks and batches of sixteen segments. Tune only when profiling a particular machine or storage device:
 
 - `KLV_SEGMENT_DECODE_WORKERS` (default `4`, range `1`–`8`)
 - `KLV_SEGMENT_DECODE_BATCH_SIZE` (default `workers × 4`, range `workers`–`64`)

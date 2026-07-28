@@ -146,7 +146,7 @@ This improves storage and I/O throughput without allowing concurrent work to cha
 
 ### 6.4 SQLite and retention
 
-`db/klv.sqlite` stores `stream_id`, source-time milliseconds, and decoded JSON. The store uses WAL journal mode, normal synchronous mode, a busy timeout, and a `(stream_id, t_ms)` index. The server's demo retention job removes records older than two hours every 30 seconds. The WebVTT rate controls do not reduce the full-rate records persisted to SQLite.
+`db/klv.sqlite` stores `stream_id`, source-time milliseconds, decoded JSON, and an ephemeral marker. The store uses WAL journal mode, normal synchronous mode, a busy timeout, bounded retry/backoff for writer contention, and indexes for stream-time and retention queries. The server's demo retention job removes only ephemeral live-stream records older than two hours every 30 seconds; uploaded-file telemetry is retained for its DVR/OGC lifetime. The WebVTT rate controls do not reduce the full-rate records persisted to SQLite.
 
 The direct telemetry endpoint is:
 

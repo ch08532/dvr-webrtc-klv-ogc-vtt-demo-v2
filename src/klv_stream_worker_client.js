@@ -28,6 +28,7 @@ function sanitizeExecArgv(argv) {
 export async function startKlvStreamWorker({
   streamId,
   inputUrl,
+  sourceType,
   outDir,
   videoPlaylistName,
   segmentSeconds,
@@ -58,6 +59,7 @@ export async function startKlvStreamWorker({
           type: "start",
           streamId,
           inputUrl,
+          sourceType,
           outDir,
           videoPlaylistName,
           segmentSeconds,
