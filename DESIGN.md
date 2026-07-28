@@ -178,13 +178,13 @@ No terrain model is downloaded. There is no terrain correction, terrain target, 
 
 ## 8. File clips and KLV preservation
 
-The clip widget is available only for file sources because the server needs an authoritative, seekable original asset. It uses the packaged HLS duration for UI preview but does not export from HLS segments.
+The clip widget is available only for file sources because the server needs an authoritative, seekable original asset. It uses the packaged HLS duration for UI preview and exports from the existing private source-copy carrier playlist, never from browser playback renditions. This avoids a second full-file packaging pass or a delayed first export.
 
 1. The user drags start/end grips or sets boundaries at the HLS playhead.
 2. The client previews the boundary by seeking HLS.
-3. The export endpoint validates the requested range against the original asset duration.
-4. FFmpeg uses input-side seeking and stream copy for video, audio, and data streams (`-c:v copy`, `-c:a copy`, `-c:d copy`).
-5. The start snaps to a source keyframe, so the actual output boundary may precede the exact UI time.
+3. The export endpoint validates the requested range against the original asset duration and selects complete source-carrier segments covering it.
+4. FFmpeg concatenates those carrier segments and stream copies video, audio, and data streams (`-c:v copy`, `-c:a copy`, `-c:d copy`).
+5. Both bounds snap outward to verified decodable source-keyframe segment boundaries.
 6. The output is MPEG-TS, allowing KLV data streams to remain embedded. The server probes the result and rejects a KLV-bearing source whose KLV was not retained.
 
 Clip APIs:

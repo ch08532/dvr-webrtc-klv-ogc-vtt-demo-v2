@@ -408,6 +408,55 @@ function normalizeClipRange({ startSeconds, endSeconds, durationSeconds = null }
   };
 }
 
+/** Chooses complete stream-copied carrier segments that cover a requested HLS range. */
+async function resolveCarrierClipRange({ outDir, playlistName = "playlist.m3u8", requestedRange }) {
+  const playlistPath = path.join(outDir, playlistName);
+  let playlistText;
+  try {
+    playlistText = await fs.promises.readFile(playlistPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error("clip carrier is unavailable; restart and reprocess the uploaded file before exporting");
+    }
+    throw error;
+  }
+  const lines = playlistText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const entries = [];
+  let pendingDuration = null;
+  let offsetSeconds = 0;
+  for (const line of lines) {
+    if (line.startsWith("#EXTINF:")) {
+      pendingDuration = Number(line.slice("#EXTINF:".length).split(",")[0]);
+      continue;
+    }
+    if (line.startsWith("#") || !Number.isFinite(pendingDuration) || pendingDuration <= 0) continue;
+    const segmentPath = path.resolve(outDir, line);
+    if (!segmentPath.startsWith(`${path.resolve(outDir)}${path.sep}`) || !fs.existsSync(segmentPath)) {
+      throw new Error(`clip carrier segment is unavailable: ${line}`);
+    }
+    entries.push({ path: segmentPath, start: offsetSeconds, end: offsetSeconds + pendingDuration });
+    offsetSeconds += pendingDuration;
+    pendingDuration = null;
+  }
+  if (!entries.length) throw new Error("clip carrier playlist has no complete segments");
+
+  const startIndex = entries.findIndex((entry) => entry.end > requestedRange.start + 0.001);
+  const endIndex = entries.findIndex((entry) => entry.end >= requestedRange.end - 0.001);
+  if (startIndex < 0 || endIndex < startIndex) throw new Error("requested clip range is outside completed carrier segments");
+  const selected = entries.slice(startIndex, endIndex + 1);
+  return {
+    requestedStart: requestedRange.start,
+    requestedEnd: requestedRange.end,
+    start: Number(selected[0].start.toFixed(3)),
+    end: Number(selected.at(-1).end.toFixed(3)),
+    duration: Number((selected.at(-1).end - selected[0].start).toFixed(3)),
+    segmentPaths: selected.map((entry) => entry.path)
+  };
+}
+
 // Some MPEG-TS files (including MX15 recordings) have valid media timestamps
 // but no container duration.  FFprobe consequently reports Duration: N/A,
 // which is insufficient for a file-conversion progress bar.  Estimate the
@@ -915,9 +964,9 @@ app.get("/sources/:streamId/state", (req, res) => {
 });
 
 // ---------- API: file-backed clips ----------
-// Clips always come from the uploaded source file, rather than from browser HLS.
-// MPEG-TS is used as the download container because it carries the source KLV data
-// stream alongside a keyframe-aligned copy of the original video.
+// Clips come from source-stream-copy carrier segments generated from the uploaded
+// file, rather than browser playback renditions. MPEG-TS carries the original
+// video/audio/KLV streams at complete HLS keyframe boundaries.
 app.post("/sources/:streamId/clips", async (req, res) => {
   const streamId = req.params.streamId;
   const source = sources.get(streamId);
@@ -928,36 +977,46 @@ app.post("/sources/:streamId/clips", async (req, res) => {
     return res.status(409).json({ ok: false, error: "wait for the uploaded video to finish packaging before creating a clip" });
   }
 
+  const outDir = path.join(RECORD_ROOT, streamId);
   let range;
   try {
-    range = normalizeClipRange({
+    const requestedRange = normalizeClipRange({
       startSeconds: req.body?.startSeconds,
       endSeconds: req.body?.endSeconds,
       durationSeconds: sourceStates.get(streamId)?.durationSeconds
+    });
+    range = await resolveCarrierClipRange({
+      outDir,
+      playlistName: source.hls?.clipCarrierPlaylistName || "playlist.m3u8",
+      requestedRange
     });
   } catch (error) {
     return res.status(400).json({ ok: false, error: String(error?.message || error) });
   }
 
   const clipId = randomUUID();
-  const clipDir = path.join(RECORD_ROOT, streamId, "clips");
+  const clipDir = path.join(outDir, "clips");
   const filename = `${streamId}-clip-${clipId.slice(0, 8)}.ts`;
   const outputPath = path.join(clipDir, filename);
+  const concatPath = path.join(clipDir, `${clipId}.ffconcat`);
   const inputHasKlv = source.klvProbe?.available === true;
 
   try {
     await fs.promises.mkdir(clipDir, { recursive: true });
+    const concatLines = range.segmentPaths
+      .map((segmentPath) => `file '${segmentPath.replace(/'/g, "'\\''")}'`)
+      .join("\n");
+    await fs.promises.writeFile(concatPath, `${concatLines}\n`);
     const args = [
       "-hide_banner",
       "-loglevel", "error",
-      // Required for KLV/private data streams that FFmpeg does not otherwise map.
+      // The carrier segments are source-stream copies beginning at HLS keyframe
+      // boundaries, so concat avoids unsafe random seeking in long MPEG-TS files.
       "-copy_unknown",
-      // Input-side seeking makes stream-copy clipping immediate. FFmpeg starts
-      // at the closest preceding seekable keyframe, which keeps the output
-      // decodable without re-encoding the video.
-      "-ss", String(range.start),
-      "-i", source.inputUrl,
-      "-t", String(range.duration),
+      "-fflags", "+genpts",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", concatPath,
       "-map", "0:v:0",
       "-map", "0:a?",
       "-map", "0:d?",
@@ -967,11 +1026,24 @@ app.post("/sources/:streamId/clips", async (req, res) => {
       "-c:d", "copy",
       "-muxpreload", "0",
       "-muxdelay", "0",
+      // Start a fresh transport-stream timeline for reliable VLC duration
+      // estimation instead of retaining the source's long-running PCR/PTS.
+      "-mpegts_copyts", "0",
+      "-mpegts_flags", "+initial_discontinuity",
       "-avoid_negative_ts", "make_zero",
       "-f", "mpegts",
       outputPath
     ];
-    log.info("clip_export_start", { streamId, clipId, startSeconds: range.start, endSeconds: range.end, inputHasKlv });
+    log.info("clip_export_start", {
+      streamId,
+      clipId,
+      requestedStartSeconds: range.requestedStart,
+      requestedEndSeconds: range.requestedEnd,
+      keyframeStartSeconds: range.start,
+      keyframeEndSeconds: range.end,
+      carrierSegmentCount: range.segmentPaths.length,
+      inputHasKlv
+    });
     await runFfmpeg(args, { label: "clip export" });
 
     const outputProbe = await probeInputWithFfprobe(outputPath);
@@ -986,6 +1058,8 @@ app.post("/sources/:streamId/clips", async (req, res) => {
       path: outputPath,
       startSeconds: range.start,
       endSeconds: range.end,
+      requestedStartSeconds: range.requestedStart,
+      requestedEndSeconds: range.requestedEnd,
       durationSeconds: outputProbe.durationSeconds ?? range.duration,
       trimMode: "keyframe-copy",
       klvEmbedded: !!outputProbe.klv?.available,
@@ -1006,6 +1080,8 @@ app.post("/sources/:streamId/clips", async (req, res) => {
     const message = String(error?.message || error);
     log.warn("clip_export_error", { streamId, clipId, error: serializeError(error) });
     return res.status(500).json({ ok: false, error: message });
+  } finally {
+    await fs.promises.rm(concatPath, { force: true }).catch(() => {});
   }
 });
 

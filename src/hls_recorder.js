@@ -70,12 +70,11 @@ function buildLadderFilter(renditions, copyRenditionIndex = null) {
   const encodedRenditionIndexes = renditions
     .map((_, index) => index)
     .filter((index) => index !== copyRenditionIndex);
-  const metadataInputIndex = encodedRenditionIndexes.length;
   const splitLabels = Array.from(
-    { length: encodedRenditionIndexes.length + 1 },
+    { length: encodedRenditionIndexes.length },
     (_, index) => `[input${index}]`
   ).join("");
-  const filters = [`[0:v:0]split=${encodedRenditionIndexes.length + 1}${splitLabels}`];
+  const filters = [`[0:v:0]split=${encodedRenditionIndexes.length}${splitLabels}`];
 
   encodedRenditionIndexes.forEach((renditionIndex, inputIndex) => {
     const rendition = renditions[renditionIndex];
@@ -83,11 +82,6 @@ function buildLadderFilter(renditions, copyRenditionIndex = null) {
       `[input${inputIndex}]scale=${rendition.width}:${rendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[video${renditionIndex}]`
     );
   });
-  const metadataRendition = renditions[0];
-  filters.push(
-    `[input${metadataInputIndex}]scale=${metadataRendition.width}:${metadataRendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${metadataRendition.width}:${metadataRendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[metadata]`
-  );
-
   return filters.join(";");
 }
 
@@ -185,13 +179,15 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-i", inputUrl,
   ];
 
-  const metadataRendition = renditions[0];
-  // This private playlist preserves source video and KLV for server-side KLV
-  // extraction. It is never the browser playback playlist.
+  // This private playlist preserves source video, audio, and KLV for server-side
+  // KLV extraction and keyframe-aligned clip export.  It is the only source-copy
+  // carrier: do not add a second file-wide clip-index pass here.
   const carrierOutput = [
     "-map", "0:v:0",
+    "-map", "0:a?",
     "-map", "0:d?",
     "-c:v", "copy",
+    "-c:a", "copy",
     "-c:d", "copy",
     "-muxpreload", "0",
     "-muxdelay", "0",
@@ -238,29 +234,6 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-hls_segment_filename", singleSegmentFilename,
     singlePlaylist
   ];
-  const metadataOutput = [
-    "-map", "[metadata]",
-    "-map", "0:d?",
-    "-an",
-    "-sn",
-    ...videoProfile.videoArgs,
-    "-b:v", metadataRendition.videoBitrate,
-    "-maxrate:v", metadataRendition.maxRate,
-    "-bufsize:v", metadataRendition.bufferSize,
-    "-c:d", "copy",
-    "-force_key_frames", sourceAlignedKeyframes,
-    "-muxpreload", "0",
-    "-muxdelay", "0",
-    "-f", "hls",
-    "-start_number", "0",
-    "-hls_time", String(segmentSeconds),
-    "-hls_list_size", String(listSize),
-    "-hls_segment_type", "mpegts",
-    "-hls_flags", "independent_segments+program_date_time",
-    "-hls_segment_filename", metadataSegmentFilename,
-    metadataPlaylist
-  ];
-
   const abrOutput = [
     ...renditions.flatMap((_, index) => ["-map", index === nativeTopRenditionIndex && copyNativeTopRung ? "0:v:0" : `[video${index}]`]),
     "-an",
@@ -300,7 +273,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
       ? [...carrierOutput, ...passthroughVideoOutput]
       : isSingleTranscode
         ? [...carrierOutput, ...singleTranscodeOutput]
-        : ["-filter_complex", buildLadderFilter(renditions, copyNativeTopRung ? nativeTopRenditionIndex : null), ...metadataOutput, ...abrOutput])
+        : ["-filter_complex", buildLadderFilter(renditions, copyNativeTopRung ? nativeTopRenditionIndex : null), ...carrierOutput, ...abrOutput])
   ];
 
   log.info("start", {
@@ -408,7 +381,10 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     isAbr: chosen === "xcode-any",
     copyNativeTopRung,
     renditions,
-    videoPlaylistName: chosen === "xcode-any" ? "v0/index.m3u8" : "playlist.m3u8"
+    videoPlaylistName: chosen === "xcode-any" ? "v0/index.m3u8" : "playlist.m3u8",
+    // File clipping reuses this existing source-copy carrier; it adds no second
+    // packaging output or delayed first-export indexing step.
+    clipCarrierPlaylistName: "playlist.m3u8"
   };
 }
 

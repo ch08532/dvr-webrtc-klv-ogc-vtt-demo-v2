@@ -27,8 +27,8 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 - Set `FFMPEG_USE_GPU=0` to force CPU `libx264` fallback.
 
 ### Processing modes
-- **HLS passthrough** is the default: confirmed H.264 video is copied without video encoding; audio is omitted. The browser playlist excludes KLV; a separate copy-only carrier playlist retains KLV for extraction.
-- **HLS compatibility fallback** activates when passthrough input is not H.264 (for example MPEG-2 video): it produces one H.264 playback rendition and retains the original KLV carrier without re-encoding it. Audio is omitted from both outputs.
+- **HLS passthrough** is the default: confirmed H.264 video is copied without video encoding; audio is omitted from browser playback. A separate copy-only carrier playlist retains the original video, audio, and KLV for extraction and clips.
+- **HLS compatibility fallback** activates when passthrough input is not H.264 (for example MPEG-2 video): it produces browser-compatible H.264 playback renditions while retaining the original video, audio, and KLV carrier without re-encoding it.
 - **HLS ABR** creates three renditions: Low (90p), Medium (360p), and High (the source's native resolution). A compatible H.264 source is copied into High; other source codecs are encoded to their native-resolution High rung.
 - **Live WebRTC auto-copy** copies H.264 into RTP when the input probe confirms H.264; it falls back to transcoding for other codecs. File sources are HLS-only.
 
@@ -108,7 +108,7 @@ DVR output will appear under `./recordings/<streamId>/`:
 
 ### Creating a file clip
 
-The DVR **Create video clip** control is available only for an uploaded file source. Drag either edge to preview the HLS start/end positions, then export. The server uses the original uploaded asset, snaps the start to a source keyframe, and copies video, audio, and KLV data streams into a downloadable MPEG-TS clip. There is no re-encode and no fixed maximum duration by default; set `MAX_CLIP_DURATION_SECONDS` to impose one.
+The DVR **Create video clip** control is available only for an uploaded file source. Drag either edge to preview the HLS start/end positions, then export. Export reuses the private source-stream-copy carrier already produced during normal file packaging, concatenates the complete keyframe-aligned segments covering the request, snaps both bounds to decodable source keyframes, and copies video, audio, and KLV data streams into a downloadable MPEG-TS clip. There is no re-encode, delayed first export, or fixed maximum duration by default; set `MAX_CLIP_DURATION_SECONDS` to impose one.
 
 ## Notes
 - The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint. Source frame corners are preferred; when source offsets are missing or all zero, a `computed-flat` estimate uses sensor pose, FOV, range, and a flat-ground approximation. Each map centers on its first valid frame center; use **Center map** to recenter later.

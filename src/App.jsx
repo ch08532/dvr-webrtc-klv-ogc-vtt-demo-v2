@@ -2642,7 +2642,7 @@ function App() {
                            <Group justify="space-between" align="center" mb={4}>
                              <div>
                                <Text size="sm" fw={700}>Create video clip</Text>
-                               <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports snap to source keyframes without re-encoding.</Text>
+                              <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports snap to complete source keyframe segments without re-encoding.</Text>
                              </div>
                              <Badge color={streamRuntime?.klvProbe?.available ? 'teal' : 'gray'} variant="light">
                                {streamRuntime?.klvProbe?.available ? 'KLV preserved' : 'No KLV detected'}
