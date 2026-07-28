@@ -381,10 +381,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     isAbr: chosen === "xcode-any",
     copyNativeTopRung,
     renditions,
-    videoPlaylistName: chosen === "xcode-any" ? "v0/index.m3u8" : "playlist.m3u8",
-    // File clipping reuses this existing source-copy carrier; it adds no second
-    // packaging output or delayed first-export indexing step.
-    clipCarrierPlaylistName: "playlist.m3u8"
+    videoPlaylistName: chosen === "xcode-any" ? "v0/index.m3u8" : "playlist.m3u8"
   };
 }
 

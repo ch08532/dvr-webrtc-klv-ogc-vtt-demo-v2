@@ -48,6 +48,8 @@ function PlaybackControlIcon({ name }) {
   if (name === 'playPause') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14l8-7zM16 6v12M20 6v12" {...stroke} /></svg>;
   if (name === 'forward') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 6 7 6-7 6zM13 6l7 6-7 6z" {...common} /></svg>;
   if (name === 'end') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14" {...stroke} /><path d="m15 6-10 6 10 6z" {...common} /></svg>;
+  if (name === 'clipStart') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 7h8l-3 5 3 5H9z" {...stroke} /></svg>;
+  if (name === 'clipEnd') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14M15 7H7l3 5-3 5h8z" {...stroke} /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h3l1.5-2h5L16 8h3v11H5z" {...stroke} /><circle cx="12" cy="13" r="3" {...stroke} /></svg>;
 }
 
@@ -1220,6 +1222,21 @@ function App() {
     player.currentTime(end);
   };
 
+  const seekHlsToClipMarker = (marker) => {
+    if (!clipWidgetReady) {
+      setStatus('Set a valid clip range before seeking to its markers.');
+      return;
+    }
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus('HLS player is not ready.');
+      return;
+    }
+    const target = marker === 'start' ? clipStartSeconds : clipEndSeconds;
+    const { start, end } = getHlsSeekBounds(player);
+    player.currentTime(clampToBounds(target, start, end));
+  };
+
   const toggleHlsPlayPause = () => {
     const player = getActiveHlsPlayer();
     if (!player) {
@@ -1370,7 +1387,7 @@ function App() {
         throw new Error(result?.error || 'Clip creation failed');
       }
       setClipResult(result.clip);
-      setStatus(`Clip ready: ${result.clip.filename}. Video copied at keyframe boundaries; KLV embedded: ${result.clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
+      setStatus(`Clip ready: ${result.clip.filename}. Video copied directly from the uploaded source near a keyframe boundary; KLV embedded: ${result.clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
       const download = document.createElement('a');
       download.href = result.clip.downloadUrl;
       download.download = result.clip.filename;
@@ -2610,7 +2627,9 @@ function App() {
                         <Group mt="xs" gap="xs" justify="center">
                           <Tooltip label="Play from start" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToStart} aria-label="Play from start"><PlaybackControlIcon name="start" /></ActionIcon></Tooltip>
                           <Tooltip label="Rewind 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(-15)} aria-label="Rewind 15 seconds"><PlaybackControlIcon name="rewind" /></ActionIcon></Tooltip>
+                          {clipSourceIsActive ? <Tooltip label="Seek to clip start marker" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsToClipMarker('start')} disabled={!clipWidgetReady} aria-label="Seek to clip start marker"><PlaybackControlIcon name="clipStart" /></ActionIcon></Tooltip> : null}
                           <Tooltip label="Pause or play" withArrow><ActionIcon variant="light" size="lg" onClick={toggleHlsPlayPause} aria-label="Pause or play"><PlaybackControlIcon name="playPause" /></ActionIcon></Tooltip>
+                          {clipSourceIsActive ? <Tooltip label="Seek to clip end marker" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsToClipMarker('end')} disabled={!clipWidgetReady} aria-label="Seek to clip end marker"><PlaybackControlIcon name="clipEnd" /></ActionIcon></Tooltip> : null}
                           <Tooltip label="Fast-forward 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(15)} aria-label="Fast-forward 15 seconds"><PlaybackControlIcon name="forward" /></ActionIcon></Tooltip>
                           <Tooltip label="Go to end" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToEnd} aria-label="Go to end"><PlaybackControlIcon name="end" /></ActionIcon></Tooltip>
                           <Menu shadow="md" width={152} position="top" withArrow>
@@ -2642,7 +2661,7 @@ function App() {
                            <Group justify="space-between" align="center" mb={4}>
                              <div>
                                <Text size="sm" fw={700}>Create video clip</Text>
-                              <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports snap to complete source keyframe segments without re-encoding.</Text>
+                              <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports stream-copy the uploaded source and may begin at a preceding keyframe.</Text>
                              </div>
                              <Badge color={streamRuntime?.klvProbe?.available ? 'teal' : 'gray'} variant="light">
                                {streamRuntime?.klvProbe?.available ? 'KLV preserved' : 'No KLV detected'}
@@ -2701,10 +2720,10 @@ function App() {
                              <Text size="xs" c="yellow" mt="xs">You can set clip boundaries now. Download becomes available when file packaging completes.</Text>
                            ) : null}
                            <Text size="xs" c="dimmed" mt="xs">
-                             Downloads as MPEG-TS with copied video, audio, and KLV. Start positions snap to source keyframes; live streams cannot be clipped.
+                             Downloads directly from the uploaded source as MPEG-TS with copied video, audio, and KLV. Starts may move to a preceding keyframe; live streams cannot be clipped.
                            </Text>
                            {clipResult ? (
-                             <Text size="xs" c="teal" mt={4}>Ready: {clipResult.filename} · keyframe copied · embedded KLV: {clipResult.klvEmbedded ? 'yes' : 'not present in source'}</Text>
+                             <Text size="xs" c="teal" mt={4}>Ready: {clipResult.filename} · uploaded source copied · embedded KLV: {clipResult.klvEmbedded ? 'yes' : 'not present in source'}</Text>
                            ) : null}
                          </div>
                        ) : (
