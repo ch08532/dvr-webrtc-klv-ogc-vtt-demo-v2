@@ -1084,6 +1084,18 @@ function App() {
     return { start: 0, end: fallbackEnd };
   };
 
+  // Live playlists retain history for DVR, so explicitly choose the live edge
+  // on initial stream playback. File sources remain VOD and start at zero.
+  const seekHlsToLivePosition = (player) => {
+    if (!player || player.isDisposed?.()) return;
+    const { start, end } = getHlsSeekBounds(player);
+    const trackerTime = Number(player.liveTracker?.liveCurrentTime?.());
+    const target = Number.isFinite(trackerTime)
+      ? clampToBounds(trackerTime, start, end)
+      : end;
+    if (Number.isFinite(target)) player.currentTime(target);
+  };
+
   const clampToBounds = (value, start, end) => {
     if (!Number.isFinite(value)) return start;
     if (value < start) return start;
@@ -1563,6 +1575,8 @@ function App() {
         if (streamRuntimeRef.current?.sourceType === 'file') {
           const { start } = getHlsSeekBounds(window.player);
           window.player.currentTime(start);
+        } else {
+          seekHlsToLivePosition(window.player);
         }
         setHlsMediaLoaded(true);
         setDvrStatus('Ready');
