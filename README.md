@@ -7,8 +7,10 @@ A runnable Node.js demo that:
 - records video as HLS MPEG-TS with `EXT-X-PROGRAM-DATE-TIME` (DVR)
 - publishes a three-rung adaptive-bitrate ladder: 90p/100 kbps, 360p/800 kbps, and 1080p/6 Mbps
 - generates a **segmented WebVTT sidecar track** (default 5 seconds/segment, configurable)
+- decodes ST 0601 Mission ID (tag 3) and precision timestamp alongside supported positional telemetry
 - serves HLS master playlist with subtitles group ("KLV")
 - plays Live via WebRTC (mediasoup) and DVR via HLS
+- exports file-only, keyframe-aligned MPEG-TS clips with copied video, audio, and embedded KLV
 - exposes OGC API – Moving Features subset endpoints backed by the same SQLite store
 
 For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
@@ -88,11 +90,11 @@ Click **Start Source**.
 
 ### Ingesting a video file
 
-Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. The browser uploads it to the server's ignored `./videos/` directory before it is packaged. File sources produce the same HLS ladder and segmented WebVTT output, then transition to **ready** when packaging completes. Play them from the DVR (HLS) tab; the live WebRTC tab is intentionally unavailable for file sources.
+Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. The browser uploads it to the server's ignored `./videos/` directory before it is packaged. The UI displays uploaded bytes and percent during this HTTP transfer, then a **Preparing file** stage while the server probes video and KLV streams. File sources produce the same HLS ladder and segmented WebVTT output, then transition to **ready** when packaging completes. Play them from the DVR (HLS) tab; the live WebRTC tab is intentionally unavailable for file sources.
 
 The default upload limit is 10 GB. Override it with `MAX_VIDEO_UPLOAD_MB` when starting the server.
 
-While a file source is packaging, the UI displays its conversion percentage, source media time processed, FFmpeg speed, and estimated remaining time. It then reports `finalizing` while WebVTT files are completed and `ready` when HLS playback is available.
+While a file source is packaging, the UI displays its conversion percentage, source media time processed, FFmpeg speed, and estimated remaining time. It then reports `finalizing` while the remaining carrier segments are decoded and WebVTT is completed, and `ready` when HLS playback is available. The latest valid telemetry remains visible on the DVR map during finalization.
 
 DVR output will appear under `./recordings/<streamId>/`:
 - `master.m3u8`
@@ -102,12 +104,16 @@ DVR output will appear under `./recordings/<streamId>/`:
 - `playlist.m3u8` (private KLV carrier playlist)
 - `subtitles.m3u8` (VTT playlist)
 - `meta_<segNo>.vtt` (segmented metadata)
+- `poster.jpg` (source preview image)
+
+### Creating a file clip
+
+The DVR **Create video clip** control is available only for an uploaded file source. Drag either edge to preview the HLS start/end positions, then export. The server uses the original uploaded asset, snaps the start to a source keyframe, and copies video, audio, and KLV data streams into a downloadable MPEG-TS clip. There is no re-encode and no fixed maximum duration by default; set `MAX_CLIP_DURATION_SECONDS` to impose one.
 
 ## Notes
-- The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show the sensor/platform position, frame-center position, platform heading, and their connecting line when coordinates are present. Each map centers on its first valid platform position; use **Center map** to recenter on the platform later.
-- The map automatically loads an approximately 100 × 100 mile terrain GeoTIFF region around the platform from the public USGS 3DEP elevation service while the platform is within U.S. coverage. The region is reused until the platform crosses into a new terrain area. Terrain elevations must use the same MSL vertical datum as the KLV sensor altitude. The green terrain target and solid green line are shown only when those KLV fields and terrain coverage are available; the red marker remains the original KLV frame center.
-- The amber footprint polygon uses KLV frame-corner coordinates when present. Feeds without corner tags use a terrain-intersected footprint derived from the KLV sensor position, attitude, and horizontal/vertical FOV.
-- The footprint can be only a few metres wide at the platform-centered zoom. Use **Zoom to footprint** to inspect it without changing the default platform-centered view.
+- The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show direct KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint only when KLV frame-corner coordinates are present. Each map centers on its first valid frame center; use **Center map** to recenter later.
+- The Data tabs display all decoded telemetry in the active cue, including `missionId` when ST 0601 tag 3 is present. The KLV `timestampIso` is displayed beneath each map.
+- Terrain correction, external terrain loading, and terrain-derived footprints are not used.
 - Live metadata overlay can be enabled via WS "WS: Live KLV".
 - The ST0601 decoder is partial; extend tags as needed for your feed.
 
@@ -118,3 +124,13 @@ DVR output will appear under `./recordings/<streamId>/`:
 - `maxCueDurSec` (default 0.50)
 
 These parameters affect only the WebVTT sidecar overlay. All decoded KLV is still stored at full rate in SQLite.
+
+## File KLV finalization tuning
+
+Completed file segments are decoded in bounded batches and their SQLite records are inserted transactionally before ordered WebVTT sidecars are published. The defaults are four concurrent decode tasks and batches of sixteen segments. Tune only when profiling a particular machine or storage device:
+
+- `KLV_SEGMENT_DECODE_WORKERS` (default `4`, range `1`–`8`)
+- `KLV_SEGMENT_DECODE_BATCH_SIZE` (default `workers × 4`, range `workers`–`64`)
+- `KLV_FINALIZE_MIN_TIMEOUT_MS` (default `30000`)
+- `KLV_FINALIZE_MS_PER_SEGMENT` (default `500`)
+- `KLV_FINALIZE_MAX_TIMEOUT_MS` (default `7200000`)

@@ -13,6 +13,8 @@ import { fromLonLat } from 'ol/proj.js';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from 'ol/style.js';
 import 'ol/ol.css';
 
+// Renders only geometry carried directly by the active KLV cue; terrain
+// correction and terrain-derived targets/footprints are intentionally absent.
 const normalizeHeading = (value) => {
   const heading = Number(value);
   if (!Number.isFinite(heading)) return null;

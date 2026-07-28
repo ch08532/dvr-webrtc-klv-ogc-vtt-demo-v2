@@ -1,4 +1,4 @@
-/** Child process that aligns parsed KLV with HLS segments and writes WebVTT. */
+/** Child process that batch-decodes KLV carrier segments, stores telemetry, and writes ordered WebVTT. */
 import fs from "node:fs";
 import path from "node:path";
 import { extractKlvFromTsFile, startKlvIngest, stopKlvIngest } from "./klv_ts_parser.js";

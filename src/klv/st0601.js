@@ -1,4 +1,4 @@
-/** Decodes the MISB ST 0601 local-set payload into usable telemetry fields. */
+/** Decodes supported MISB ST 0601 fields, including UTC timestamp and Mission ID. */
 
 /** Reads a BER length field from a local-set buffer. */
 function berReadLength(buf, offset) {

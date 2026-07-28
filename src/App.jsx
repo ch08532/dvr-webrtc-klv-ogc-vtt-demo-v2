@@ -514,6 +514,7 @@ function App() {
     setWebrtcDiag(emptyWebRtcDiag());
   };
 
+  // XMLHttpRequest supplies upload progress; fetch does not expose it in browsers.
   const uploadVideoFile = (file) => new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open('POST', '/uploads/video');
@@ -2328,23 +2329,6 @@ function App() {
             </Paper>
 
             <Paper shadow="xs" p="md">
-              <Text size="lg" fw={500}>System Utilization</Text>
-              <Group mt="xs" grow align="flex-start">
-                <Stack gap={2}>
-                  <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
-                  <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
-                </Stack>
-                <Stack gap={2}>
-                  {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (
-                    <Text key={gpu.name} size="sm">
-                      GPU: {gpu.name} · {gpu.utilizationPercent ?? 'n/a'}% · {gpu.memoryUsedMiB ?? 'n/a'} / {gpu.memoryTotalMiB ?? 'n/a'} MiB{gpu.temperatureC != null ? ' · ' + gpu.temperatureC + '°C' : ''}
-                    </Text>
-                  )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
-                </Stack>
-              </Group>
-            </Paper>
-
-            <Paper shadow="xs" p="md">
               <Text size="lg" fw={500}>Playback</Text>
               <Tabs value={activeTab} onChange={setActiveTab}>
                 <Tabs.List>
@@ -2520,7 +2504,7 @@ function App() {
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
                           />
                           <Text size="xs" c="dimmed" mt="xs">
-                            timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
+                            Mission timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
                           </Text>
                         </Tabs.Panel>
                       </Tabs>
@@ -2585,7 +2569,7 @@ function App() {
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
                           />
                           <Text size="xs" c="dimmed" mt="xs">
-                            timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
+                            Mission timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
                           </Text>
                         </Tabs.Panel>
                       </Tabs>
@@ -2593,6 +2577,23 @@ function App() {
                   </Group>
                 </Tabs.Panel>
               </Tabs>
+            </Paper>
+
+            <Paper shadow="xs" p="md">
+              <Text size="lg" fw={500}>System Utilization</Text>
+              <Group mt="xs" grow align="flex-start">
+                <Stack gap={2}>
+                  <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
+                  <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
+                </Stack>
+                <Stack gap={2}>
+                  {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (
+                    <Text key={gpu.name} size="sm">
+                      GPU: {gpu.name} · {gpu.utilizationPercent ?? 'n/a'}% · {gpu.memoryUsedMiB ?? 'n/a'} / {gpu.memoryTotalMiB ?? 'n/a'} MiB{gpu.temperatureC != null ? ' · ' + gpu.temperatureC + '°C' : ''}
+                    </Text>
+                  )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
+                </Stack>
+              </Group>
             </Paper>
           </Stack>
         </AppShell.Main>
