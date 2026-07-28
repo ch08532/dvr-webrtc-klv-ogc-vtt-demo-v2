@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress } from '@mantine/core';
+import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress, Tooltip } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
@@ -34,6 +34,18 @@ function emptyWebRtcDiag() {
     browser: null,
     error: null
   };
+}
+
+/** Compact SVG icons for video transport and capture actions. */
+function PlaybackControlIcon({ name }) {
+  const common = { fill: 'currentColor' };
+  const stroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  if (name === 'start') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14" {...stroke} /><path d="m9 6 10 6-10 6z" {...common} /></svg>;
+  if (name === 'rewind') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 6-7 6 7 6zM20 6l-7 6 7 6z" {...common} /></svg>;
+  if (name === 'playPause') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14l8-7zM16 6v12M20 6v12" {...stroke} /></svg>;
+  if (name === 'forward') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 6 7 6-7 6zM13 6l7 6-7 6z" {...common} /></svg>;
+  if (name === 'end') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14" {...stroke} /><path d="m15 6-10 6 10 6z" {...common} /></svg>;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h3l1.5-2h5L16 8h3v11H5z" {...stroke} /><circle cx="12" cy="13" r="3" {...stroke} /></svg>;
 }
 
 function App() {
@@ -1215,6 +1227,47 @@ function App() {
       player.pause?.();
     }
   };
+
+  /** Captures the currently decoded video frame and downloads it as a PNG. */
+  const downloadVideoSnapshot = (video, playbackKind) => {
+    const width = Number(video?.videoWidth);
+    const height = Number(video?.videoHeight);
+    if (!video || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+      setStatus(`${playbackKind} snapshot is unavailable until video frames are flowing.`);
+      return;
+    }
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('browser did not provide a canvas context');
+      context.drawImage(video, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          setStatus(`${playbackKind} snapshot could not be encoded.`);
+          return;
+        }
+        const safeStreamId = String(streamIdRef.current || 'stream').replace(/[^a-z0-9_-]+/gi, '_');
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const href = URL.createObjectURL(blob);
+        const download = document.createElement('a');
+        download.href = href;
+        download.download = `${safeStreamId}-${playbackKind.toLowerCase()}-${timestamp}.png`;
+        document.body.appendChild(download);
+        download.click();
+        download.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 1000);
+        setStatus(`${playbackKind} snapshot downloaded.`);
+      }, 'image/png');
+    } catch (error) {
+      setStatus(`${playbackKind} snapshot failed: ${String(error?.message || error)}`);
+    }
+  };
+
+  const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS');
+  const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC');
 
   const previewClipTime = (seconds) => {
     const player = getActiveHlsPlayer();
@@ -2535,6 +2588,16 @@ function App() {
                            ? `player time: ${formatPlayerTime(dvrDiag.currentTimeSec)} / ${formatPlayerTime(dvrDiag.durationSec)}`
                            : `Playback delay: ${formatPlayerTime(liveBehindSeconds)} behind HLS edge · DVR window: ${formatPlayerTime(liveDvrWindowSeconds)}`}
                        </Text>
+                      {activeTab === 'dvr' && hlsMediaLoaded ? (
+                        <Group mt="xs" gap="xs" justify="center">
+                          <Tooltip label="Play from start" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToStart} aria-label="Play from start"><PlaybackControlIcon name="start" /></ActionIcon></Tooltip>
+                          <Tooltip label="Rewind 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(-15)} aria-label="Rewind 15 seconds"><PlaybackControlIcon name="rewind" /></ActionIcon></Tooltip>
+                          <Tooltip label="Pause or play" withArrow><ActionIcon variant="light" size="lg" onClick={toggleHlsPlayPause} aria-label="Pause or play"><PlaybackControlIcon name="playPause" /></ActionIcon></Tooltip>
+                          <Tooltip label="Fast-forward 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(15)} aria-label="Fast-forward 15 seconds"><PlaybackControlIcon name="forward" /></ActionIcon></Tooltip>
+                          <Tooltip label="Go to end" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToEnd} aria-label="Go to end"><PlaybackControlIcon name="end" /></ActionIcon></Tooltip>
+                          <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>
+                        </Group>
+                      ) : null}
                        {clipSourceIsActive ? (
                          <div className="clip-widget" aria-label="Video clip selection">
                            <Group justify="space-between" align="center" mb={4}>
@@ -2608,15 +2671,6 @@ function App() {
                        ) : (
                          <Text size="xs" c="dimmed" mt="sm">Clip creation is available only for uploaded, file-backed video. Live streams remain view-only.</Text>
                        )}
-                       {activeTab === 'dvr' && hlsMediaLoaded ? (
-                        <Group mt="xs">
-                          <Button variant="light" onClick={seekHlsToStart}>Play From Start</Button>
-                          <Button variant="light" onClick={() => seekHlsBySeconds(-15)}>Rewind 15s</Button>
-                          <Button variant="light" onClick={toggleHlsPlayPause}>Pause / Play</Button>
-                          <Button variant="light" onClick={() => seekHlsBySeconds(15)}>FF 15s</Button>
-                          <Button variant="light" onClick={seekHlsToEnd}>Go To End</Button>
-                        </Group>
-                      ) : null}
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
                       <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
@@ -2682,6 +2736,13 @@ function App() {
                         browser freezes: {webRtcBrowserStats?.freezeCount ?? 'n/a'}{webRtcBrowserStats?.freezeSeconds != null ? ` (${webRtcBrowserStats.freezeSeconds}s total)` : ''}
                       </Text>
                       <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
+                      <Group mt="xs" justify="center">
+                        <Tooltip label="Download snapshot" withArrow>
+                          <ActionIcon variant="light" size="lg" onClick={downloadWebRtcSnapshot} aria-label="Download WebRTC snapshot">
+                            <PlaybackControlIcon name="snapshot" />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
                       <Text size="sm" fw={600}>Live KLV Telemetry</Text>
