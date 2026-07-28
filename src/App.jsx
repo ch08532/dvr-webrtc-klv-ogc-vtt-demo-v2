@@ -83,6 +83,8 @@ function App() {
     currentSubtitleUri: null,
     currentTimeSec: null,
     durationSec: null,
+    seekStartSec: null,
+    seekEndSec: null,
     decodedVideoWidth: null,
     decodedVideoHeight: null,
     error: null
@@ -287,6 +289,16 @@ function App() {
     ? sourceDurationSeconds
     : null;
   const clipDurationSeconds = Math.max(0, clipEndSeconds - clipStartSeconds);
+  const liveDvrWindowSeconds = !currentSourceIsFile
+    && Number.isFinite(dvrDiag.seekStartSec)
+    && Number.isFinite(dvrDiag.seekEndSec)
+    ? Math.max(0, Number(dvrDiag.seekEndSec) - Number(dvrDiag.seekStartSec))
+    : null;
+  const liveBehindSeconds = !currentSourceIsFile
+    && Number.isFinite(dvrDiag.currentTimeSec)
+    && Number.isFinite(dvrDiag.seekEndSec)
+    ? Math.max(0, Number(dvrDiag.seekEndSec) - Number(dvrDiag.currentTimeSec))
+    : null;
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -1314,7 +1326,9 @@ function App() {
         currentSegmentUri: null,
         currentSubtitleUri: null,
         currentTimeSec: null,
-        durationSec: null
+        durationSec: null,
+        seekStartSec: null,
+        seekEndSec: null
       };
     }
 
@@ -1325,6 +1339,8 @@ function App() {
     let currentSubtitleUri = null;
     let currentTimeSec = null;
     let durationSec = null;
+    let seekStartSec = null;
+    let seekEndSec = null;
     let decodedVideoWidth = null;
     let decodedVideoHeight = null;
     try {
@@ -1334,6 +1350,8 @@ function App() {
       const seekBoundsNow = getHlsSeekBounds(p);
       const seekStartNow = Number(seekBoundsNow?.start);
       const seekEndNow = Number(seekBoundsNow?.end);
+      if (Number.isFinite(seekStartNow)) seekStartSec = seekStartNow;
+      if (Number.isFinite(seekEndNow)) seekEndSec = seekEndNow;
       const seekWindowDur = Number.isFinite(seekStartNow) && Number.isFinite(seekEndNow)
         ? Math.max(0, seekEndNow - seekStartNow)
         : null;
@@ -1402,6 +1420,8 @@ function App() {
       currentSubtitleUri,
       currentTimeSec,
       durationSec,
+      seekStartSec,
+      seekEndSec,
       decodedVideoWidth,
       decodedVideoHeight
     };
@@ -1419,6 +1439,8 @@ function App() {
       currentSubtitleUri: info.currentSubtitleUri,
       currentTimeSec: info.currentTimeSec,
       durationSec: info.durationSec,
+      seekStartSec: info.seekStartSec,
+      seekEndSec: info.seekEndSec,
       decodedVideoWidth: info.decodedVideoWidth,
       decodedVideoHeight: info.decodedVideoHeight
     }));
@@ -2398,7 +2420,9 @@ function App() {
                       ) : null}
                       <div ref={dvrVideoHostRef} style={{ width: '100%', minHeight: '180px' }} />
                        <Text size="xs" c="dimmed" mt="xs">
-                         player time: {formatPlayerTime(dvrDiag.currentTimeSec)} / {formatPlayerTime(dvrDiag.durationSec)}
+                         {currentSourceIsFile
+                           ? `player time: ${formatPlayerTime(dvrDiag.currentTimeSec)} / ${formatPlayerTime(dvrDiag.durationSec)}`
+                           : `Playback delay: ${formatPlayerTime(liveBehindSeconds)} behind HLS edge · DVR window: ${formatPlayerTime(liveDvrWindowSeconds)}`}
                        </Text>
                        {clipSourceIsActive ? (
                          <div className="clip-widget" aria-label="Video clip selection">

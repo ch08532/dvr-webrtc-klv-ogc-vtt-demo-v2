@@ -158,7 +158,7 @@ GET /streams/:streamId/klv?fromMs=<epoch-ms>&toMs=<epoch-ms>
 
 ### 7.1 DVR
 
-The DVR tab uses Video.js/HLS. A file-backed playlist is explicitly positioned at its beginning after metadata loads so it does not inherit a live-DVR end position. A live stream is explicitly positioned at the Video.js live-tracker time (or the seekable-range end when unavailable) so its HLS view starts at the live edge despite retaining DVR history. The current video time, selected rendition, segment, subtitle segment, and playback diagnostics are visible in the UI.
+The DVR tab uses Video.js/HLS. A file-backed playlist is explicitly positioned at its beginning after metadata loads so it does not inherit a live-DVR end position. A stream-backed HLS playlist is explicitly positioned at the Video.js live-tracker time (or the seekable-range end when unavailable) so HLS playback starts at its newest available point despite retaining DVR history. File sources show absolute `player time: current / total`; stream HLS shows `Playback delay: <time> behind HLS edge · DVR window: <duration>` from the seekable range. This avoids conflating HLS latency with the separate low-latency WebRTC **Live** path. The selected rendition, segment, subtitle segment, and playback diagnostics are visible in the UI.
 
 The Data tab renders fields from the active WebVTT cue, including `missionId` when present. The Map tab shows `timestampIso` beneath the map and preserves the latest valid cue during `finalizing` and `ready` file states.
 
