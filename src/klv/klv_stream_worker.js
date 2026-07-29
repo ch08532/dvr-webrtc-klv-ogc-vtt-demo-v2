@@ -12,6 +12,7 @@ const SEGMENT_DECODE_BATCH_SIZE = Math.max(
   SEGMENT_DECODE_WORKERS,
   Math.min(64, Number(process.env.KLV_SEGMENT_DECODE_BATCH_SIZE || (SEGMENT_DECODE_WORKERS * 4)))
 );
+const KLV_WRITE_SQLITE = !/^(?:0|false|no|off)$/i.test(String(process.env.KLV_WRITE_SQLITE || "1").trim());
 
 let runtime = null;
 
@@ -466,13 +467,22 @@ async function processPendingSegments() {
       const decodedBatch = await decodeSegmentBatch(current, batch);
       if (decodedBatch.some((item) => !item)) break;
 
-      // Build timing state in sequence order, then persist every decoded item
-      // as one transaction before publishing the corresponding VTT sidecars.
+      // Build timing state in sequence order. SQLite storage is normally
+      // committed before publishing VTT sidecars, but can be disabled for
+      // profiling without affecting KLV decode or subtitle generation.
       const preparedBatch = decodedBatch.map((item) => prepareSegmentEntry(current, item));
       const decodedForStorage = preparedBatch.flatMap((item) => item.records.map((record) => record.decoded));
-      await current.store.addMany(current.streamId, decodedForStorage, {
-        isEphemeral: current.sourceType !== "file"
-      });
+      if (current.writeSqlite) {
+        await current.store.addMany(current.streamId, decodedForStorage, {
+          isEphemeral: current.sourceType !== "file"
+        });
+      } else {
+        log.debug("sqlite_write_skipped", {
+          requestId: current.requestId,
+          streamId: current.streamId,
+          decodedCount: decodedForStorage.length
+        });
+      }
 
       for (const prepared of preparedBatch) {
         writePreparedSegmentVtt(current, prepared);
@@ -538,6 +548,7 @@ async function start(message) {
     maxCuesPerSecond: Number(maxCuesPerSecond) || 10,
     minCueDurSec: Number(minCueDurSec) || 0.10,
     maxCueDurSec: Number(maxCueDurSec) || 0.50,
+    writeSqlite: KLV_WRITE_SQLITE,
     store,
     segmentPollTimer,
     processing: false,
@@ -567,6 +578,7 @@ async function start(message) {
     }
   });
 
+  log.info("start", { requestId, streamId, sourceType: runtime.sourceType, writeSqlite: runtime.writeSqlite });
   await processPendingSegments();
   send({ type: "started", streamId });
 }

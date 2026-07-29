@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Switch, Collapse, Select, FileInput, Progress, Tooltip, Menu } from '@mantine/core';
+import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
@@ -27,6 +27,7 @@ function hlsQualityOptionsFor(renditions) {
 
 const HLS_PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 const formatHlsPlaybackRate = (rate) => `${rate}×`;
+const RESUMABLE_UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 
 function emptyWebRtcDiag() {
   return {
@@ -64,7 +65,6 @@ function App() {
   const [maxCuesPerSecond, setMaxCuesPerSecond] = useState(10);
   const [minCueDurSec, setMinCueDurSec] = useState(0.10);
   const [maxCueDurSec, setMaxCueDurSec] = useState(0.50);
-  const [purgeBeforeStart, setPurgeBeforeStart] = useState(true);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [inputProbe, setInputProbe] = useState({
     phase: 'idle',
@@ -602,33 +602,147 @@ function App() {
     setWebrtcDiag(emptyWebRtcDiag());
   };
 
-  // XMLHttpRequest supplies upload progress; fetch does not expose it in browsers.
-  const uploadVideoFile = (file) => new Promise((resolve, reject) => {
+  const uploadResumeStorageKey = (file, targetStreamId) => `midas-resumable-upload:${encodeURIComponent(`${targetStreamId}:${file.name}:${file.size}:${file.lastModified}`)}`;
+
+  const readSavedUpload = (file, targetStreamId) => {
+    try {
+      const raw = window.localStorage.getItem(uploadResumeStorageKey(file, targetStreamId));
+      const saved = raw ? JSON.parse(raw) : null;
+      return saved?.uploadUrl && saved?.uploadId ? saved : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const saveUpload = (file, targetStreamId, session) => {
+    try { window.localStorage.setItem(uploadResumeStorageKey(file, targetStreamId), JSON.stringify(session)); } catch {}
+  };
+
+  const clearSavedUpload = (file, targetStreamId) => {
+    try { window.localStorage.removeItem(uploadResumeStorageKey(file, targetStreamId)); } catch {}
+  };
+
+  const resumableJsonRequest = async (url, options) => {
+    const response = await fetch(url, options);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = new Error(payload?.error || `Upload request failed (HTTP ${response.status})`);
+      error.status = response.status;
+      error.uploadOffset = Number(response.headers.get('Upload-Offset'));
+      throw error;
+    }
+    markServerOnline();
+    return payload || {};
+  };
+
+  const getResumableUploadOffset = async (uploadUrl) => {
+    const response = await fetch(uploadUrl, { method: 'HEAD' });
+    if (!response.ok) throw new Error(`Saved upload is unavailable (HTTP ${response.status})`);
+    markServerOnline();
+    const offset = Number(response.headers.get('Upload-Offset'));
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Server returned an invalid upload offset.');
+    return offset;
+  };
+
+  // XMLHttpRequest supplies progress events for each resumable upload chunk.
+  const uploadVideoChunk = (uploadUrl, file, offset, chunk) => new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open('POST', '/uploads/video');
-    request.setRequestHeader('content-type', file.type || 'application/octet-stream');
-    request.setRequestHeader('x-upload-filename', encodeURIComponent(file.name));
+    request.open('PATCH', uploadUrl);
+    request.setRequestHeader('content-type', 'application/offset+octet-stream');
+    request.setRequestHeader('Upload-Offset', String(offset));
     request.responseType = 'text';
     request.upload.onprogress = (event) => {
       setFileStartProgress({
         phase: 'uploading',
-        loadedBytes: event.loaded,
-        totalBytes: event.lengthComputable ? event.total : file.size
+        loadedBytes: Math.min(file.size, offset + event.loaded),
+        totalBytes: file.size
       });
     };
-    request.onerror = () => reject(new Error('Video upload failed (network error)'));
+    request.onerror = () => reject(new Error('Video upload chunk failed (network error)'));
     request.onload = () => {
       let result = null;
       try { result = JSON.parse(request.responseText || '{}'); } catch {}
-      if (request.status >= 200 && request.status < 300) {
+      const nextOffset = Number(request.getResponseHeader('Upload-Offset'));
+      if (request.status >= 200 && request.status < 300 && Number.isSafeInteger(nextOffset)) {
         markServerOnline();
-        resolve(result || {});
+        resolve({ offset: nextOffset });
         return;
       }
-      reject(new Error(result?.error || `Video upload failed (HTTP ${request.status})`));
+      const error = new Error(result?.error || `Video upload chunk failed (HTTP ${request.status})`);
+      error.status = request.status;
+      error.uploadOffset = nextOffset;
+      reject(error);
     };
-    request.send(file);
+    request.send(chunk);
   });
+
+  const uploadVideoFile = async (file, targetStreamId) => {
+    let session = readSavedUpload(file, targetStreamId);
+    let offset = 0;
+
+    try {
+      if (session) {
+        try {
+          offset = await getResumableUploadOffset(session.uploadUrl);
+          if (offset > file.size) throw new Error('Saved upload offset exceeds the selected file size.');
+        } catch {
+          clearSavedUpload(file, targetStreamId);
+          session = null;
+        }
+      }
+
+      if (!session) {
+        const created = await resumableJsonRequest('/uploads/video/resumable', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ streamId: targetStreamId, filename: file.name, sizeBytes: file.size })
+        });
+        if (!created?.ok || !created.uploadId || !created.uploadUrl) {
+          throw new Error(created?.error || 'Could not create a resumable upload.');
+        }
+        session = { uploadId: created.uploadId, uploadUrl: created.uploadUrl };
+        offset = Number(created.offset || 0);
+        saveUpload(file, targetStreamId, session);
+      }
+
+      setFileStartProgress({ phase: 'uploading', loadedBytes: offset, totalBytes: file.size });
+      let retries = 0;
+      while (offset < file.size) {
+        const chunk = file.slice(offset, Math.min(file.size, offset + RESUMABLE_UPLOAD_CHUNK_BYTES));
+        try {
+          const result = await uploadVideoChunk(session.uploadUrl, file, offset, chunk);
+          if (result.offset <= offset || result.offset > file.size) {
+            throw new Error('Server returned an invalid next upload offset.');
+          }
+          offset = result.offset;
+          retries = 0;
+          saveUpload(file, targetStreamId, session);
+          setFileStartProgress({ phase: 'uploading', loadedBytes: offset, totalBytes: file.size });
+        } catch (error) {
+          const serverOffset = Number(error?.uploadOffset);
+          if (Number.isSafeInteger(serverOffset) && serverOffset > offset && serverOffset <= file.size) {
+            offset = serverOffset;
+            retries = 0;
+            saveUpload(file, targetStreamId, session);
+            continue;
+          }
+          retries += 1;
+          if (retries > 3) throw error;
+          await new Promise((resolve) => setTimeout(resolve, retries * 750));
+          offset = await getResumableUploadOffset(session.uploadUrl);
+          if (offset > file.size) throw new Error('Server returned an invalid upload offset.');
+          saveUpload(file, targetStreamId, session);
+        }
+      }
+
+      const completed = await resumableJsonRequest(`${session.uploadUrl}/complete`, { method: 'POST' });
+      if (!completed?.ok || !completed.assetId) throw new Error(completed?.error || 'Video upload could not be completed.');
+      clearSavedUpload(file, targetStreamId);
+      return completed;
+    } catch (error) {
+      throw error;
+    }
+  };
 
   const setLiveNotConnected = () => {
     clearWebRtcDiag();
@@ -824,6 +938,8 @@ function App() {
     setHlsQualityControlAvailable(false);
     setStreamRuntime({ streamId, sourceType, state: 'starting', running: false, lastError: null });
     try {
+      setStatus('Clearing previous recording artifacts...');
+      await api(`/sources/${encodeURIComponent(streamId)}/reset`, { method: 'POST' });
       let assetId = null;
       if (sourceType === 'file') {
         clipRangeStreamRef.current = null;
@@ -832,7 +948,7 @@ function App() {
         setClipResult(null);
         setFileStartProgress({ phase: 'uploading', loadedBytes: 0, totalBytes: videoFile.size });
         setStatus(`Uploading ${videoFile.name}...`);
-        const uploadResult = await uploadVideoFile(videoFile);
+        const uploadResult = await uploadVideoFile(videoFile, streamId);
         if (!uploadResult?.ok || !uploadResult.assetId) {
           throw new Error(uploadResult?.error || 'Video upload failed');
         }
@@ -856,8 +972,7 @@ function App() {
           vttSegmentSeconds: hlsSegmentSeconds,
           maxCuesPerSecond,
           minCueDurSec,
-          maxCueDurSec,
-          purgeBeforeStart
+          maxCueDurSec
         })
       });
       setFileStartProgress(null);
@@ -2475,12 +2590,6 @@ function App() {
                   <NumberInput label="Max Cue Dur Sec" value={maxCueDurSec} onChange={setMaxCueDurSec} step={0.01} precision={2} />
                 </Group>
               </Collapse>
-              <Switch
-                mt="sm"
-                label="Purge existing recordings and KLV data before start"
-                checked={purgeBeforeStart}
-                onChange={(event) => setPurgeBeforeStart(event.currentTarget.checked)}
-              />
               <Group mt="md">
                 <Button onClick={startSource} disabled={!canStartSource} loading={startRequestInFlight}>Start Source</Button>
                 <Button onClick={stopSource} color="red" disabled={!canStopSource}>Stop Source</Button>

@@ -38,7 +38,8 @@ const log = createServiceLogger("server");
 
 const RECORD_ROOT = path.resolve("./recordings");
 const DB_DIR = path.resolve("./db");
-const VIDEO_ROOT = path.resolve("./videos");
+const SOURCE_ASSET_DIRNAME = "source";
+const SOURCE_UPLOAD_DIRNAME = ".uploads";
 const MAX_UPLOAD_BYTES = Math.max(1, Number(process.env.MAX_VIDEO_UPLOAD_MB || 10_240)) * 1024 * 1024;
 const VIDEO_UPLOAD_EXTENSIONS = new Set([".ts", ".m2ts", ".mp4", ".mov", ".mkv"]);
 const CLIP_MIN_DURATION_SECONDS = 0.25;
@@ -54,7 +55,8 @@ const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
-fs.mkdirSync(VIDEO_ROOT, { recursive: true });
+
+const activeResumableUploads = new Set();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -177,16 +179,83 @@ function resolveWebRtcEncodeMode(webRtcMode, probe) {
     : "xcode-any";
 }
 
+/** Validates a stream ID and resolves its server-owned recording directory. */
+function resolveStreamRecordingDir(streamId) {
+  if (typeof streamId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(streamId)) {
+    throw new Error("stream ID must contain only letters, numbers, hyphens, or underscores");
+  }
+  const outDir = path.resolve(RECORD_ROOT, streamId);
+  if (!outDir.startsWith(`${RECORD_ROOT}${path.sep}`)) throw new Error("invalid stream recording path");
+  return outDir;
+}
+
+/** Resolves the directory holding one stream's authoritative uploaded assets. */
+function resolveSourceAssetDir(streamId) {
+  const outDir = resolveStreamRecordingDir(streamId);
+  const sourceDir = path.resolve(outDir, SOURCE_ASSET_DIRNAME);
+  if (!sourceDir.startsWith(`${outDir}${path.sep}`)) throw new Error("invalid source asset path");
+  return sourceDir;
+}
+
 /** Validates and resolves a server-owned uploaded video asset path. */
-function resolveUploadedVideo(assetId) {
+function resolveUploadedVideo(streamId, assetId) {
   if (typeof assetId !== "string" || !/^[a-f0-9-]{36}\.(?:ts|m2ts|mp4|mov|mkv)$/i.test(assetId)) {
     throw new Error("invalid uploaded video asset ID");
   }
-  const inputUrl = path.resolve(VIDEO_ROOT, assetId);
-  if (!inputUrl.startsWith(`${VIDEO_ROOT}${path.sep}`) || !fs.existsSync(inputUrl)) {
+  const sourceDir = resolveSourceAssetDir(streamId);
+  const inputUrl = path.resolve(sourceDir, assetId);
+  if (!inputUrl.startsWith(`${sourceDir}${path.sep}`) || !fs.existsSync(inputUrl)) {
     throw new Error("uploaded video file not found");
   }
   return inputUrl;
+}
+
+/** Validates a resumable-upload session ID and resolves its server-owned files. */
+function resumableUploadPaths(streamId, uploadId) {
+  if (typeof uploadId !== "string" || !/^[a-f0-9-]{36}$/i.test(uploadId)) {
+    throw new Error("invalid resumable upload ID");
+  }
+  const sourceDir = resolveSourceAssetDir(streamId);
+  const uploadDir = path.resolve(sourceDir, SOURCE_UPLOAD_DIRNAME);
+  const partPath = path.resolve(uploadDir, `${uploadId}.part`);
+  const metaPath = path.resolve(uploadDir, `${uploadId}.json`);
+  if (!partPath.startsWith(`${uploadDir}${path.sep}`) || !metaPath.startsWith(`${uploadDir}${path.sep}`)) {
+    throw new Error("invalid resumable upload path");
+  }
+  return { sourceDir, uploadDir, partPath, metaPath };
+}
+
+/** Loads one persisted resumable-upload session and its current byte offset. */
+async function loadResumableUpload(streamId, uploadId) {
+  const { sourceDir, uploadDir, partPath, metaPath } = resumableUploadPaths(streamId, uploadId);
+  let session;
+  try {
+    session = JSON.parse(await fs.promises.readFile(metaPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error("resumable upload was not found");
+    throw new Error(`resumable upload metadata is invalid: ${String(error?.message || error)}`);
+  }
+  if (session?.uploadId !== uploadId
+    || session?.streamId !== streamId
+    || !Number.isSafeInteger(session.sizeBytes)
+    || session.sizeBytes <= 0
+    || session.sizeBytes > MAX_UPLOAD_BYTES
+    || typeof session.assetId !== "string"
+    || !/^[a-f0-9-]{36}\.(?:ts|m2ts|mp4|mov|mkv)$/i.test(session.assetId)) {
+    throw new Error("resumable upload metadata is invalid");
+  }
+  const stat = await fs.promises.stat(partPath).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+  const offset = stat?.isFile() ? stat.size : 0;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > session.sizeBytes) {
+    throw new Error("resumable upload has an invalid byte offset");
+  }
+  return { session, sourceDir, uploadDir, partPath, metaPath, offset };
+}
+
+/** Applies the standard resumable-upload offset response header. */
+function sendUploadOffset(res, offset, status = 204) {
+  res.set("Upload-Offset", String(offset));
+  return res.status(status).end();
 }
 
 /** Parses an ffprobe frame-rate fraction into frames per second. */
@@ -541,15 +610,34 @@ function currentSourceState(streamId) {
   return "stopped";
 }
 
-/** Stops a source and deletes its generated media, KLV, and database artifacts. */
+/** Deletes generated artifacts while preserving authoritative uploaded source files. */
 async function purgeSourceArtifacts(streamId) {
-  const outDir = path.join(RECORD_ROOT, streamId);
+  const outDir = resolveStreamRecordingDir(streamId);
+  const sourceDir = resolveSourceAssetDir(streamId);
   const sdpFile = path.join(DB_DIR, `${streamId}.sdp`);
 
-  try { await fs.promises.rm(outDir, { recursive: true, force: true }); } catch {}
   await fs.promises.mkdir(outDir, { recursive: true });
+  const entries = await fs.promises.readdir(outDir, { withFileTypes: true }).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  await Promise.all(entries
+    .filter((entry) => entry.name !== SOURCE_ASSET_DIRNAME)
+    .map((entry) => fs.promises.rm(path.join(outDir, entry.name), { recursive: true, force: true })));
+  await fs.promises.mkdir(sourceDir, { recursive: true });
   try { await fs.promises.rm(sdpFile, { force: true }); } catch {}
 
+  const deletedEvents = await store.purgeStream(streamId);
+  return { outDir, sdpFile, deletedEvents };
+}
+
+/** Clears one stream completely before a new Start Source workflow begins. */
+async function resetSourceArtifacts(streamId) {
+  const outDir = resolveStreamRecordingDir(streamId);
+  const sdpFile = path.join(DB_DIR, `${streamId}.sdp`);
+
+  await fs.promises.rm(outDir, { recursive: true, force: true });
+  await fs.promises.rm(sdpFile, { force: true });
   const deletedEvents = await store.purgeStream(streamId);
   return { outDir, sdpFile, deletedEvents };
 }
@@ -752,6 +840,11 @@ wss.on("connection", (ws) => {
 
 // ---------- Static UI + HLS ----------
 app.use("/", express.static(path.resolve("./public"), { setHeaders(res) { res.setHeader("Cache-Control", "no-cache"); } }));
+// Authoritative uploads live beside generated HLS artifacts, but must remain
+// private: they are accessed only by the file-source, clip, and snapshot APIs.
+app.use("/hls/:streamId/source", (_req, res) => {
+  res.status(404).type("text/plain").send("source asset is not publicly served");
+});
 app.use("/hls", express.static(RECORD_ROOT, {
   setHeaders(res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -767,7 +860,177 @@ app.use("/hls", (_req, res) => {
 registerOgcMovingFeaturesRoutes(app, { sources, store });
 
 // ---------- API: input probe ----------
+// Resumable uploads are persisted below each stream's source/ directory so the
+// browser can continue a large upload after a network interruption or reload.
+app.post("/uploads/video/resumable", async (req, res) => {
+  const streamId = String(req.body?.streamId || "").trim();
+  const uploadName = String(req.body?.filename || "").trim();
+  const extension = path.extname(uploadName).toLowerCase();
+  const sizeBytes = Number(req.body?.sizeBytes);
+  if (!VIDEO_UPLOAD_EXTENSIONS.has(extension)) {
+    return res.status(400).json({ ok: false, error: "supported video extensions: .ts, .m2ts, .mp4, .mov, .mkv" });
+  }
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
+    return res.status(413).json({ ok: false, error: `video must be between 1 byte and ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB` });
+  }
+
+  const uploadId = randomUUID();
+  const assetId = `${randomUUID()}${extension}`;
+  let paths;
+  try {
+    paths = resumableUploadPaths(streamId, uploadId);
+    await fs.promises.mkdir(paths.uploadDir, { recursive: true });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+  const session = {
+    uploadId,
+    streamId,
+    assetId,
+    uploadName: path.basename(uploadName),
+    sizeBytes,
+    createdAt: new Date().toISOString()
+  };
+  try {
+    await fs.promises.writeFile(paths.metaPath, JSON.stringify(session), { encoding: "utf8", flag: "wx" });
+    log.info("resumable_upload_created", { requestId: req.requestId, streamId, uploadId, assetId, sizeBytes });
+    return res.status(201).json({
+      ok: true,
+      uploadId,
+      offset: 0,
+      uploadUrl: `/uploads/video/resumable/${encodeURIComponent(streamId)}/${uploadId}`
+    });
+  } catch (error) {
+    log.warn("resumable_upload_create_error", { requestId: req.requestId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+// The browser calls this first on every Start Source action. File uploads then
+// land in a fresh source/ directory; live sources proceed directly to startup.
+app.post("/sources/:streamId/reset", async (req, res) => {
+  const streamId = req.params.streamId;
+  const state = currentSourceState(streamId);
+  if (sources.has(streamId) || ["starting", "running", "degraded", "stopping", "finalizing", "ready"].includes(state)) {
+    return res.status(409).json({
+      ok: false,
+      error: `source ${streamId} is currently ${state}; stop it before starting again`,
+      state: getSourceRuntime(streamId)
+    });
+  }
+  try {
+    const reset = await resetSourceArtifacts(streamId);
+    log.info("source_reset_complete", { streamId, deletedEvents: reset.deletedEvents, outDir: reset.outDir });
+    return res.json({ ok: true, deletedEvents: reset.deletedEvents });
+  } catch (error) {
+    log.warn("source_reset_error", { streamId, error: serializeError(error) });
+    return res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.head("/uploads/video/resumable/:streamId/:uploadId", async (req, res) => {
+  try {
+    const { offset } = await loadResumableUpload(req.params.streamId, req.params.uploadId);
+    return sendUploadOffset(res, offset);
+  } catch (error) {
+    return res.status(404).end();
+  }
+});
+
+app.patch("/uploads/video/resumable/:streamId/:uploadId", async (req, res) => {
+  const uploadId = req.params.uploadId;
+  let loaded;
+  try {
+    loaded = await loadResumableUpload(req.params.streamId, uploadId);
+  } catch (error) {
+    return res.status(404).json({ ok: false, error: String(error?.message || error) });
+  }
+
+  const expectedOffset = Number(req.headers["upload-offset"]);
+  if (!Number.isSafeInteger(expectedOffset) || expectedOffset < 0) {
+    return res.status(400).json({ ok: false, error: "Upload-Offset must be a non-negative integer" });
+  }
+  if (expectedOffset !== loaded.offset) {
+    res.set("Upload-Offset", String(loaded.offset));
+    return res.status(409).json({ ok: false, error: "upload offset does not match server state" });
+  }
+  if (activeResumableUploads.has(uploadId)) {
+    res.set("Upload-Offset", String(loaded.offset));
+    return res.status(409).json({ ok: false, error: "upload is already writing" });
+  }
+
+  const remainingBytes = loaded.session.sizeBytes - loaded.offset;
+  const declaredLength = Number(req.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && (declaredLength < 0 || declaredLength > remainingBytes)) {
+    return res.status(413).json({ ok: false, error: "upload chunk exceeds the remaining file size" });
+  }
+
+  activeResumableUploads.add(uploadId);
+  let receivedBytes = 0;
+  const byteLimit = new Transform({
+    transform(chunk, _encoding, callback) {
+      if (receivedBytes + chunk.length > remainingBytes) {
+        const error = new Error("upload chunk exceeds the remaining file size");
+        error.code = "UPLOAD_SIZE_LIMIT";
+        callback(error);
+        return;
+      }
+      receivedBytes += chunk.length;
+      callback(null, chunk);
+    }
+  });
+
+  try {
+    await pipeline(req, byteLimit, fs.createWriteStream(loaded.partPath, { flags: "a" }));
+    const nextOffset = loaded.offset + receivedBytes;
+    log.debug("resumable_upload_chunk_complete", { requestId: req.requestId, uploadId, receivedBytes, nextOffset });
+    return sendUploadOffset(res, nextOffset);
+  } catch (error) {
+    const current = await loadResumableUpload(req.params.streamId, uploadId).catch(() => ({ offset: loaded.offset }));
+    res.set("Upload-Offset", String(current.offset));
+    const status = error?.code === "UPLOAD_SIZE_LIMIT" ? 413 : 500;
+    log.warn("resumable_upload_chunk_error", { requestId: req.requestId, uploadId, error: serializeError(error) });
+    return res.status(status).json({ ok: false, error: String(error?.message || error) });
+  } finally {
+    activeResumableUploads.delete(uploadId);
+  }
+});
+
+app.post("/uploads/video/resumable/:streamId/:uploadId/complete", async (req, res) => {
+  const uploadId = req.params.uploadId;
+  if (activeResumableUploads.has(uploadId)) {
+    return res.status(409).json({ ok: false, error: "upload is still writing" });
+  }
+  let loaded;
+  try {
+    loaded = await loadResumableUpload(req.params.streamId, uploadId);
+  } catch (error) {
+    return res.status(404).json({ ok: false, error: String(error?.message || error) });
+  }
+  if (loaded.offset !== loaded.session.sizeBytes) {
+    res.set("Upload-Offset", String(loaded.offset));
+    return res.status(409).json({ ok: false, error: "upload is incomplete" });
+  }
+
+  const destinationPath = path.join(loaded.sourceDir, loaded.session.assetId);
+  try {
+    await fs.promises.rename(loaded.partPath, destinationPath);
+    await fs.promises.rm(loaded.metaPath, { force: true });
+    log.info("resumable_upload_complete", {
+      requestId: req.requestId,
+      uploadId,
+      assetId: loaded.session.assetId,
+      receivedBytes: loaded.offset
+    });
+    return res.status(201).json({ ok: true, assetId: loaded.session.assetId, sizeBytes: loaded.offset });
+  } catch (error) {
+    log.warn("resumable_upload_complete_error", { requestId: req.requestId, uploadId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
 app.post("/uploads/video", async (req, res) => {
+  const streamId = String(req.headers["x-upload-stream-id"] || "").trim();
   const uploadName = decodeURIComponent(String(req.headers["x-upload-filename"] || ""));
   const extension = path.extname(uploadName).toLowerCase();
   const contentLength = Number(req.headers["content-length"]);
@@ -780,8 +1043,15 @@ app.post("/uploads/video", async (req, res) => {
   }
 
   const assetId = `${randomUUID()}${extension}`;
-  const temporaryPath = path.join(VIDEO_ROOT, `${assetId}.upload`);
-  const destinationPath = path.join(VIDEO_ROOT, assetId);
+  let sourceDir;
+  try {
+    sourceDir = resolveSourceAssetDir(streamId);
+    await fs.promises.mkdir(sourceDir, { recursive: true });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+  const temporaryPath = path.join(sourceDir, `${assetId}.upload`);
+  const destinationPath = path.join(sourceDir, assetId);
   let receivedBytes = 0;
   const byteLimit = new Transform({
     transform(chunk, _encoding, callback) {
@@ -798,7 +1068,7 @@ app.post("/uploads/video", async (req, res) => {
     await pipeline(req, byteLimit, fs.createWriteStream(temporaryPath, { flags: "wx" }));
     if (!receivedBytes) throw new Error("uploaded video file is empty");
     await fs.promises.rename(temporaryPath, destinationPath);
-    log.info("video_upload_complete", { requestId: req.requestId, assetId, receivedBytes });
+    log.info("video_upload_complete", { requestId: req.requestId, streamId, assetId, receivedBytes });
     res.status(201).json({ ok: true, assetId, sizeBytes: receivedBytes });
   } catch (error) {
     await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
@@ -937,8 +1207,9 @@ app.post("/sources/:streamId/clips", async (req, res) => {
       endSeconds: req.body?.endSeconds,
       durationSeconds: sourceStates.get(streamId)?.durationSeconds
     });
+    const sourceDir = resolveSourceAssetDir(streamId);
     sourceInputPath = path.resolve(String(source.inputUrl || ""));
-    if (!sourceInputPath.startsWith(`${VIDEO_ROOT}${path.sep}`) || !fs.existsSync(sourceInputPath)) {
+    if (!sourceInputPath.startsWith(`${sourceDir}${path.sep}`) || !fs.existsSync(sourceInputPath)) {
       throw new Error("uploaded source file is unavailable");
     }
   } catch (error) {
@@ -1051,8 +1322,9 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
     return res.status(400).json({ ok: false, error: "snapshot time is outside the uploaded video duration" });
   }
 
+  const sourceDir = resolveSourceAssetDir(streamId);
   const sourceInputPath = path.resolve(String(source.inputUrl || ""));
-  if (!sourceInputPath.startsWith(`${VIDEO_ROOT}${path.sep}`) || !fs.existsSync(sourceInputPath)) {
+  if (!sourceInputPath.startsWith(`${sourceDir}${path.sep}`) || !fs.existsSync(sourceInputPath)) {
     return res.status(409).json({ ok: false, error: "uploaded source file is unavailable" });
   }
 
@@ -1068,10 +1340,11 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
       "-hide_banner",
       "-loglevel", "error",
       "-y",
-      "-i", sourceInputPath,
-      // Output-side seeking decodes to the requested media time, avoiding a
-      // keyframe-only browser-frame approximation for file snapshots.
+      // Input seeking avoids decoding a multi-hour authoritative TS from its
+      // beginning. FFmpeg selects the nearest decodable keyframe at or before
+      // the requested playback time.
       "-ss", String(normalizedTimeSeconds),
+      "-i", sourceInputPath,
       "-map", "0:v:0",
       "-frames:v", "1",
       "-q:v", "2",
@@ -1099,7 +1372,7 @@ app.post("/sources", async (req, res) => {
   let startedSfuIngest = false;
   let sourceType = "stream";
   let producerId = null;
-  let purgeResult = null;
+  let purgeResult;
 
   try {
     const {
@@ -1111,7 +1384,6 @@ app.post("/sources", async (req, res) => {
   webRtcMode: requestedWebRtcMode = "auto",
   hlsSegmentSeconds = 1,
   vttSegmentSeconds = 5,
-  purgeBeforeStart = false,
 
   // Variable-rate VTT tuning
   maxCuesPerSecond = 10,
@@ -1122,7 +1394,7 @@ app.post("/sources", async (req, res) => {
     const hlsMode = normalizeHlsMode(requestedHlsMode);
     const webRtcMode = normalizeWebRtcMode(requestedWebRtcMode);
     const resolvedInputUrl = sourceType === "file"
-      ? resolveUploadedVideo(assetId)
+      ? resolveUploadedVideo(streamId, assetId)
       : (typeof inputUrl === "string" ? inputUrl.trim() : "");
     requestedStreamId = streamId;
     if (!streamId || !resolvedInputUrl) throw new Error("streamId and inputUrl required");
@@ -1214,15 +1486,15 @@ app.post("/sources", async (req, res) => {
       lastError: null
     });
 
-    if (purgeBeforeStart) {
-      setSourceState(streamId, { state: "starting", stage: "purging" });
-      purgeResult = await purgeSourceArtifacts(streamId);
-      log.info("source_purge_complete", {
-        streamId,
-        deletedEvents: purgeResult.deletedEvents,
-        outDir: purgeResult.outDir
-      });
-    }
+    // Starts received outside the UI still clear generated artifacts. The
+    // source/ directory is retained here because it holds the selected file.
+    setSourceState(streamId, { state: "starting", stage: "purging" });
+    purgeResult = await purgeSourceArtifacts(streamId);
+    log.info("source_purge_complete", {
+      streamId,
+      deletedEvents: purgeResult.deletedEvents,
+      outDir: purgeResult.outDir
+    });
 
     log.info("source_create_start", {
       streamId,
@@ -1238,7 +1510,7 @@ app.post("/sources", async (req, res) => {
       detectedAudioCodec: sourceProbe?.audio?.codec || null,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
-      purgeBeforeStart
+      purgeBeforeStart: true
     });
 
     const outDir = path.join(RECORD_ROOT, streamId);
@@ -1479,8 +1751,8 @@ app.post("/sources", async (req, res) => {
       webRtcEncoderMode,
       webrtc: sourceType === "file" ? { available: false } : { available: true, producerId },
       purge: {
-        enabled: !!purgeBeforeStart,
-        deletedEvents: purgeResult?.deletedEvents ?? 0
+        enabled: true,
+        deletedEvents: purgeResult.deletedEvents
       },
       state: getSourceRuntime(streamId)
     });

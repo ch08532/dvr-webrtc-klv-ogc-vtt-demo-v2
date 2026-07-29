@@ -90,13 +90,15 @@ Click **Start Source**.
 
 ### Ingesting a video file
 
-Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. The browser uploads it to the server's ignored `./videos/` directory before it is packaged. The UI displays uploaded bytes and percent during this HTTP transfer, then a **Preparing file** stage while the server probes video and KLV streams. File sources produce the same HLS ladder and segmented WebVTT output, then transition to **ready** when packaging completes. Play them from the DVR (HLS) tab; the live WebRTC tab is intentionally unavailable for file sources.
+Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. Every start automatically clears the selected stream's previous recording tree and KLV records. For a file source, that reset happens before the upload, then the authoritative original is stored at `./recordings/<streamId>/source/<assetId>.<ext>`, beside the newly generated HLS and metadata artifacts. The source directory is private (not served by `/hls`). Uploads use 64 MB resumable HTTP chunks: an interrupted transfer automatically retries, and selecting the same file again resumes from the server-confirmed byte offset when the browser's saved upload session is still available. The UI displays uploaded bytes and percent, then a **Preparing file** stage while the server probes video and KLV streams. File sources produce the same HLS ladder and segmented WebVTT output, then transition to **ready** when packaging completes. Play them from the DVR (HLS) tab; the live WebRTC tab is intentionally unavailable for file sources.
 
 The default upload limit is 10 GB. Override it with `MAX_VIDEO_UPLOAD_MB` when starting the server.
 
 While a file source is packaging, the UI displays its conversion percentage, source media time processed, FFmpeg speed, and estimated remaining time. It then reports `finalizing` while the remaining carrier segments are decoded and WebVTT is completed, and `ready` when HLS playback is available. The latest valid telemetry remains visible on the DVR map during finalization.
 
 DVR output will appear under `./recordings/<streamId>/`:
+- `source/<assetId>.<ext>` (private authoritative uploaded original)
+- `source/.uploads/` (temporary resumable-upload chunks and session metadata)
 - `master.m3u8`
 - `v0/index.m3u8` (360p video; timing reference for the VTT playlist)
 - `v1/index.m3u8` (1080p video)
@@ -112,7 +114,7 @@ The DVR **Create video clip** control is available only for an uploaded file sou
 
 ### Snapshots
 
-For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which captures the current media time directly from the uploaded file, and **Displayed HLS player frame**, which captures the browser-decoded frame. Live streams retain the browser-frame snapshot only.
+For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame. Live streams retain the browser-frame snapshot only.
 
 ## Notes
 - The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint. Source frame corners are preferred; when source offsets are missing or all zero, a `computed-flat` estimate uses sensor pose, FOV, range, and a flat-ground approximation. Each map centers on its first valid frame center; use **Center map** to recenter later.
@@ -127,7 +129,7 @@ For an uploaded file, the playback snapshot button offers **Authoritative upload
 - `minCueDurSec` (default 0.10)
 - `maxCueDurSec` (default 0.50)
 
-These parameters affect only the WebVTT sidecar overlay. All decoded KLV is still stored at full rate in SQLite.
+These parameters affect only the WebVTT sidecar overlay. All decoded KLV is still stored at full rate in SQLite unless `KLV_WRITE_SQLITE=0` is set for profiling.
 
 ## File KLV finalization tuning
 
@@ -135,6 +137,7 @@ Completed file segments are decoded in bounded batches and their SQLite records 
 
 - `KLV_SEGMENT_DECODE_WORKERS` (default `4`, range `1`–`8`)
 - `KLV_SEGMENT_DECODE_BATCH_SIZE` (default `workers × 4`, range `workers`–`64`)
+- `KLV_WRITE_SQLITE` (default `1`): set to `0` to skip decoded KLV inserts while retaining KLV decode and VTT generation. OGC/SQLite telemetry queries will not include newly processed metadata.
 - `KLV_FINALIZE_MIN_TIMEOUT_MS` (default `30000`)
 - `KLV_FINALIZE_MS_PER_SEGMENT` (default `500`)
 - `KLV_FINALIZE_MAX_TIMEOUT_MS` (default `7200000`)
