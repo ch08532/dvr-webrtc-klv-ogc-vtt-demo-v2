@@ -42,6 +42,14 @@ const SOURCE_ASSET_DIRNAME = "source";
 const SOURCE_UPLOAD_DIRNAME = ".uploads";
 const MAX_UPLOAD_BYTES = Math.max(1, Number(process.env.MAX_VIDEO_UPLOAD_MB || 10_240)) * 1024 * 1024;
 const VIDEO_UPLOAD_EXTENSIONS = new Set([".ts", ".m2ts", ".mp4", ".mov", ".mkv"]);
+// A server-path source is deliberately limited to configured roots. On Windows
+// separate multiple roots with `;`; on POSIX use `:` (Node's path delimiter).
+const DEFAULT_LOCAL_VIDEO_SOURCE_ROOT = path.resolve("./videos");
+const LOCAL_VIDEO_SOURCE_ROOTS = String(process.env.LOCAL_VIDEO_SOURCE_ROOTS || DEFAULT_LOCAL_VIDEO_SOURCE_ROOT)
+  .split(path.delimiter)
+  .map((root) => root.trim())
+  .filter(Boolean)
+  .map((root) => path.resolve(root));
 const CLIP_MIN_DURATION_SECONDS = 0.25;
 // Leave clip duration unrestricted by default. Deployments that need a policy
 // limit can set MAX_CLIP_DURATION_SECONDS to a positive number.
@@ -55,6 +63,7 @@ const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
+if (!process.env.LOCAL_VIDEO_SOURCE_ROOTS) fs.mkdirSync(DEFAULT_LOCAL_VIDEO_SOURCE_ROOT, { recursive: true });
 
 const activeResumableUploads = new Set();
 
@@ -195,6 +204,97 @@ function resolveSourceAssetDir(streamId) {
   const sourceDir = path.resolve(outDir, SOURCE_ASSET_DIRNAME);
   if (!sourceDir.startsWith(`${outDir}${path.sep}`)) throw new Error("invalid source asset path");
   return sourceDir;
+}
+
+/** Tests whether a candidate is a path inside a configured directory. */
+function isPathInside(rootDir, candidatePath) {
+  const root = process.platform === "win32" ? rootDir.toLowerCase() : rootDir;
+  const candidate = process.platform === "win32" ? candidatePath.toLowerCase() : candidatePath;
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+/** Resolves a regular video file inside a configured local-server source root. */
+async function resolveLocalServerVideo(inputPath) {
+  if (typeof inputPath !== "string" || !inputPath.trim()) {
+    throw new Error("local server video path is required");
+  }
+  const requestedPath = inputPath.trim();
+  if (!VIDEO_UPLOAD_EXTENSIONS.has(path.extname(requestedPath).toLowerCase())) {
+    throw new Error("supported video extensions: .ts, .m2ts, .mp4, .mov, .mkv");
+  }
+  const realRoots = (await Promise.all(LOCAL_VIDEO_SOURCE_ROOTS.map(async (root) => {
+    try { return await fs.promises.realpath(root); } catch { return null; }
+  }))).filter(Boolean);
+
+  const candidatePaths = path.isAbsolute(requestedPath)
+    ? [path.resolve(requestedPath)]
+    : LOCAL_VIDEO_SOURCE_ROOTS.map((root) => path.resolve(root, requestedPath));
+  for (const candidatePath of candidatePaths) {
+    try {
+      const candidateStat = await fs.promises.stat(candidatePath);
+      if (!candidateStat.isFile()) continue;
+      const realCandidatePath = await fs.promises.realpath(candidatePath);
+      if (!realRoots.some((root) => isPathInside(root, realCandidatePath))) continue;
+      return { path: realCandidatePath, sizeBytes: candidateStat.size, filename: path.basename(realCandidatePath) };
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+    }
+  }
+  throw new Error(path.isAbsolute(requestedPath)
+    ? "local server video must be a regular file inside a configured LOCAL_VIDEO_SOURCE_ROOTS directory"
+    : "local server video was not found below the configured LOCAL_VIDEO_SOURCE_ROOTS directories");
+}
+
+/** Copies a configured local-server video into its stream's private source area. */
+async function copyLocalServerVideo(streamId, inputPath) {
+  const localVideo = await resolveLocalServerVideo(inputPath);
+  const sourceDir = resolveSourceAssetDir(streamId);
+  const assetId = `${randomUUID()}${path.extname(localVideo.filename).toLowerCase()}`;
+  const destinationPath = path.resolve(sourceDir, assetId);
+  if (!isPathInside(sourceDir, destinationPath)) throw new Error("invalid local video destination path");
+
+  await fs.promises.mkdir(sourceDir, { recursive: true });
+  await fs.promises.copyFile(localVideo.path, destinationPath, fs.constants.COPYFILE_EXCL);
+  return { assetId, sizeBytes: localVideo.sizeBytes, sourceFilename: localVideo.filename };
+}
+
+/** Lists supported regular video files available below configured local roots. */
+async function listLocalServerVideos() {
+  const videos = [];
+  const realRoots = (await Promise.all(LOCAL_VIDEO_SOURCE_ROOTS.map(async (root) => {
+    try { return { configuredRoot: root, realRoot: await fs.promises.realpath(root) }; } catch { return null; }
+  }))).filter(Boolean);
+
+  const walk = async (configuredRoot, realRoot, currentDir) => {
+    const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const candidatePath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(configuredRoot, realRoot, candidatePath);
+        continue;
+      }
+      // Do not traverse symlinks while enumerating. A symlink is separately
+      // accepted by the copy endpoint only after its real target is validated.
+      if (!entry.isFile() || !VIDEO_UPLOAD_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      const realPath = await fs.promises.realpath(candidatePath).catch(() => null);
+      if (!realPath || !isPathInside(realRoot, realPath)) continue;
+      const stat = await fs.promises.stat(realPath).catch(() => null);
+      if (!stat?.isFile()) continue;
+      const relativePath = path.relative(configuredRoot, candidatePath);
+      videos.push({
+        inputPath: realPath,
+        relativePath: LOCAL_VIDEO_SOURCE_ROOTS.length > 1
+          ? `${path.basename(configuredRoot)}${path.sep}${relativePath}`
+          : relativePath,
+        sizeBytes: stat.size,
+        modifiedAt: stat.mtime.toISOString()
+      });
+    }
+  };
+
+  for (const { configuredRoot, realRoot } of realRoots) await walk(configuredRoot, realRoot, configuredRoot);
+  videos.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true, sensitivity: "base" }));
+  return videos;
 }
 
 /** Validates and resolves a server-owned uploaded video asset path. */
@@ -903,6 +1003,39 @@ app.post("/uploads/video/resumable", async (req, res) => {
   } catch (error) {
     log.warn("resumable_upload_create_error", { requestId: req.requestId, error: serializeError(error) });
     return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+// Drives the Local server file picker. Only configured-root contents are sent
+// to the browser; the copy endpoint independently validates each selection.
+app.get("/uploads/video/local-files", async (req, res) => {
+  try {
+    const files = await listLocalServerVideos();
+    return res.json({ ok: true, files });
+  } catch (error) {
+    log.warn("local_video_list_error", { requestId: req.requestId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+// Copies a server-local video into the same authoritative source location used
+// by browser uploads, avoiding an HTTP transfer through the browser.
+app.post("/uploads/video/local-copy", async (req, res) => {
+  const streamId = String(req.body?.streamId || "").trim();
+  const inputPath = typeof req.body?.inputPath === "string" ? req.body.inputPath : "";
+  try {
+    const copied = await copyLocalServerVideo(streamId, inputPath);
+    log.info("local_video_copy_complete", {
+      requestId: req.requestId,
+      streamId,
+      assetId: copied.assetId,
+      sourceFilename: copied.sourceFilename,
+      sizeBytes: copied.sizeBytes
+    });
+    return res.status(201).json({ ok: true, ...copied });
+  } catch (error) {
+    log.warn("local_video_copy_error", { requestId: req.requestId, streamId, error: serializeError(error) });
+    return res.status(400).json({ ok: false, error: String(error?.message || error) });
   }
 });
 

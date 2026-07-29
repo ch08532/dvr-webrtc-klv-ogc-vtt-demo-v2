@@ -94,6 +94,19 @@ Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.m
 
 The default upload limit is 10 GB. Override it with `MAX_VIDEO_UPLOAD_MB` when starting the server.
 
+### Ingesting a file already on the server
+
+Choose **Local server file** and select a supported file from the server-driven dropdown. It lists files beneath `./videos/` (including subfolders) and the server copies the selection directly into `./recordings/<streamId>/source/` before packaging, avoiding the browser HTTP upload. It still requires disk I/O to create the authoritative copy, but does not route the file through the browser.
+
+For safety, the default allowed root is `./videos/` (created automatically if absent). You can instead configure one or more allowed parent folders; on Windows, separate roots with `;`:
+
+```powershell
+$env:LOCAL_VIDEO_SOURCE_ROOTS = 'D:\media;E:\incoming'
+npm start
+```
+
+The dropdown lists content only from those roots, and the copy endpoint validates the selection again. The original local file is never moved or modified.
+
 While a file source is packaging, the UI displays its conversion percentage, source media time processed, FFmpeg speed, and estimated remaining time. It then reports `finalizing` while the remaining carrier segments are decoded and WebVTT is completed, and `ready` when HLS playback is available. The latest valid telemetry remains visible on the DVR map during finalization.
 
 DVR output will appear under `./recordings/<streamId>/`:

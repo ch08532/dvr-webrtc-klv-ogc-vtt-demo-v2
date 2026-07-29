@@ -59,6 +59,9 @@ function App() {
   const [sourceType, setSourceType] = useState('stream');
   const [inputUrl, setInputUrl] = useState('udp://239.1.2.3:5000');
   const [videoFile, setVideoFile] = useState(null);
+  const [localServerPath, setLocalServerPath] = useState('');
+  const [localServerFiles, setLocalServerFiles] = useState([]);
+  const [localServerFilesLoading, setLocalServerFilesLoading] = useState(false);
   const [hlsMode, setHlsMode] = useState('passthrough');
   const [webRtcMode, setWebRtcMode] = useState('auto');
   const [hlsSegmentSeconds, setHlsSegmentSeconds] = useState(5);
@@ -300,9 +303,16 @@ function App() {
     return 'Not Tested';
   })();
 
-  const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping', 'ready'].includes(streamRuntime?.state);
+  // File finalization is still active work: KLV batches and VTT sidecars must
+  // finish before another start can reset this stream's recording directory.
+  const isStartBlockedByState = ['starting', 'running', 'degraded', 'stopping', 'finalizing', 'ready'].includes(streamRuntime?.state);
   const isStopBlockedByState = ['starting', 'stopping', 'stopped'].includes(streamRuntime?.state);
-  const hasSelectedInput = sourceType === 'file' ? !!videoFile : !!String(inputUrl || '').trim();
+  const selectedFileSource = sourceType === 'file' || sourceType === 'local-file';
+  const hasSelectedInput = sourceType === 'file'
+    ? !!videoFile
+    : sourceType === 'local-file'
+      ? !!String(localServerPath || '').trim()
+      : !!String(inputUrl || '').trim();
   const canStartSource = serverOnline && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
   const currentSourceIsFile = streamRuntime?.sourceType === 'file';
@@ -611,6 +621,23 @@ function App() {
       return saved?.uploadUrl && saved?.uploadId ? saved : null;
     } catch {
       return null;
+    }
+  };
+
+  const refreshLocalServerFiles = async () => {
+    if (!serverOnlineRef.current) return;
+    setLocalServerFilesLoading(true);
+    try {
+      const result = await api('/uploads/video/local-files');
+      if (!result?.ok || !Array.isArray(result.files)) {
+        throw new Error(result?.error || 'Could not list local server video files.');
+      }
+      setLocalServerFiles(result.files);
+    } catch (error) {
+      setLocalServerFiles([]);
+      setStatus(`Local server file list failed: ${String(error?.message || error)}`);
+    } finally {
+      setLocalServerFilesLoading(false);
     }
   };
 
@@ -936,16 +963,18 @@ function App() {
     hlsQualityRef.current = 'auto';
     setHlsQuality('auto');
     setHlsQualityControlAvailable(false);
-    setStreamRuntime({ streamId, sourceType, state: 'starting', running: false, lastError: null });
+    setStreamRuntime({ streamId, sourceType: selectedFileSource ? 'file' : sourceType, state: 'starting', running: false, lastError: null });
     try {
       setStatus('Clearing previous recording artifacts...');
       await api(`/sources/${encodeURIComponent(streamId)}/reset`, { method: 'POST' });
       let assetId = null;
-      if (sourceType === 'file') {
+      if (selectedFileSource) {
         clipRangeStreamRef.current = null;
         setClipStartSeconds(0);
         setClipEndSeconds(0);
         setClipResult(null);
+      }
+      if (sourceType === 'file') {
         setFileStartProgress({ phase: 'uploading', loadedBytes: 0, totalBytes: videoFile.size });
         setStatus(`Uploading ${videoFile.name}...`);
         const uploadResult = await uploadVideoFile(videoFile, streamId);
@@ -956,14 +985,27 @@ function App() {
         setFileStartProgress({ phase: 'analyzing', loadedBytes: videoFile.size, totalBytes: videoFile.size });
         setStatus('Upload complete. Analyzing video streams and KLV metadata...');
         setActiveTab('dvr');
+      } else if (sourceType === 'local-file') {
+        setStatus('Copying local server video into the authoritative source folder...');
+        const copyResult = await api('/uploads/video/local-copy', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ streamId, inputPath: localServerPath.trim() })
+        });
+        if (!copyResult?.ok || !copyResult.assetId) {
+          throw new Error(copyResult?.error || 'Local server video copy failed');
+        }
+        assetId = copyResult.assetId;
+        setStatus(`Copied ${copyResult.sourceFilename || 'local server video'}. Analyzing video streams and KLV metadata...`);
+        setActiveTab('dvr');
       }
-      if (sourceType === 'file') setStatus('Starting file conversion and KLV processing...');
+      if (selectedFileSource) setStatus('Starting file conversion and KLV processing...');
       const result = await api("/sources", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           streamId,
-          sourceType,
+          sourceType: selectedFileSource ? 'file' : sourceType,
           inputUrl: sourceType === 'stream' ? inputUrl : undefined,
           assetId,
           hlsMode,
@@ -989,7 +1031,7 @@ function App() {
       if (result?.ok && activeTab === 'dvr') {
         startHlsAutoAttach(streamId);
       }
-      if (result?.ok && sourceType !== 'file' && activeTab === 'live-webrtc') {
+      if (result?.ok && !selectedFileSource && activeTab === 'live-webrtc') {
         startWebRtcAutoAttach(streamId);
       }
     } catch (error) {
@@ -2301,6 +2343,11 @@ function App() {
   }, [serverOnline]);
 
   useEffect(() => {
+    if (sourceType !== 'local-file' || !serverOnline) return;
+    void refreshLocalServerFiles();
+  }, [sourceType, serverOnline]);
+
+  useEffect(() => {
     streamRuntimeRef.current = streamRuntime;
     if (streamRuntime?.sourceType === 'file' && activeTab === 'live-webrtc') {
       setActiveTab('dvr');
@@ -2495,7 +2542,11 @@ function App() {
                 <Select
                   w={150}
                   label="Source type"
-                  data={[{ value: 'stream', label: 'Stream URL' }, { value: 'file', label: 'Video file' }]}
+                  data={[
+                    { value: 'stream', label: 'Stream URL' },
+                    { value: 'file', label: 'Upload video file' },
+                    { value: 'local-file', label: 'Select server video' }
+                  ]}
                   value={sourceType}
                   onChange={(value) => setSourceType(value || 'stream')}
                   allowDeselect={false}
@@ -2515,7 +2566,7 @@ function App() {
                     Test Feed
                   </Button>
                   <Badge color={probeBadgeColor} variant="filled">{probeBadgeLabel}</Badge>
-                </> : <FileInput
+                </> : sourceType === 'file' ? <FileInput
                   style={{ flex: 1 }}
                   label="Video file"
                   placeholder="Choose a video file"
@@ -2523,10 +2574,31 @@ function App() {
                   onChange={setVideoFile}
                   accept="video/*,.ts,.m2ts"
                   clearable
-                />}
+                /> : <>
+                  <Select
+                    style={{ flex: 1 }}
+                    label="Local server video"
+                    placeholder={localServerFilesLoading ? 'Loading local videos...' : 'Choose a video from the server videos folder'}
+                    value={localServerPath || null}
+                    onChange={(value) => setLocalServerPath(value || '')}
+                    data={localServerFiles.map((file) => ({
+                      value: file.inputPath,
+                      label: `${file.relativePath} (${formatBytes(file.sizeBytes)})`
+                    }))}
+                    searchable
+                    clearable
+                    nothingFoundMessage={localServerFilesLoading ? 'Loading...' : 'No supported video files found'}
+                    disabled={localServerFilesLoading}
+                  />
+                  <Button variant="light" onClick={refreshLocalServerFiles} loading={localServerFilesLoading} disabled={!serverOnline}>
+                    Refresh files
+                  </Button>
+                </>}
               </Group>
               {sourceType === 'file' ? (
                 <Text size="xs" mt="xs" c="dimmed">The file uploads to this server, then packages into HLS and segmented WebVTT. Playback is available in DVR (HLS); WebRTC is disabled.</Text>
+              ) : sourceType === 'local-file' ? (
+                <Text size="xs" mt="xs" c="dimmed">Choose a supported file from the server&apos;s videos folder. The server copies it directly into the authoritative source folder without a browser upload. Playback is available in DVR (HLS); WebRTC is disabled.</Text>
               ) : null}
               {(inputProbe.container || inputProbe.video || inputProbe.klv || inputProbe.error) ? (
                 <Text size="xs" mt="xs" c={inputProbe.error ? 'red' : 'dimmed'}>
@@ -2564,7 +2636,7 @@ function App() {
                   value={webRtcMode}
                   onChange={(value) => setWebRtcMode(value || 'auto')}
                   allowDeselect={false}
-                  disabled={sourceType === 'file'}
+                  disabled={selectedFileSource}
                 />
               </Group>
               {passthroughFallbackLikely ? (
@@ -2641,7 +2713,7 @@ function App() {
                   {hlsRuntimeIsActive && streamRuntime?.hlsEffectiveMode && streamRuntime.hlsEffectiveMode !== streamRuntime.hlsMode
                     ? ` → ${streamRuntime.hlsEffectiveMode}`
                     : ''}
-                  {(hlsRuntimeIsActive ? streamRuntime?.sourceType : sourceType) !== 'file'
+                  {(hlsRuntimeIsActive ? streamRuntime?.sourceType !== 'file' : !selectedFileSource)
                     ? ` | WebRTC: ${hlsRuntimeIsActive ? streamRuntime?.webRtcMode || webRtcMode : webRtcMode} (${hlsRuntimeIsActive ? streamRuntime?.webRtcEncoderMode || 'pending' : 'pending'})`
                     : ''}
                 </Text>
