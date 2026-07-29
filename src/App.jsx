@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu } from '@mantine/core';
+import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader } from '@mantine/core';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
@@ -1624,7 +1624,11 @@ function App() {
   const formatBytes = (bytes) => {
     const value = Number(bytes);
     if (!Number.isFinite(value) || value < 0) return 'n/a';
-    return (value / (1024 ** 3)).toFixed(1) + ' GB';
+    if (value < 1024) return `${Math.round(value)} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    const unitIndex = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)) - 1);
+    const scaled = value / (1024 ** (unitIndex + 1));
+    return `${scaled.toFixed(scaled < 10 ? 2 : 1)} ${units[unitIndex]}`;
   };
 
   const conversionProgress = (source) => {
@@ -2534,13 +2538,13 @@ function App() {
               <Text size="lg" fw={500}>Start Source</Text>
               <Group mt="xs" align="end" wrap="nowrap">
                 <TextInput
-                  style={{ flex: 1 }}
+                  w={180}
                   label="Stream ID"
                   value={streamId}
                   onChange={(e) => setStreamId(e.target.value)}
                 />
                 <Select
-                  w={150}
+                  w={230}
                   label="Source type"
                   data={[
                     { value: 'stream', label: 'Stream URL' },
@@ -2553,7 +2557,7 @@ function App() {
                 />
                 {sourceType === 'stream' ? <>
                   <TextInput
-                    style={{ flex: 1 }}
+                    style={{ flex: 1, minWidth: 0 }}
                     label="Input URL"
                     value={inputUrl}
                     onChange={(e) => setInputUrl(e.target.value)}
@@ -2567,7 +2571,7 @@ function App() {
                   </Button>
                   <Badge color={probeBadgeColor} variant="filled">{probeBadgeLabel}</Badge>
                 </> : sourceType === 'file' ? <FileInput
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, minWidth: 0 }}
                   label="Video file"
                   placeholder="Choose a video file"
                   value={videoFile}
@@ -2576,7 +2580,7 @@ function App() {
                   clearable
                 /> : <>
                   <Select
-                    style={{ flex: 1 }}
+                    style={{ flex: 1, minWidth: 0 }}
                     label="Local server video"
                     placeholder={localServerFilesLoading ? 'Loading local videos...' : 'Choose a video from the server videos folder'}
                     value={localServerPath || null}
@@ -2882,9 +2886,15 @@ function App() {
                           {currentSourceIsFile ? (
                             <Menu shadow="md" width={235} position="top" withArrow>
                               <Menu.Target>
-                                <Tooltip label="Download snapshot" withArrow>
-                                  <ActionIcon variant="light" size="lg" aria-label="Download snapshot">
-                                    <PlaybackControlIcon name="snapshot" />
+                                <Tooltip label={authoritativeSnapshotInFlight ? 'Creating authoritative snapshot…' : 'Download snapshot'} withArrow>
+                                  <ActionIcon
+                                    variant="light"
+                                    size="lg"
+                                    aria-label={authoritativeSnapshotInFlight ? 'Creating authoritative snapshot' : 'Download snapshot'}
+                                    aria-busy={authoritativeSnapshotInFlight}
+                                    disabled={authoritativeSnapshotInFlight}
+                                  >
+                                    {authoritativeSnapshotInFlight ? <Loader size={16} /> : <PlaybackControlIcon name="snapshot" />}
                                   </ActionIcon>
                                 </Tooltip>
                               </Menu.Target>
