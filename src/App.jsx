@@ -82,7 +82,7 @@ function App() {
     error: null,
     testedAt: null
   });
-  const [status, setStatus] = useState('Ready. Start Source, then choose Live or DVR. DVR overlay is from segmented WebVTT.');
+  const [status, setStatus] = useState('Ready. Start Source, then choose Live or Time Shifted Playback. Telemetry is from segmented WebVTT.');
   const [overlayData, setOverlayData] = useState(null);
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
@@ -366,7 +366,15 @@ function App() {
   );
   const clipExportReady = clipWidgetReady && streamRuntime?.state === 'ready';
   const liveVideoStreaming = liveStatus === 'Playing';
-  const canAddTargetMark = serverOnline && !targetLogInFlight;
+  // File processing intentionally stops its FFmpeg workers after packaging and
+  // reports `ready`, while its HLS artifacts remain playable. Treat every
+  // playable lifecycle state as active for target-log actions.
+  const targetLogSourceActive = serverOnline && (
+    streamRuntime?.running === true
+    || ['running', 'degraded', 'finalizing', 'ready'].includes(streamRuntime?.state)
+  );
+  const canAddTargetMark = targetLogSourceActive && !targetLogInFlight;
+  const canManageTargetLogFields = targetLogSourceActive && !targetLogInFlight;
   const showTargetMarkAction = activeTab !== 'live-webrtc' || liveVideoStreaming;
 
   const webrtcBadge = (() => {
@@ -1311,6 +1319,10 @@ function App() {
   };
 
   const openNewTargetLogEntry = (mapPosition = null) => {
+    if (!targetLogSourceActive) {
+      setStatus('Start a source before adding a target mark.');
+      return;
+    }
     const telemetry = overlayData?.mode === 'dvr-vtt' || overlayData?.mode === 'live-ws' ? overlayData : null;
     const missionTimeMs = klvMissionTimeMs(telemetry);
     const capture = isTargetLogCoordinate(mapPosition?.lat, mapPosition?.lon)
@@ -2458,7 +2470,7 @@ function App() {
       if (vttTrackRef.current !== track) {
         // Keep KLV subtitle track off by default in Video.js.
         try { track.mode = 'hidden'; } catch {}
-        setStatus(`Bound DVR text track: label=${String(track.label || 'n/a')} kind=${String(track.kind || 'n/a')} language=${String(track.language || 'n/a')}`);
+        setStatus(`Bound time-shifted text track: label=${String(track.label || 'n/a')} kind=${String(track.kind || 'n/a')} language=${String(track.language || 'n/a')}`);
         const onCueChange = (event) => {
           handleCueChange(event);
         };
@@ -2853,7 +2865,7 @@ function App() {
       >
         <AppShell.Header>
           <Group justify="space-between" align="center" px="md" h="100%">
-            <Text size="lg" fw={700}>DVR + WebRTC + KLV Demo</Text>
+            <Text size="lg" fw={700}>FMV PED 0-1 PoC</Text>
             <Badge color={serverOnline ? 'green' : 'red'} variant="filled">
               {serverOnline ? 'Server Online' : 'Server Offline'}
             </Badge>
@@ -2936,9 +2948,9 @@ function App() {
                 </>}
               </Group>
               {sourceType === 'file' ? (
-                <Text size="xs" mt="xs" c="dimmed">The file uploads to this server, then packages into HLS and segmented WebVTT. Playback is available in DVR (HLS); WebRTC is disabled.</Text>
+                <Text size="xs" mt="xs" c="dimmed">The file uploads to this server, then packages into HLS and segmented WebVTT. Playback is available in Time Shifted Playback (HLS); WebRTC is disabled.</Text>
               ) : sourceType === 'local-file' ? (
-                <Text size="xs" mt="xs" c="dimmed">Choose a supported file from the server&apos;s videos folder. The server copies it directly into the authoritative source folder without a browser upload. Playback is available in DVR (HLS); WebRTC is disabled.</Text>
+                <Text size="xs" mt="xs" c="dimmed">Choose a supported file from the server&apos;s videos folder. The server copies it directly into the authoritative source folder without a browser upload. Playback is available in Time Shifted Playback (HLS); WebRTC is disabled.</Text>
               ) : null}
               {(inputProbe.container || inputProbe.video || inputProbe.klv || inputProbe.error) ? (
                 <Text size="xs" mt="xs" c={inputProbe.error ? 'red' : 'dimmed'}>
@@ -3130,15 +3142,15 @@ function App() {
             </Paper>
 
             <Paper shadow="xs" p="md">
-              <Text size="lg" fw={500}>Playback</Text>
+              <Text size="lg" fw={500}>FMV Viewer</Text>
               <Tabs value={activeTab} onChange={setActiveTab}>
                 <Tabs.List>
-                  <Tabs.Tab value="dvr">DVR (HLS)</Tabs.Tab>
+                  <Tabs.Tab value="dvr">Time Shifted Playback (HLS)</Tabs.Tab>
                   <Tabs.Tab value="live-webrtc" disabled={currentSourceIsFile}>Live (WebRTC)</Tabs.Tab>
                 </Tabs.List>
 
                 <Tabs.Panel value="dvr" pt="xs">
-                  <Text>DVR HLS playback with synchronized WebVTT telemetry.</Text>
+                  <Text>Time Shifted Playback via HLS with synchronized WebVTT telemetry.</Text>
                   <Group mt="xs" align="flex-start" grow wrap="wrap">
                     <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
                       <Group gap="xs" mb="xs">
@@ -3187,7 +3199,7 @@ function App() {
                        <Text size="xs" c="dimmed" mt="xs">
                          {currentSourceIsFile
                            ? `player time: ${formatPlayerTime(dvrDiag.currentTimeSec)} / ${formatPlayerTime(dvrDiag.durationSec)}`
-                           : `Playback delay: ${formatPlayerTime(liveBehindSeconds)} behind HLS edge · DVR window: ${formatPlayerTime(liveDvrWindowSeconds)}`}
+                          : `Playback delay: ${formatPlayerTime(liveBehindSeconds)} behind HLS edge · playback window: ${formatPlayerTime(liveDvrWindowSeconds)}`}
                        </Text>
                       {activeTab === 'dvr' && hlsMediaLoaded ? (
                         <Group mt="xs" gap="xs" justify="center">
@@ -3472,11 +3484,11 @@ function App() {
                 <Group justify="space-between" align="center" mt="md" mb="xs">
                   <div>
                     <Text size="sm" fw={700}>Mission Target Log</Text>
-                    <Text size="xs" c="dimmed">Shared across live and DVR playback for stream {streamId}. File marks are pinned on the clip filmstrip.</Text>
+                    <Text size="xs" c="dimmed">Shared across live and time-shifted playback for stream {streamId}. File marks are pinned on the clip filmstrip.</Text>
                   </div>
                   <Group gap="xs">
                     {targetLogLoading ? <Loader size="xs" /> : <Badge variant="light">{targetLogEntries.length} mark{targetLogEntries.length === 1 ? '' : 's'}</Badge>}
-                    <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)}>Manage fields</Button>
+                    <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)} disabled={!canManageTargetLogFields}>Manage fields</Button>
                     {showTargetMarkAction ? <Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button> : null}
                   </Group>
                 </Group>
