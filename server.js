@@ -944,6 +944,18 @@ wss.on("connection", (ws) => {
 
 // ---------- Static UI + HLS ----------
 app.use("/", express.static(path.resolve("./public"), { setHeaders(res) { res.setHeader("Cache-Control", "no-cache"); } }));
+app.get("/openapi.yaml", (_req, res) => {
+  res.type("application/yaml").sendFile(path.resolve("./openapi.yaml"));
+});
+app.get("/docs", (_req, res) => {
+  res.type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Midas API documentation</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"></head>
+<body><div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>window.ui = SwaggerUIBundle({ url: '/openapi.yaml', dom_id: '#swagger-ui', deepLinking: true });</script>
+</body></html>`);
+});
 // Authoritative uploads live beside generated HLS artifacts, but must remain
 // private: they are accessed only by the file-source, clip, and snapshot APIs.
 app.use("/hls/:streamId/source", (_req, res) => {

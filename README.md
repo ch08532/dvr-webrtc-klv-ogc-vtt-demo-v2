@@ -41,6 +41,10 @@ npm start
 
 Use `npm run dev` during frontend development. `npm run build` regenerates the ignored `public/assets/` bundle that `npm start` serves.
 
+## API documentation
+
+When the server is running, open [Swagger UI](http://localhost:8090/docs). The versioned OpenAPI 3.0 definition is also available at `http://localhost:8090/openapi.yaml` in [openapi.yaml](./openapi.yaml).
+
 ## Docker
 **Run this if you want to test via containerization.  Highly recommend to to run on bare metal using Node.**
 

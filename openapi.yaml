@@ -1,0 +1,392 @@
+openapi: 3.0.3
+info:
+  title: Midas DVR / KLV API
+  version: 1.0.0
+  description: |
+    HTTP API for source ingest, authoritative file workflows, HLS/KLV state,
+    clips, snapshots, telemetry, and WebRTC signaling. File-backed operations
+    use the private authoritative asset stored under recordings/<streamId>/source.
+servers:
+  - url: http://localhost:8090
+    description: Default local server
+tags:
+  - name: Health
+  - name: Sources
+  - name: Uploads
+  - name: File tools
+  - name: Telemetry
+  - name: WebRTC
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Read service health and runtime status
+      responses:
+        '200': { description: Service health payload }
+  /metrics/runtime:
+    get:
+      tags: [Health]
+      summary: Read host and runtime metrics
+      responses:
+        '200': { description: Runtime metrics payload }
+  /sources:
+    get:
+      tags: [Sources]
+      summary: List active and transitional sources
+      responses:
+        '200':
+          description: Source list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SourceRuntime' }
+    post:
+      tags: [Sources]
+      summary: Start a stream URL or prepared authoritative file source
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartSourceRequest' }
+      responses:
+        '200':
+          description: Source started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartSourceResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /sources/{streamId}/state:
+    get:
+      tags: [Sources]
+      summary: Get source lifecycle and processing state
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses:
+        '200':
+          description: Source state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SourceRuntime' }
+  /sources/{streamId}/reset:
+    post:
+      tags: [Sources]
+      summary: Clear a stopped stream's recording artifacts and KLV records
+      description: Called before every UI Start Source action. It removes the stream recording tree, including its prior authoritative file.
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses:
+        '200':
+          description: Stream reset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '409': { $ref: '#/components/responses/Error' }
+  /sources/{streamId}:
+    delete:
+      tags: [Sources]
+      summary: Stop an active or completed source
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses:
+        '200':
+          description: Source stopped
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /uploads/video/resumable:
+    post:
+      tags: [Uploads]
+      summary: Create a resumable browser upload session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [streamId, filename, sizeBytes]
+              properties:
+                streamId: { type: string }
+                filename: { type: string, example: mission.ts }
+                sizeBytes: { type: integer, format: int64 }
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+  /uploads/video/resumable/{streamId}/{uploadId}:
+    head:
+      tags: [Uploads]
+      summary: Get the server-confirmed resumable upload offset
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/UploadId' } ]
+      responses:
+        '204':
+          description: Offset returned in Upload-Offset response header
+          headers:
+            Upload-Offset: { schema: { type: integer, format: int64 } }
+        '404': { description: Upload session not found }
+    patch:
+      tags: [Uploads]
+      summary: Append one resumable upload chunk
+      parameters:
+        - { $ref: '#/components/parameters/StreamId' }
+        - { $ref: '#/components/parameters/UploadId' }
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/offset+octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '204':
+          description: Chunk accepted; next offset is in Upload-Offset
+          headers:
+            Upload-Offset: { schema: { type: integer, format: int64 } }
+        '409': { $ref: '#/components/responses/Error' }
+  /uploads/video/resumable/{streamId}/{uploadId}/complete:
+    post:
+      tags: [Uploads]
+      summary: Finalize a completed resumable upload
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/UploadId' } ]
+      responses:
+        '201':
+          description: Authoritative asset created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetResult' }
+        '409': { $ref: '#/components/responses/Error' }
+  /uploads/video/local-files:
+    get:
+      tags: [Uploads]
+      summary: List supported videos available in configured local server roots
+      responses:
+        '200':
+          description: Local server videos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  files:
+                    type: array
+                    items: { $ref: '#/components/schemas/LocalVideo' }
+  /uploads/video/local-copy:
+    post:
+      tags: [Uploads]
+      summary: Copy a selected local-server video into a stream source folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [streamId, inputPath]
+              properties:
+                streamId: { type: string }
+                inputPath: { type: string, description: Server path returned by local-files listing }
+      responses:
+        '201':
+          description: Authoritative asset copied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetResult' }
+        '400': { $ref: '#/components/responses/Error' }
+  /probe/input:
+    post:
+      tags: [Sources]
+      summary: Probe a stream URL with FFprobe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inputUrl]
+              properties: { inputUrl: { type: string } }
+      responses:
+        '200': { description: Media capability probe }
+  /sources/{streamId}/clips:
+    post:
+      tags: [File tools]
+      summary: Stream-copy an authoritative file clip, including KLV/data streams
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startSeconds, endSeconds]
+              properties:
+                startSeconds: { type: number, format: double }
+                endSeconds: { type: number, format: double }
+      responses:
+        '201': { description: Clip ready for download }
+        '409': { $ref: '#/components/responses/Error' }
+  /sources/{streamId}/clips/{clipId}/download:
+    get:
+      tags: [File tools]
+      summary: Download a generated MPEG-TS clip
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { name: clipId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '200':
+          description: MPEG-TS binary download
+          content: { video/mp2t: { schema: { type: string, format: binary } } }
+  /sources/{streamId}/snapshot:
+    post:
+      tags: [File tools]
+      summary: Capture a JPEG from an authoritative uploaded source
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeSeconds]
+              properties: { timeSeconds: { type: number, format: double } }
+      responses:
+        '200':
+          description: JPEG snapshot
+          content: { image/jpeg: { schema: { type: string, format: binary } } }
+        '409': { $ref: '#/components/responses/Error' }
+  /sources/{streamId}/clip-thumbnails:
+    get:
+      tags: [File tools]
+      summary: Generate or retrieve the cached clip filmstrip
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses:
+        '200':
+          description: Cached filmstrip image URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  thumbnails:
+                    type: array
+                    items: { type: object, properties: { url: { type: string } } }
+  /streams/{streamId}/klv:
+    get:
+      tags: [Telemetry]
+      summary: Query stored KLV events by timestamp range
+      parameters:
+        - { $ref: '#/components/parameters/StreamId' }
+        - { name: fromMs, in: query, required: true, schema: { type: number } }
+        - { name: toMs, in: query, required: true, schema: { type: number } }
+      responses:
+        '200': { description: KLV event collection }
+        '400': { $ref: '#/components/responses/Error' }
+  /webrtc/rtpCapabilities:
+    get:
+      tags: [WebRTC]
+      summary: Get SFU router RTP capabilities
+      responses: { '200': { description: RTP capabilities } }
+  /webrtc/createTransport:
+    post:
+      tags: [WebRTC]
+      summary: Create a WebRTC receive transport
+      responses: { '200': { description: Transport parameters } }
+  /webrtc/connectTransport:
+    post:
+      tags: [WebRTC]
+      summary: Connect a WebRTC transport with DTLS parameters
+      responses: { '200': { description: Transport connected } }
+  /webrtc/consume:
+    post:
+      tags: [WebRTC]
+      summary: Create a WebRTC consumer for a stream
+      responses: { '200': { description: Consumer parameters } }
+  /webrtc/debug:
+    get:
+      tags: [WebRTC]
+      summary: Read SFU debug snapshot
+      responses: { '200': { description: WebRTC diagnostic snapshot } }
+components:
+  parameters:
+    StreamId:
+      name: streamId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' }
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Error:
+      description: Request could not be completed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties: { ok: { type: boolean, example: false }, error: { type: string } }
+    OperationResult:
+      type: object
+      properties: { ok: { type: boolean }, deletedEvents: { type: integer } }
+    AssetResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        assetId: { type: string, example: 550e8400-e29b-41d4-a716-446655440000.ts }
+        sizeBytes: { type: integer, format: int64 }
+        sourceFilename: { type: string }
+    UploadSession:
+      type: object
+      properties:
+        ok: { type: boolean }
+        uploadId: { type: string, format: uuid }
+        uploadUrl: { type: string }
+        offset: { type: integer, format: int64 }
+    LocalVideo:
+      type: object
+      properties:
+        inputPath: { type: string }
+        relativePath: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        modifiedAt: { type: string, format: date-time }
+    StartSourceRequest:
+      type: object
+      required: [streamId, sourceType]
+      properties:
+        streamId: { type: string }
+        sourceType: { type: string, enum: [stream, file] }
+        inputUrl: { type: string, description: Required for stream sources }
+        assetId: { type: string, description: Required for file sources }
+        hlsMode: { type: string, enum: [passthrough, abr], default: passthrough }
+        webRtcMode: { type: string, enum: [auto, copy, transcode], default: auto }
+        hlsSegmentSeconds: { type: number, default: 5 }
+        vttSegmentSeconds: { type: number, default: 5 }
+        maxCuesPerSecond: { type: number, default: 10 }
+        minCueDurSec: { type: number, default: 0.1 }
+        maxCueDurSec: { type: number, default: 0.5 }
+    StartSourceResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        streamId: { type: string }
+        hlsMasterUrl: { type: string }
+        subtitlesUrl: { type: string }
+        state: { $ref: '#/components/schemas/SourceRuntime' }
+    SourceRuntime:
+      type: object
+      properties:
+        streamId: { type: string }
+        state: { type: string, enum: [stopped, starting, running, degraded, finalizing, ready, stopping, error] }
+        sourceType: { type: string, enum: [stream, file] }
+        running: { type: boolean }
+        durationSeconds: { type: number, nullable: true }
+        progressPercent: { type: number, nullable: true }
+        processedSeconds: { type: number, nullable: true }
+        lastError: { type: string, nullable: true }
