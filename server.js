@@ -2093,6 +2093,76 @@ app.delete("/sources/:streamId", async (req, res) => {
 });
 
 // ---------- API: direct KLV query ----------
+const KLV_CSV_COLUMNS = [
+  "stream_id", "mission_time_utc", "mission_time_unix_ms", "video_time_seconds", "timestamp_source", "mission_id",
+  "sensor_latitude", "sensor_longitude", "sensor_alt_msl_m",
+  "platform_heading_deg", "platform_pitch_deg", "platform_roll_deg",
+  "frame_center_latitude", "frame_center_longitude", "frame_center_elevation_msl_m",
+  "sensor_relative_azimuth_deg", "sensor_relative_elevation_deg", "sensor_relative_roll_deg",
+  "sensor_horizontal_fov_deg", "sensor_vertical_fov_deg", "slant_range_m",
+  "frame_corner_1_latitude", "frame_corner_1_longitude", "frame_corner_2_latitude", "frame_corner_2_longitude",
+  "frame_corner_3_latitude", "frame_corner_3_longitude", "frame_corner_4_latitude", "frame_corner_4_longitude",
+  "frame_corner_source", "raw_metadata_json"
+];
+
+function csvCell(value) {
+  if (value === undefined || value === null) return "";
+  let text = typeof value === "string" ? value : String(value);
+  // Prevent spreadsheet applications from interpreting textual metadata as a
+  // formula. Numeric telemetry is passed as numbers and remains numeric.
+  if (typeof value === "string" && /^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function csvMissionTimeIso(milliseconds) {
+  const value = Number(milliseconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function klvCsvRow(streamId, event, timeline) {
+  const data = event.data || {};
+  const missionTimeMs = Number(event.tMs);
+  const videoTimeMs = timeline
+    && missionTimeMs >= timeline.missionMinMs
+    && missionTimeMs <= timeline.missionMaxMs
+    ? Math.round(timeline.videoBaseMs + (missionTimeMs - timeline.missionBaseMs))
+    : null;
+  return [
+    streamId, data.timestampIso || csvMissionTimeIso(missionTimeMs), missionTimeMs,
+    Number.isFinite(videoTimeMs) && videoTimeMs >= 0 ? videoTimeMs / 1000 : null,
+    data.timestampUnixMicros ? "klv" : "ingest", data.missionId,
+    data.sensorLat, data.sensorLon, data.sensorAltMslM,
+    data.platformHeadingDeg, data.platformPitchDeg, data.platformRollDeg,
+    data.frameCenterLat, data.frameCenterLon, data.frameCenterElevationMslM,
+    data.sensorRelAzDeg, data.sensorRelElDeg, data.sensorRelRollDeg,
+    data.sensorHfovDeg, data.sensorVfovDeg, data.slantRangeM,
+    data.frameCorner1Lat, data.frameCorner1Lon, data.frameCorner2Lat, data.frameCorner2Lon,
+    data.frameCorner3Lat, data.frameCorner3Lon, data.frameCorner4Lat, data.frameCorner4Lon,
+    data.frameCornerSource, JSON.stringify(data)
+  ].map(csvCell).join(",");
+}
+
+app.get("/streams/:streamId/klv/export.csv", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const [events, timeline] = await Promise.all([
+      store.listForExport(streamId),
+      store.getMissionTimeline(streamId)
+    ]);
+    const safeStreamId = streamId.replace(/[^a-z0-9_-]+/gi, "_");
+    const csv = `\uFEFF${KLV_CSV_COLUMNS.join(",")}\r\n${events.map((event) => klvCsvRow(streamId, event, timeline)).join("\r\n")}${events.length ? "\r\n" : ""}`;
+    res.status(200)
+      .type("text/csv; charset=utf-8")
+      .attachment(`${safeStreamId}-klv-telemetry.csv`)
+      .send(csv);
+  } catch (error) {
+    log.warn("klv_csv_export_error", { streamId: req.params.streamId, error: serializeError(error) });
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
 app.get("/streams/:streamId/klv", async (req, res) => {
   const streamId = req.params.streamId;
   const fromMs = Number(req.query.fromMs);

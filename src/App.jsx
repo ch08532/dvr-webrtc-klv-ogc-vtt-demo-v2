@@ -54,6 +54,7 @@ function PlaybackControlIcon({ name }) {
   if (name === 'clipStart') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 7h8l-3 5 3 5H9z" {...stroke} /></svg>;
   if (name === 'clipEnd') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14M15 7H7l3 5-3 5h8z" {...stroke} /></svg>;
   if (name === 'targetMark') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 10a6 6 0 1 0-12 0c0 4.5 6 10 6 10s6-5.5 6-10Z" {...stroke} /><circle cx="12" cy="10" r="2" {...stroke} /></svg>;
+  if (name === 'exportCsv') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3" {...stroke} /><path d="M7 5h3" {...stroke} /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h3l1.5-2h5L16 8h3v11H5z" {...stroke} /><circle cx="12" cy="13" r="3" {...stroke} /></svg>;
 }
 
@@ -100,6 +101,7 @@ function App() {
   const [clipThumbnailFrames, setClipThumbnailFrames] = useState([]);
   const [clipThumbnailLoading, setClipThumbnailLoading] = useState(false);
   const [authoritativeSnapshotInFlight, setAuthoritativeSnapshotInFlight] = useState(false);
+  const [klvCsvExportInFlight, setKlvCsvExportInFlight] = useState(false);
   const [targetLogEntries, setTargetLogEntries] = useState([]);
   const [targetLogFields, setTargetLogFields] = useState([]);
   const [targetLogLoading, setTargetLogLoading] = useState(false);
@@ -1759,6 +1761,36 @@ function App() {
   const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS');
   const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC');
 
+  const downloadKlvCsv = async () => {
+    if (!targetLogSourceActive || klvCsvExportInFlight) return;
+    setKlvCsvExportInFlight(true);
+    let response = null;
+    try {
+      response = await fetch(`/streams/${encodeURIComponent(streamId)}/klv/export.csv`);
+      markServerOnline();
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || `KLV CSV export failed (HTTP ${response.status})`);
+      }
+      const blob = await response.blob();
+      const safeStreamId = String(streamId || 'stream').replace(/[^a-z0-9_-]+/gi, '_');
+      const href = URL.createObjectURL(blob);
+      const download = document.createElement('a');
+      download.href = href;
+      download.download = `${safeStreamId}-klv-telemetry.csv`;
+      document.body.appendChild(download);
+      download.click();
+      download.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 1000);
+      setStatus('KLV telemetry CSV downloaded.');
+    } catch (error) {
+      if (!response) markServerOffline(error);
+      setStatus(`KLV CSV export failed: ${String(error?.message || error)}`);
+    } finally {
+      setKlvCsvExportInFlight(false);
+    }
+  };
+
   const downloadAuthoritativeSnapshot = async () => {
     if (!currentSourceIsFile || authoritativeSnapshotInFlight) return;
     const player = getActiveHlsPlayer();
@@ -3357,7 +3389,10 @@ function App() {
                        )}
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
-                      <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
+                      <Group justify="space-between" align="center">
+                        <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
+                        <Tooltip label="Export KLV CSV" withArrow><ActionIcon variant="light" size="sm" onClick={downloadKlvCsv} disabled={!targetLogSourceActive || klvCsvExportInFlight} loading={klvCsvExportInFlight} aria-label="Export KLV CSV"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                      </Group>
                       <Tabs value={dvrTelemetryTab} onChange={setDvrTelemetryTab} mt="xs">
                         <Tabs.List grow>
                           <Tabs.Tab value="data">Data</Tabs.Tab>
@@ -3434,7 +3469,10 @@ function App() {
                       </Group> : null}
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
-                      <Text size="sm" fw={600}>Live KLV Telemetry</Text>
+                      <Group justify="space-between" align="center">
+                        <Text size="sm" fw={600}>Live KLV Telemetry</Text>
+                        <Tooltip label="Export KLV CSV" withArrow><ActionIcon variant="light" size="sm" onClick={downloadKlvCsv} disabled={!targetLogSourceActive || klvCsvExportInFlight} loading={klvCsvExportInFlight} aria-label="Export KLV CSV"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                      </Group>
                       <Tabs value={liveTelemetryTab} onChange={setLiveTelemetryTab} mt="xs">
                         <Tabs.List grow>
                           <Tabs.Tab value="data">Data</Tabs.Tab>

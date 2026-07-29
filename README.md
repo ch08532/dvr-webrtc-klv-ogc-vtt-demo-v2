@@ -139,6 +139,10 @@ The **Add Mark** action creates a SQLite-backed target-log entry for the current
 
 Use **Manage fields** to add stream-specific text, number, or boolean metadata fields. Deactivating a field retains historical values already stored on entries. At backend startup, the `./recordings/` folder is purged and SQLite telemetry plus Target Log entries/schemas are cleared together. Stopping a source also purges that stream's Target Log from SQLite and clears it from the UI. Starting a new source resets the stream's recordings and KLV records.
 
+### KLV CSV export
+
+The download icon in either KLV telemetry panel exports the selected stream's stored SQLite telemetry as a UTF-8 CSV. It is separate from the Mission Target Log and includes one chronological row per decoded KLV event, normalized telemetry columns, derived video alignment time where available, and the raw decoded metadata JSON.
+
 ## Notes
 - The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint. Source frame corners are preferred; when source offsets are missing or all zero, a `computed-flat` estimate uses sensor pose, FOV, range, and a flat-ground approximation. Each map centers on its first valid frame center; use **Center map** to recenter later.
 - The Data tabs display all decoded telemetry in the active cue, including `missionId` when ST 0601 tag 3 is present. The KLV `timestampIso` is displayed beneath each map.

@@ -286,6 +286,19 @@ paths:
       responses:
         '200': { description: KLV event collection }
         '400': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/klv/export.csv:
+    get:
+      tags: [Telemetry]
+      summary: Download all stored KLV telemetry for a stream as CSV
+      description: One row per decoded KLV event, ordered by mission timestamp. The export includes normalized telemetry columns and raw decoded metadata JSON; it does not include Mission Target Log entries.
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses:
+        '200':
+          description: UTF-8 CSV telemetry download
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/Error' }
   /streams/{streamId}/target-log:
     get:
       tags: [Target Log]

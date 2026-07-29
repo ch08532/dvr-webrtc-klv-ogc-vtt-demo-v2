@@ -258,6 +258,15 @@ export class SqliteKlvStore {
     return rows.map(r => ({ tMs: r.t_ms, data: JSON.parse(r.json) }));
   }
 
+  /** Returns every decoded event for a stream in mission-time order for export. */
+  async listForExport(streamId) {
+    const rows = await all(this.db,
+      `SELECT t_ms, json FROM klv_events WHERE stream_id=? ORDER BY t_ms ASC`,
+      [streamId]
+    );
+    return rows.map((row) => ({ tMs: Number(row.t_ms), data: JSON.parse(row.json) }));
+  }
+
   /** Returns the most recently stored telemetry event for a source. */
   async latest(streamId) {
     const row = await get(this.db,
