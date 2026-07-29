@@ -123,7 +123,7 @@ DVR output will appear under `./recordings/<streamId>/`:
 
 ### Creating a file clip
 
-The DVR **Create video clip** control is available only for an uploaded file source. Drag either edge to preview the HLS start/end positions, then export. FFmpeg seeks in the authoritative uploaded file, stream-copies every source stream (video, audio, and KLV/data), and writes a downloadable MPEG-TS clip. The start can move to a nearby preceding decodable keyframe; there is no re-encode or fixed maximum duration by default. Set `MAX_CLIP_DURATION_SECONDS` to impose one.
+The DVR **Create video clip** control is available only for an uploaded file source. It builds a cached filmstrip of representative frames from the authoritative source behind the trim handles. Drag either edge to preview the HLS start/end positions, then export. FFmpeg seeks in the authoritative uploaded file, stream-copies every source stream (video, audio, and KLV/data), and writes a downloadable MPEG-TS clip. The start can move to a nearby preceding decodable keyframe; there is no re-encode or fixed maximum duration by default. Set `MAX_CLIP_DURATION_SECONDS` to impose one.
 
 ### Snapshots
 

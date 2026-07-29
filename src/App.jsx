@@ -94,6 +94,8 @@ function App() {
   const [clipEndSeconds, setClipEndSeconds] = useState(0);
   const [clipInFlight, setClipInFlight] = useState(false);
   const [clipResult, setClipResult] = useState(null);
+  const [clipThumbnailFrames, setClipThumbnailFrames] = useState([]);
+  const [clipThumbnailLoading, setClipThumbnailLoading] = useState(false);
   const [authoritativeSnapshotInFlight, setAuthoritativeSnapshotInFlight] = useState(false);
   const [fileStartProgress, setFileStartProgress] = useState(null);
   const [dvrDiag, setDvrDiag] = useState({
@@ -2380,6 +2382,28 @@ function App() {
   }, [currentSourceIsFile, streamId, clipTimelineEndSeconds]);
 
   useEffect(() => {
+    let cancelled = false;
+    if (!clipWidgetReady) {
+      setClipThumbnailFrames([]);
+      setClipThumbnailLoading(false);
+      return () => { cancelled = true; };
+    }
+    setClipThumbnailLoading(true);
+    void api(`/sources/${encodeURIComponent(streamId)}/clip-thumbnails`)
+      .then((result) => {
+        if (cancelled || !result?.ok || !Array.isArray(result.thumbnails)) return;
+        setClipThumbnailFrames(result.thumbnails);
+      })
+      .catch(() => {
+        if (!cancelled) setClipThumbnailFrames([]);
+      })
+      .finally(() => {
+        if (!cancelled) setClipThumbnailLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [clipWidgetReady, streamId, clipTimelineEndSeconds]);
+
+  useEffect(() => {
     if (hlsQuality === 'auto') return;
     if (activeHlsRenditions.some((rendition) => rendition.id === hlsQuality)) return;
     hlsQualityRef.current = 'auto';
@@ -2916,9 +2940,12 @@ function App() {
                                <Text size="sm" fw={700}>Create video clip</Text>
                               <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports stream-copy the uploaded source and may begin at a preceding keyframe.</Text>
                              </div>
-                             <Badge color={streamRuntime?.klvProbe?.available ? 'teal' : 'gray'} variant="light">
-                               {streamRuntime?.klvProbe?.available ? 'KLV preserved' : 'No KLV detected'}
-                             </Badge>
+                             <Group gap="xs">
+                               {clipThumbnailLoading ? <Badge color="blue" variant="light">Building thumbnails…</Badge> : null}
+                               <Badge color={streamRuntime?.klvProbe?.available ? 'teal' : 'gray'} variant="light">
+                                 {streamRuntime?.klvProbe?.available ? 'KLV preserved' : 'No KLV detected'}
+                               </Badge>
+                             </Group>
                            </Group>
                            <div
                              ref={clipTrimShellRef}
@@ -2928,8 +2955,10 @@ function App() {
                              onPointerUp={endClipPointerDrag}
                              onPointerCancel={endClipPointerDrag}
                             >
-                              <div className="clip-filmstrip" aria-hidden="true">
-                               {Array.from({ length: 12 }, (_, index) => <span key={index} />)}
+                              <div className={`clip-filmstrip${clipThumbnailFrames.length ? ' has-thumbnails' : ''}`} aria-hidden="true">
+                               {clipThumbnailFrames.length
+                                 ? clipThumbnailFrames.map((thumbnail, index) => <img key={thumbnail.url || index} src={thumbnail.url} alt="" />)
+                                 : Array.from({ length: 12 }, (_, index) => <span key={index} />)}
                              </div>
                              {clipWidgetReady ? (
                                <>

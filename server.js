@@ -57,6 +57,9 @@ const CLIP_MAX_DURATION_SECONDS = Number(process.env.MAX_CLIP_DURATION_SECONDS |
 const SOURCE_POSTER_WIDTH = Math.max(96, Math.min(320, Number(process.env.SOURCE_POSTER_WIDTH || 160)));
 const SOURCE_POSTER_TIMEOUT_MS = Math.max(3000, Number(process.env.SOURCE_POSTER_TIMEOUT_MS || 15000));
 const AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS = Math.max(3000, Number(process.env.AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS || 30000));
+const CLIP_THUMBNAIL_COUNT = 12;
+const CLIP_THUMBNAIL_WIDTH = 160;
+const CLIP_THUMBNAIL_TIMEOUT_MS = Math.max(3000, Number(process.env.CLIP_THUMBNAIL_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MIN_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_MIN_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE_MS_PER_SEGMENT || 500));
 const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
@@ -66,6 +69,7 @@ fs.mkdirSync(DB_DIR, { recursive: true });
 if (!process.env.LOCAL_VIDEO_SOURCE_ROOTS) fs.mkdirSync(DEFAULT_LOCAL_VIDEO_SOURCE_ROOT, { recursive: true });
 
 const activeResumableUploads = new Set();
+const clipThumbnailJobs = new Map();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -1316,6 +1320,107 @@ app.get("/sources", (req, res) => {
 
 app.get("/sources/:streamId/state", (req, res) => {
   res.json(getSourceRuntime(req.params.streamId));
+});
+
+/** Builds and caches a real filmstrip of representative authoritative frames. */
+async function getClipThumbnailFrames(streamId, source, durationSeconds) {
+  const sourceDir = resolveSourceAssetDir(streamId);
+  const sourceInputPath = path.resolve(String(source.inputUrl || ""));
+  if (!sourceInputPath.startsWith(`${sourceDir}${path.sep}`) || !fs.existsSync(sourceInputPath)) {
+    throw new Error("uploaded source file is unavailable");
+  }
+
+  const assetKey = path.parse(sourceInputPath).name;
+  const thumbnailDir = path.join(resolveStreamRecordingDir(streamId), "clip-thumbnails", assetKey);
+  const filename = "filmstrip.jpg";
+  const thumbnailPath = path.join(thumbnailDir, filename);
+  const thumbnailUrl = `/sources/${encodeURIComponent(streamId)}/clip-thumbnails/${encodeURIComponent(assetKey)}/${filename}`;
+  const jobKey = `${streamId}:${assetKey}:${durationSeconds.toFixed(3)}`;
+
+  if (fs.existsSync(thumbnailPath)) {
+    return [{ url: thumbnailUrl }];
+  }
+  if (clipThumbnailJobs.has(jobKey)) return clipThumbnailJobs.get(jobKey);
+
+  const job = (async () => {
+    await fs.promises.rm(thumbnailDir, { recursive: true, force: true });
+    await fs.promises.mkdir(thumbnailDir, { recursive: true });
+    try {
+      const times = Array.from({ length: CLIP_THUMBNAIL_COUNT }, (_, index) =>
+        Number((durationSeconds * ((index + 0.5) / CLIP_THUMBNAIL_COUNT)).toFixed(3))
+      );
+      const filterInputs = times.map((_, index) =>
+        `[${index}:v:0]scale=${CLIP_THUMBNAIL_WIDTH}:-2,crop=${CLIP_THUMBNAIL_WIDTH}:ih[thumb${index}]`
+      ).join(";");
+      const hstackInputs = times.map((_, index) => `[thumb${index}]`).join("");
+      await runFfmpeg([
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        // Each input seeks independently, so the overview stays fast for a
+        // multi-hour TS rather than decoding the entire carrier.
+        ...times.flatMap((timeSeconds) => ["-ss", String(timeSeconds), "-i", sourceInputPath]),
+        "-filter_complex", `${filterInputs};${hstackInputs}hstack=inputs=${CLIP_THUMBNAIL_COUNT}[filmstrip]`,
+        "-map", "[filmstrip]",
+        "-frames:v", "1",
+        "-q:v", "4",
+        thumbnailPath
+      ], { label: "clip filmstrip capture", timeoutMs: CLIP_THUMBNAIL_TIMEOUT_MS });
+      const generated = await fs.promises.stat(thumbnailPath).catch(() => null);
+      if (!generated?.isFile() || generated.size <= 0) throw new Error("clip filmstrip generation produced no image");
+      log.info("clip_thumbnails_ready", { streamId, assetKey, count: CLIP_THUMBNAIL_COUNT });
+      return [{ url: thumbnailUrl }];
+    } catch (error) {
+      await fs.promises.rm(thumbnailDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+  })();
+  clipThumbnailJobs.set(jobKey, job);
+  try {
+    return await job;
+  } finally {
+    clipThumbnailJobs.delete(jobKey);
+  }
+}
+
+// Real thumbnail frames are generated lazily and cached with the stream's
+// recording artifacts. They are cleared automatically on the next start.
+app.get("/sources/:streamId/clip-thumbnails", async (req, res) => {
+  const streamId = req.params.streamId;
+  const source = sources.get(streamId);
+  if (!source || source.sourceType !== "file") {
+    return res.status(409).json({ ok: false, error: "clip thumbnails are available only for an uploaded video source" });
+  }
+  const durationSeconds = Number(sourceStates.get(streamId)?.durationSeconds);
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return res.status(409).json({ ok: false, error: "video duration is not available yet" });
+  }
+  try {
+    const thumbnails = await getClipThumbnailFrames(streamId, source, durationSeconds);
+    return res.json({ ok: true, thumbnails });
+  } catch (error) {
+    log.warn("clip_thumbnails_error", { streamId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+// Serve only a current source's generated thumbnail frame, never a source file.
+app.get("/sources/:streamId/clip-thumbnails/:assetKey/:filename", async (req, res) => {
+  const { streamId, assetKey, filename } = req.params;
+  const source = sources.get(streamId);
+  if (!source || source.sourceType !== "file" || !/^[a-f0-9-]{36}$/i.test(assetKey) || filename !== "filmstrip.jpg") {
+    return res.status(404).end();
+  }
+  const currentAssetKey = path.parse(path.resolve(String(source.inputUrl || ""))).name;
+  if (assetKey !== currentAssetKey) return res.status(404).end();
+  try {
+    const thumbnailDir = path.resolve(resolveStreamRecordingDir(streamId), "clip-thumbnails", assetKey);
+    const filePath = path.resolve(thumbnailDir, filename);
+    if (!filePath.startsWith(`${thumbnailDir}${path.sep}`) || !fs.existsSync(filePath)) return res.status(404).end();
+    return res.sendFile(filePath);
+  } catch {
+    return res.status(404).end();
+  }
 });
 
 // ---------- API: file-backed clips ----------
