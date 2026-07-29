@@ -101,7 +101,7 @@ function App() {
   const [clipThumbnailFrames, setClipThumbnailFrames] = useState([]);
   const [clipThumbnailLoading, setClipThumbnailLoading] = useState(false);
   const [authoritativeSnapshotInFlight, setAuthoritativeSnapshotInFlight] = useState(false);
-  const [klvCsvExportInFlight, setKlvCsvExportInFlight] = useState(false);
+  const [klvExportInFlight, setKlvExportInFlight] = useState(null);
   const [targetLogEntries, setTargetLogEntries] = useState([]);
   const [targetLogFields, setTargetLogFields] = useState([]);
   const [targetLogLoading, setTargetLogLoading] = useState(false);
@@ -1761,33 +1761,34 @@ function App() {
   const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS');
   const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC');
 
-  const downloadKlvCsv = async () => {
-    if (!targetLogSourceActive || klvCsvExportInFlight) return;
-    setKlvCsvExportInFlight(true);
+  const downloadKlvExport = async (format) => {
+    if (!targetLogSourceActive || klvExportInFlight) return;
+    const normalizedFormat = format === 'kml' ? 'kml' : 'csv';
+    setKlvExportInFlight(normalizedFormat);
     let response = null;
     try {
-      response = await fetch(`/streams/${encodeURIComponent(streamId)}/klv/export.csv`);
+      response = await fetch(`/streams/${encodeURIComponent(streamId)}/klv/export.${normalizedFormat}`);
       markServerOnline();
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
-        throw new Error(payload?.error || `KLV CSV export failed (HTTP ${response.status})`);
+        throw new Error(payload?.error || `KLV ${normalizedFormat.toUpperCase()} export failed (HTTP ${response.status})`);
       }
       const blob = await response.blob();
       const safeStreamId = String(streamId || 'stream').replace(/[^a-z0-9_-]+/gi, '_');
       const href = URL.createObjectURL(blob);
       const download = document.createElement('a');
       download.href = href;
-      download.download = `${safeStreamId}-klv-telemetry.csv`;
+      download.download = `${safeStreamId}-klv-telemetry.${normalizedFormat}`;
       document.body.appendChild(download);
       download.click();
       download.remove();
       setTimeout(() => URL.revokeObjectURL(href), 1000);
-      setStatus('KLV telemetry CSV downloaded.');
+      setStatus(`KLV telemetry ${normalizedFormat.toUpperCase()} downloaded.`);
     } catch (error) {
       if (!response) markServerOffline(error);
-      setStatus(`KLV CSV export failed: ${String(error?.message || error)}`);
+      setStatus(`KLV ${normalizedFormat.toUpperCase()} export failed: ${String(error?.message || error)}`);
     } finally {
-      setKlvCsvExportInFlight(false);
+      setKlvExportInFlight(null);
     }
   };
 
@@ -1973,6 +1974,11 @@ function App() {
     const unitIndex = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)) - 1);
     const scaled = value / (1024 ** (unitIndex + 1));
     return `${scaled.toFixed(scaled < 10 ? 2 : 1)} ${units[unitIndex]}`;
+  };
+
+  const formatBytesPerSecond = (bytes) => {
+    const value = Number(bytes);
+    return Number.isFinite(value) && value >= 0 ? `${formatBytes(value)}/s` : 'n/a';
   };
 
   const conversionProgress = (source) => {
@@ -3391,7 +3397,16 @@ function App() {
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
                       <Group justify="space-between" align="center">
                         <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
-                        <Tooltip label="Export KLV CSV" withArrow><ActionIcon variant="light" size="sm" onClick={downloadKlvCsv} disabled={!targetLogSourceActive || klvCsvExportInFlight} loading={klvCsvExportInFlight} aria-label="Export KLV CSV"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                        <Menu shadow="md" width={190} position="bottom-end" withArrow>
+                          <Menu.Target>
+                            <Tooltip label="Export KLV data" withArrow><ActionIcon variant="light" size="sm" disabled={!targetLogSourceActive || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                          </Menu.Target>
+                          <Menu.Dropdown>
+                            <Menu.Label>Export KLV data</Menu.Label>
+                            <Menu.Item onClick={() => downloadKlvExport('csv')} disabled={!!klvExportInFlight}>Export as CSV</Menu.Item>
+                            <Menu.Item onClick={() => downloadKlvExport('kml')} disabled={!!klvExportInFlight}>Export as KML</Menu.Item>
+                          </Menu.Dropdown>
+                        </Menu>
                       </Group>
                       <Tabs value={dvrTelemetryTab} onChange={setDvrTelemetryTab} mt="xs">
                         <Tabs.List grow>
@@ -3471,7 +3486,16 @@ function App() {
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
                       <Group justify="space-between" align="center">
                         <Text size="sm" fw={600}>Live KLV Telemetry</Text>
-                        <Tooltip label="Export KLV CSV" withArrow><ActionIcon variant="light" size="sm" onClick={downloadKlvCsv} disabled={!targetLogSourceActive || klvCsvExportInFlight} loading={klvCsvExportInFlight} aria-label="Export KLV CSV"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                        <Menu shadow="md" width={190} position="bottom-end" withArrow>
+                          <Menu.Target>
+                            <Tooltip label="Export KLV data" withArrow><ActionIcon variant="light" size="sm" disabled={!targetLogSourceActive || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                          </Menu.Target>
+                          <Menu.Dropdown>
+                            <Menu.Label>Export KLV data</Menu.Label>
+                            <Menu.Item onClick={() => downloadKlvExport('csv')} disabled={!!klvExportInFlight}>Export as CSV</Menu.Item>
+                            <Menu.Item onClick={() => downloadKlvExport('kml')} disabled={!!klvExportInFlight}>Export as KML</Menu.Item>
+                          </Menu.Dropdown>
+                        </Menu>
                       </Group>
                       <Tabs value={liveTelemetryTab} onChange={setLiveTelemetryTab} mt="xs">
                         <Tabs.List grow>
@@ -3586,6 +3610,10 @@ function App() {
                 <Stack gap={2}>
                   <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
                   <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
+                </Stack>
+                <Stack gap={2}>
+                  <Text size="sm">Disk I/O: read {formatBytesPerSecond(hostMetrics?.disk?.readBytesPerSec)} · write {formatBytesPerSecond(hostMetrics?.disk?.writeBytesPerSec)}</Text>
+                  <Text size="sm">Network: down {formatBytesPerSecond(hostMetrics?.network?.receiveBytesPerSec)} · up {formatBytesPerSecond(hostMetrics?.network?.transmitBytesPerSec)}</Text>
                 </Stack>
                 <Stack gap={2}>
                   {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (

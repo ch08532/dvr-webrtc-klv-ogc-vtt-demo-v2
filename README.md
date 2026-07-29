@@ -141,7 +141,7 @@ Use **Manage fields** to add stream-specific text, number, or boolean metadata f
 
 ### KLV CSV export
 
-The download icon in either KLV telemetry panel exports the selected stream's stored SQLite telemetry as a UTF-8 CSV. It is separate from the Mission Target Log and includes one chronological row per decoded KLV event, normalized telemetry columns, derived video alignment time where available, and the raw decoded metadata JSON.
+The export menu in either KLV telemetry panel exports the selected stream's stored SQLite telemetry separately from the Mission Target Log. **CSV** contains one chronological row per decoded KLV event with normalized telemetry columns and derived video alignment time where available. **KML** contains Google Earth time-series tracks for platform position (`sensorLat`/`sensorLon`/`sensorAltMslM`, plane icon) and **Sensor - Frame Center** (target marker), plus timestamped ground-clamped FOV footprints when decoded frame corners are available. Both formats omit raw JSON to reduce file size.
 
 ## Notes
 - The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint. Source frame corners are preferred; when source offsets are missing or all zero, a `computed-flat` estimate uses sensor pose, FOV, range, and a flat-ground approximation. Each map centers on its first valid frame center; use **Center map** to recenter later.

@@ -2102,7 +2102,7 @@ const KLV_CSV_COLUMNS = [
   "sensor_horizontal_fov_deg", "sensor_vertical_fov_deg", "slant_range_m",
   "frame_corner_1_latitude", "frame_corner_1_longitude", "frame_corner_2_latitude", "frame_corner_2_longitude",
   "frame_corner_3_latitude", "frame_corner_3_longitude", "frame_corner_4_latitude", "frame_corner_4_longitude",
-  "frame_corner_source", "raw_metadata_json"
+  "frame_corner_source"
 ];
 
 function csvCell(value) {
@@ -2140,8 +2140,152 @@ function klvCsvRow(streamId, event, timeline) {
     data.sensorHfovDeg, data.sensorVfovDeg, data.slantRangeM,
     data.frameCorner1Lat, data.frameCorner1Lon, data.frameCorner2Lat, data.frameCorner2Lon,
     data.frameCorner3Lat, data.frameCorner3Lon, data.frameCorner4Lat, data.frameCorner4Lon,
-    data.frameCornerSource, JSON.stringify(data)
+    data.frameCornerSource
   ].map(csvCell).join(",");
+}
+
+const KML_METADATA_FIELDS = [
+  ["mission_time_unix_ms", "Mission time (Unix ms)", (event) => event.tMs],
+  ["mission_id", "Mission ID", (event) => event.data?.missionId],
+  ["sensor_alt_msl_m", "Sensor altitude MSL (m)", (event) => event.data?.sensorAltMslM],
+  ["platform_heading_deg", "Platform heading (deg)", (event) => event.data?.platformHeadingDeg],
+  ["platform_pitch_deg", "Platform pitch (deg)", (event) => event.data?.platformPitchDeg],
+  ["platform_roll_deg", "Platform roll (deg)", (event) => event.data?.platformRollDeg],
+  ["sensor_relative_azimuth_deg", "Sensor relative azimuth (deg)", (event) => event.data?.sensorRelAzDeg],
+  ["sensor_relative_elevation_deg", "Sensor relative elevation (deg)", (event) => event.data?.sensorRelElDeg],
+  ["sensor_relative_roll_deg", "Sensor relative roll (deg)", (event) => event.data?.sensorRelRollDeg],
+  ["sensor_horizontal_fov_deg", "Sensor horizontal FOV (deg)", (event) => event.data?.sensorHfovDeg],
+  ["sensor_vertical_fov_deg", "Sensor vertical FOV (deg)", (event) => event.data?.sensorVfovDeg],
+  ["slant_range_m", "Slant range (m)", (event) => event.data?.slantRangeM],
+  ["frame_corner_source", "Frame corner source", (event) => event.data?.frameCornerSource]
+];
+
+function xmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function validKmlPosition(lat, lon) {
+  return Number.isFinite(Number(lat))
+    && Number.isFinite(Number(lon))
+    && Math.abs(Number(lat)) <= 90
+    && Math.abs(Number(lon)) <= 180;
+}
+
+function kmlTime(event) {
+  const preferred = String(event.data?.timestampIso || "").trim();
+  if (preferred && Number.isFinite(Date.parse(preferred))) return preferred;
+  return csvMissionTimeIso(event.tMs);
+}
+
+function kmlTrack({ name, description, styleUrl, events, latKey, lonKey, altitudeKey }) {
+  const points = events.filter((event) => validKmlPosition(event.data?.[latKey], event.data?.[lonKey]) && kmlTime(event));
+  if (!points.length) return "";
+  const simpleArrays = KML_METADATA_FIELDS.map(([fieldName, , valueFor]) => (
+    `          <gx:SimpleArrayData name="${fieldName}">${points.map((event) => `<gx:value>${xmlEscape(valueFor(event))}</gx:value>`).join("")}</gx:SimpleArrayData>`
+  )).join("\n");
+  const whens = points.map((event) => `        <when>${xmlEscape(kmlTime(event))}</when>`).join("\n");
+  const coordinates = points.map((event) => {
+    const altitude = Number(event.data?.[altitudeKey]);
+    return `        <gx:coord>${Number(event.data[lonKey])} ${Number(event.data[latKey])} ${Number.isFinite(altitude) ? altitude : 0}</gx:coord>`;
+  }).join("\n");
+  return `    <Placemark>
+      <name>${xmlEscape(name)}</name>
+      <description>${xmlEscape(description)}</description>
+      <styleUrl>${styleUrl}</styleUrl>
+      <gx:Track>
+        <altitudeMode>absolute</altitudeMode>
+${whens}
+${coordinates}
+        <ExtendedData>
+          <SchemaData schemaUrl="#klvTelemetrySchema">
+${simpleArrays}
+          </SchemaData>
+        </ExtendedData>
+      </gx:Track>
+    </Placemark>`;
+}
+
+function kmlFovFootprints(events) {
+  const footprints = events.filter((event) => (
+    kmlTime(event) && [1, 2, 3, 4].every((index) => validKmlPosition(
+      event.data?.[`frameCorner${index}Lat`],
+      event.data?.[`frameCorner${index}Lon`]
+    ))
+  ));
+  if (!footprints.length) return "";
+  return footprints.map((event) => {
+    const coordinates = [1, 2, 3, 4, 1].map((index) => (
+      `${Number(event.data[`frameCorner${index}Lon`])},${Number(event.data[`frameCorner${index}Lat`])},0`
+    )).join(" ");
+    return `    <Placemark>
+      <name>FOV footprint</name>
+      <TimeStamp><when>${xmlEscape(kmlTime(event))}</when></TimeStamp>
+      <ExtendedData>
+        <Data name="frame_corner_source"><value>${xmlEscape(event.data?.frameCornerSource)}</value></Data>
+        <Data name="mission_id"><value>${xmlEscape(event.data?.missionId)}</value></Data>
+      </ExtendedData>
+      <styleUrl>#fovFootprintStyle</styleUrl>
+      <Polygon>
+        <altitudeMode>clampToGround</altitudeMode>
+        <outerBoundaryIs><LinearRing><coordinates>${coordinates}</coordinates></LinearRing></outerBoundaryIs>
+      </Polygon>
+    </Placemark>`;
+  }).join("\n");
+}
+
+function buildKlvKml(streamId, events) {
+  const schema = KML_METADATA_FIELDS.map(([fieldName, displayName]) => (
+    `      <gx:SimpleArrayField name="${fieldName}" type="string"><displayName>${xmlEscape(displayName)}</displayName></gx:SimpleArrayField>`
+  )).join("\n");
+  const platformTrack = kmlTrack({
+    name: "Platform location",
+    description: "Platform/sensor position from KLV sensor latitude, longitude, and altitude.",
+    styleUrl: "#platformTrackStyle",
+    events,
+    latKey: "sensorLat",
+    lonKey: "sensorLon",
+    altitudeKey: "sensorAltMslM"
+  });
+  const spiTrack = kmlTrack({
+    name: "Sensor - Frame Center",
+    description: "Sensor pointing location from KLV frame-center latitude, longitude, and elevation.",
+    styleUrl: "#spiTrackStyle",
+    events,
+    latKey: "frameCenterLat",
+    lonKey: "frameCenterLon",
+    altitudeKey: "frameCenterElevationMslM"
+  });
+  const fovFootprints = kmlFovFootprints(events);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
+  <Document>
+    <name>${xmlEscape(`${streamId} KLV telemetry`)}</name>
+    <description>Time-series platform and SPI telemetry exported from the stream&apos;s SQLite KLV dataset.</description>
+    <Schema id="klvTelemetrySchema" name="KLV Telemetry">
+${schema}
+    </Schema>
+    <Style id="platformTrackStyle"><IconStyle><scale>1.1</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle><LineStyle><color>ffff0000</color><width>3</width></LineStyle></Style>
+    <Style id="spiTrackStyle"><IconStyle><scale>1.05</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/target.png</href></Icon></IconStyle><LineStyle><color>ff00a5ff</color><width>3</width></LineStyle></Style>
+    <Style id="fovFootprintStyle"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4d00a5ff</color></PolyStyle></Style>
+    <Folder>
+      <name>Platform location</name>
+${platformTrack || "      <description>No platform positions were present in the stored KLV telemetry.</description>"}
+    </Folder>
+    <Folder>
+      <name>Sensor - Frame Center</name>
+${spiTrack || "      <description>No SPI/frame-center positions were present in the stored KLV telemetry.</description>"}
+    </Folder>
+    <Folder>
+      <name>FOV footprints</name>
+${fovFootprints || "      <description>No valid frame-corner geometry was present in the stored KLV telemetry.</description>"}
+    </Folder>
+  </Document>
+</kml>`;
 }
 
 app.get("/streams/:streamId/klv/export.csv", async (req, res) => {
@@ -2159,6 +2303,21 @@ app.get("/streams/:streamId/klv/export.csv", async (req, res) => {
       .send(csv);
   } catch (error) {
     log.warn("klv_csv_export_error", { streamId: req.params.streamId, error: serializeError(error) });
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.get("/streams/:streamId/klv/export.kml", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const events = await store.listForExport(streamId);
+    const safeStreamId = streamId.replace(/[^a-z0-9_-]+/gi, "_");
+    res.status(200)
+      .type("application/vnd.google-earth.kml+xml; charset=utf-8")
+      .attachment(`${safeStreamId}-klv-telemetry.kml`)
+      .send(buildKlvKml(streamId, events));
+  } catch (error) {
+    log.warn("klv_kml_export_error", { streamId: req.params.streamId, error: serializeError(error) });
     res.status(400).json({ ok: false, error: String(error?.message || error) });
   }
 });
