@@ -2962,7 +2962,7 @@ function App() {
               <Group grow mt="xs">
                 <Select
                   label="HLS mode"
-                  description="Passthrough copies H.264 video and omits audio; other sources use one H.264 fallback stream. ABR creates three streams."
+                  description="Passthrough copies H.264 video (no audio); ABR creates three streams."
                   data={[
                     { value: 'passthrough', label: 'Passthrough (source quality)' },
                     { value: 'abr', label: 'Full ABR ladder' }
