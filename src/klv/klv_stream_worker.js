@@ -472,6 +472,9 @@ async function processPendingSegments() {
       // profiling without affecting KLV decode or subtitle generation.
       const preparedBatch = decodedBatch.map((item) => prepareSegmentEntry(current, item));
       const decodedForStorage = preparedBatch.flatMap((item) => item.records.map((record) => record.decoded));
+      const sourceTimestampRecords = preparedBatch
+        .flatMap((item) => item.records)
+        .filter((record) => record.timeSource === "source_timestamp" && Number.isFinite(record.klvUnixMs));
       if (current.writeSqlite) {
         await current.store.addMany(current.streamId, decodedForStorage, {
           isEphemeral: current.sourceType !== "file"
@@ -481,6 +484,14 @@ async function processPendingSegments() {
           requestId: current.requestId,
           streamId: current.streamId,
           decodedCount: decodedForStorage.length
+        });
+      }
+      if (sourceTimestampRecords.length && Number.isFinite(current.sourceTimelineBaseMs) && Number.isFinite(current.sourceTimelineStartSec)) {
+        await current.store.updateMissionTimeline(current.streamId, {
+          missionBaseMs: current.sourceTimelineBaseMs,
+          videoBaseMs: Math.round(current.sourceTimelineStartSec * 1000),
+          missionMinMs: Math.min(...sourceTimestampRecords.map((record) => record.klvUnixMs)),
+          missionMaxMs: Math.max(...sourceTimestampRecords.map((record) => record.klvUnixMs))
         });
       }
 

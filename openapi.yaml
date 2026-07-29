@@ -15,6 +15,7 @@ tags:
   - name: Uploads
   - name: File tools
   - name: Telemetry
+  - name: Target Log
   - name: WebRTC
 paths:
   /healthz:
@@ -84,7 +85,7 @@ paths:
   /sources/{streamId}:
     delete:
       tags: [Sources]
-      summary: Stop an active or completed source
+      summary: Stop a source and purge its stream-scoped target-log data
       parameters: [ { $ref: '#/components/parameters/StreamId' } ]
       responses:
         '200':
@@ -285,6 +286,86 @@ paths:
       responses:
         '200': { description: KLV event collection }
         '400': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/target-log:
+    get:
+      tags: [Target Log]
+      summary: List a stream's SQLite-backed target-log entries and custom-field schema
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses:
+        '200':
+          description: Stream target log in chronological mission-time order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  streamId: { type: string }
+                  entries: { type: array, items: { $ref: '#/components/schemas/TargetLogEntry' } }
+                  fields: { type: array, items: { $ref: '#/components/schemas/TargetLogField' } }
+        '400': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/target-log/entries:
+    post:
+      tags: [Target Log]
+      summary: Add a captured target mark to a stream
+      description: Mission time is the KLV timestamp and is user-editable. Video time is derived internally from the stream KLV timeline for playback alignment. Position may be unavailable or entered/edited in decimal degrees.
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTargetLogEntry' }
+      responses:
+        '201': { description: Target entry created }
+        '400': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/target-log/entries/{entryId}:
+    patch:
+      tags: [Target Log]
+      summary: Edit a target mark's observation and custom metadata
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/TargetLogEntryId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                missionTimeMs: { type: integer, minimum: 0, description: User-edited KLV mission timestamp in Unix milliseconds }
+                observation: { type: string }
+                position: { $ref: '#/components/schemas/TargetLogPosition', nullable: true }
+                positionSource: { type: string, enum: [FRAME_CENTER, PLATFORM, UNAVAILABLE] }
+                customFields: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Target entry updated }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Target Log]
+      summary: Delete a target mark from a stream
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/TargetLogEntryId' } ]
+      responses:
+        '200': { description: Target entry removed }
+        '404': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/target-log/fields:
+    post:
+      tags: [Target Log]
+      summary: Add a custom field to a stream's target-log schema
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTargetLogField' }
+      responses:
+        '201': { description: Custom field created }
+        '400': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/target-log/fields/{fieldId}:
+    delete:
+      tags: [Target Log]
+      summary: Deactivate a custom field without deleting historic entry values
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/TargetLogFieldId' } ]
+      responses:
+        '200': { description: Custom field deactivated }
+        '404': { $ref: '#/components/responses/Error' }
   /webrtc/rtpCapabilities:
     get:
       tags: [WebRTC]
@@ -322,6 +403,16 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    TargetLogEntryId:
+      name: entryId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TargetLogFieldId:
+      name: fieldId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   responses:
     Error:
       description: Request could not be completed
@@ -334,7 +425,14 @@ components:
       properties: { ok: { type: boolean, example: false }, error: { type: string } }
     OperationResult:
       type: object
-      properties: { ok: { type: boolean }, deletedEvents: { type: integer } }
+      properties:
+        ok: { type: boolean }
+        deletedEvents: { type: integer }
+        deletedTargetLog:
+          type: object
+          properties:
+            entries: { type: integer }
+            fields: { type: integer }
     AssetResult:
       type: object
       properties:
@@ -390,3 +488,57 @@ components:
         progressPercent: { type: number, nullable: true }
         processedSeconds: { type: number, nullable: true }
         lastError: { type: string, nullable: true }
+    TargetLogPosition:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat: { type: number, format: double }
+        lon: { type: number, format: double }
+    TargetLogEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        streamId: { type: string }
+        missionId: { type: string, nullable: true }
+        videoProductId: { type: string, nullable: true }
+        missionTimeMs: { type: integer, description: KLV mission timestamp in Unix milliseconds }
+        videoTimeMs: { type: integer, description: Internal video-offset milliseconds used for playback alignment }
+        observation: { type: string }
+        position: { allOf: [ { $ref: '#/components/schemas/TargetLogPosition' } ], nullable: true }
+        positionSource: { type: string, enum: [FRAME_CENTER, PLATFORM, UNAVAILABLE] }
+        customFields: { type: object, additionalProperties: true }
+        createdBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateTargetLogEntry:
+      type: object
+      required: [missionTimeMs, positionSource]
+      properties:
+        missionId: { type: string }
+        videoProductId: { type: string }
+        missionTimeMs: { type: integer, minimum: 0, description: Current KLV mission timestamp in Unix milliseconds }
+        observation: { type: string }
+        position: { $ref: '#/components/schemas/TargetLogPosition' }
+        positionSource: { type: string, enum: [FRAME_CENTER, PLATFORM, UNAVAILABLE] }
+        customFields: { type: object, additionalProperties: true }
+        createdBy: { type: string }
+    TargetLogField:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        streamId: { type: string }
+        key: { type: string, pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$' }
+        label: { type: string }
+        dataType: { type: string, enum: [text, number, boolean] }
+        required: { type: boolean }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateTargetLogField:
+      type: object
+      required: [key, label, dataType]
+      properties:
+        key: { type: string, pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$' }
+        label: { type: string }
+        dataType: { type: string, enum: [text, number, boolean] }
+        required: { type: boolean, default: false }

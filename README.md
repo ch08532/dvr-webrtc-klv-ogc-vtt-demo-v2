@@ -133,6 +133,12 @@ The DVR **Create video clip** control is available only for an uploaded file sou
 
 For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame. Live streams retain the browser-frame snapshot only.
 
+### Mission Target Log
+
+The **Add Mark** action creates a SQLite-backed target-log entry for the current stream in DVR or live playback. Its displayed and sorted mission time is a user-editable KLV timestamp, not the player offset. The service derives a separate internal video offset from the stream's KLV timeline, keeping file-backed pins aligned to the clip filmstrip and supporting DVR seeking. Editing mission time updates that alignment; a time outside the known KLV mission range remains a valid mark but has no clip pin. New marks initially use frame-center telemetry when available, falling back to platform position; latitude and longitude can be edited in decimal degrees or set by clicking either telemetry map. Marks are persisted in `db/klv.sqlite`; selecting a list entry or pin seeks the HLS player and highlights the matching mark.
+
+Use **Manage fields** to add stream-specific text, number, or boolean metadata fields. Deactivating a field retains historical values already stored on entries. At backend startup, the `./recordings/` folder is purged and SQLite telemetry plus Target Log entries/schemas are cleared together. Stopping a source also purges that stream's Target Log from SQLite and clears it from the UI. Starting a new source resets the stream's recordings and KLV records.
+
 ## Notes
 - The DVR VTT telemetry panel has **Data** and **Map** tabs; its map is driven by the active WebVTT cue (no websocket sync needed). The equivalent live WebRTC telemetry map uses the active KLV WebSocket feed. Both maps show KLV platform/sensor position, frame-center position, platform heading, their connecting line, and an amber footprint. Source frame corners are preferred; when source offsets are missing or all zero, a `computed-flat` estimate uses sensor pose, FOV, range, and a flat-ground approximation. Each map centers on its first valid frame center; use **Center map** to recenter later.
 - The Data tabs display all decoded telemetry in the active cue, including `missionId` when ST 0601 tag 3 is present. The KLV `timestampIso` is displayed beneath each map.

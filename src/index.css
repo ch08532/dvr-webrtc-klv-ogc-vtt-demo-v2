@@ -190,6 +190,31 @@
   touch-action: none;
 }
 
+/* Target marks share the authoritative-file timeline beneath the trim handles. */
+.clip-target-log-marker {
+  position: absolute;
+  top: 7px;
+  z-index: 4;
+  width: 12px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 2px solid #ffffff;
+  border-radius: 7px 7px 3px 3px;
+  background: #228be6;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.clip-target-log-marker:hover,
+.clip-target-log-marker:focus-visible,
+.clip-target-log-marker.is-selected {
+  background: #e8590c;
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 1px;
+}
+
 .clip-trim-shell.is-disabled {
   opacity: 0.45;
 }
@@ -218,4 +243,70 @@
   color: #d0d7de;
   font-size: 0.7rem;
   text-align: center;
+}
+
+.target-log-grid-scroll {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+}
+
+.target-log-grid {
+  width: 100%;
+  min-width: 820px;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.target-log-grid th,
+.target-log-grid td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid #e9ecef;
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.target-log-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8f9fa;
+  color: #495057;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.target-log-grid td:nth-child(4) {
+  width: 100%;
+  min-width: 180px;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.target-log-grid-row {
+  cursor: pointer;
+}
+
+.target-log-grid-row:hover,
+.target-log-grid-row:focus-visible {
+  background: #f1f3f5;
+  outline: none;
+}
+
+.target-log-grid-row.is-selected {
+  background: #fff9db;
+  box-shadow: inset 3px 0 #e8590c;
+}
+
+.target-log-grid-actions {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.target-log-empty {
+  color: #868e96;
+  font-style: italic;
 }

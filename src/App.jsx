@@ -2,7 +2,9 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader } from '@mantine/core';
+import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader, Modal, Textarea, Checkbox } from '@mantine/core';
+import { DateTimePicker } from '@mantine/dates';
+import '@mantine/dates/styles.css';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
@@ -51,6 +53,7 @@ function PlaybackControlIcon({ name }) {
   if (name === 'end') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14" {...stroke} /><path d="m15 6-10 6 10 6z" {...common} /></svg>;
   if (name === 'clipStart') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 7h8l-3 5 3 5H9z" {...stroke} /></svg>;
   if (name === 'clipEnd') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14M15 7H7l3 5-3 5h8z" {...stroke} /></svg>;
+  if (name === 'targetMark') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 10a6 6 0 1 0-12 0c0 4.5 6 10 6 10s6-5.5 6-10Z" {...stroke} /><circle cx="12" cy="10" r="2" {...stroke} /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h3l1.5-2h5L16 8h3v11H5z" {...stroke} /><circle cx="12" cy="13" r="3" {...stroke} /></svg>;
 }
 
@@ -97,6 +100,14 @@ function App() {
   const [clipThumbnailFrames, setClipThumbnailFrames] = useState([]);
   const [clipThumbnailLoading, setClipThumbnailLoading] = useState(false);
   const [authoritativeSnapshotInFlight, setAuthoritativeSnapshotInFlight] = useState(false);
+  const [targetLogEntries, setTargetLogEntries] = useState([]);
+  const [targetLogFields, setTargetLogFields] = useState([]);
+  const [targetLogLoading, setTargetLogLoading] = useState(false);
+  const [targetLogInFlight, setTargetLogInFlight] = useState(false);
+  const [selectedTargetLogId, setSelectedTargetLogId] = useState(null);
+  const [targetLogEditor, setTargetLogEditor] = useState(null);
+  const [targetLogSchemaOpen, setTargetLogSchemaOpen] = useState(false);
+  const [targetLogFieldDraft, setTargetLogFieldDraft] = useState({ key: '', label: '', dataType: 'text', required: false });
   const [fileStartProgress, setFileStartProgress] = useState(null);
   const [dvrDiag, setDvrDiag] = useState({
     currentSrc: null,
@@ -354,6 +365,9 @@ function App() {
     && clipTimelineEndSeconds >= 0.25
   );
   const clipExportReady = clipWidgetReady && streamRuntime?.state === 'ready';
+  const liveVideoStreaming = liveStatus === 'Playing';
+  const canAddTargetMark = serverOnline && !targetLogInFlight;
+  const showTargetMarkAction = activeTab !== 'live-webrtc' || liveVideoStreaming;
 
   const webrtcBadge = (() => {
     const statusText = String(liveStatus || '').toLowerCase();
@@ -1065,6 +1079,15 @@ function App() {
       const result = await api(`/sources/${encodeURIComponent(streamId)}`, { method: "DELETE" });
       setStatus(JSON.stringify(result, null, 2));
       if (result?.state?.streamId) setStreamRuntime(result.state);
+      if (result?.ok) {
+        // Stopping closes this mission's playback context. Keep no stale marks
+        // visible in the UI; SQLite data remains available until a reset/new source.
+        setTargetLogEntries([]);
+        setTargetLogFields([]);
+        setSelectedTargetLogId(null);
+        setTargetLogEditor(null);
+        setTargetLogSchemaOpen(false);
+      }
       setAutoAttachOnDvr(false);
       clearHlsRetryLoop();
       clearWebRtcRetryLoop();
@@ -1236,6 +1259,269 @@ function App() {
   const getActiveHlsPlayer = () => {
     if (!window.player || window.player.isDisposed?.()) return null;
     return window.player;
+  };
+
+  const refreshTargetLog = async (targetStreamId = streamId, { silent = false } = {}) => {
+    if (!targetStreamId || !serverOnlineRef.current) return;
+    setTargetLogLoading(true);
+    try {
+      const result = await api(`/streams/${encodeURIComponent(targetStreamId)}/target-log`);
+      if (!result?.ok) throw new Error(result?.error || 'Could not load the target log.');
+      setTargetLogEntries(Array.isArray(result.entries) ? result.entries : []);
+      setTargetLogFields(Array.isArray(result.fields) ? result.fields : []);
+      setSelectedTargetLogId((current) => result.entries?.some((entry) => entry.id === current) ? current : null);
+    } catch (error) {
+      if (!silent) setStatus(`Target log load failed: ${String(error?.message || error)}`);
+    } finally {
+      setTargetLogLoading(false);
+    }
+  };
+
+  const isTargetLogCoordinate = (lat, lon) => (
+    Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))
+    && Math.abs(Number(lat)) <= 90 && Math.abs(Number(lon)) <= 180
+  );
+
+  const capturedTargetPosition = (telemetry) => {
+    if (isTargetLogCoordinate(telemetry?.frameCenterLat, telemetry?.frameCenterLon)) {
+      return {
+        position: { lat: Number(telemetry.frameCenterLat), lon: Number(telemetry.frameCenterLon) },
+        positionSource: 'FRAME_CENTER'
+      };
+    }
+    if (isTargetLogCoordinate(telemetry?.sensorLat, telemetry?.sensorLon)) {
+      return {
+        position: { lat: Number(telemetry.sensorLat), lon: Number(telemetry.sensorLon) },
+        positionSource: 'PLATFORM'
+      };
+    }
+    return { position: null, positionSource: 'UNAVAILABLE' };
+  };
+
+  const klvMissionTimeMs = (telemetry) => {
+    const micros = telemetry?.timestampUnixMicros;
+    if (micros != null && String(micros).trim()) {
+      try {
+        const value = Number(BigInt(String(micros).trim()) / 1000n);
+        if (Number.isSafeInteger(value) && value >= 0) return value;
+      } catch {}
+    }
+    const isoMs = Date.parse(String(telemetry?.timestampIso || ''));
+    return Number.isFinite(isoMs) && isoMs >= 0 ? isoMs : null;
+  };
+
+  const openNewTargetLogEntry = (mapPosition = null) => {
+    const telemetry = overlayData?.mode === 'dvr-vtt' || overlayData?.mode === 'live-ws' ? overlayData : null;
+    const missionTimeMs = klvMissionTimeMs(telemetry);
+    const capture = isTargetLogCoordinate(mapPosition?.lat, mapPosition?.lon)
+      ? { position: { lat: Number(mapPosition.lat), lon: Number(mapPosition.lon) }, positionSource: 'UNAVAILABLE' }
+      : capturedTargetPosition(telemetry);
+    setTargetLogEditor({
+      mode: 'create',
+      missionTimeMs,
+      missionTimeText: missionTimeMs == null ? '' : formatMissionTime(missionTimeMs),
+      missionId: telemetry?.missionId || null,
+      position: capture.position,
+      positionSource: capture.positionSource,
+      observation: '',
+      customFields: Object.fromEntries(targetLogFields.filter((field) => field.active).map((field) => [field.key, '']))
+    });
+  };
+
+  const openEditTargetLogEntry = (entry) => {
+    setSelectedTargetLogId(entry.id);
+    setTargetLogEditor({ ...entry, mode: 'edit', missionTimeText: formatMissionTime(entry.missionTimeMs), customFields: { ...(entry.customFields || {}) } });
+  };
+
+  const updateTargetLogDraftField = (key, value) => {
+    setTargetLogEditor((current) => current ? {
+      ...current,
+      customFields: { ...(current.customFields || {}), [key]: value }
+    } : current);
+  };
+
+  const updateTargetLogPosition = (axis, value) => {
+    setTargetLogEditor((current) => {
+      if (!current) return current;
+      const rawValue = value === '' || value == null ? null : Number(value);
+      return {
+        ...current,
+        position: { ...(current.position || { lat: null, lon: null }), [axis]: rawValue }
+      };
+    });
+  };
+
+  const normalizedTargetLogDraftPosition = (position) => {
+    const latEmpty = position?.lat === null || position?.lat === undefined || position?.lat === '';
+    const lonEmpty = position?.lon === null || position?.lon === undefined || position?.lon === '';
+    if (latEmpty && lonEmpty) return null;
+    if (!isTargetLogCoordinate(position?.lat, position?.lon)) {
+      throw new Error('Enter a valid latitude (-90 to 90) and longitude (-180 to 180) in decimal degrees.');
+    }
+    return { lat: Number(position.lat), lon: Number(position.lon) };
+  };
+
+  const parseTargetLogMissionTime = (value) => {
+    const text = String(value || '').trim();
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/.exec(text);
+    if (!match) {
+      throw new Error('Use ISO 8601 with a UTC offset, for example 2026-07-29T16:51:25.000Z.');
+    }
+
+    const [, yearText, monthText, dayText, hourText, minuteText, secondText, millisecondsText, offsetText] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const second = Number(secondText);
+    const milliseconds = Number((millisecondsText || '').padEnd(3, '0') || 0);
+    const offsetParts = offsetText === 'Z' ? null : /^([+-])(\d{2}):(\d{2})$/.exec(offsetText);
+    const offsetHours = offsetParts ? Number(offsetParts[2]) : 0;
+    const offsetMinutes = offsetParts ? Number(offsetParts[3]) : 0;
+    const validDay = day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+    if (month < 1 || month > 12 || !validDay || hour > 23 || minute > 59 || second > 59 || milliseconds > 999 || offsetHours > 23 || offsetMinutes > 59) {
+      throw new Error('Enter a real calendar date and time in ISO 8601 UTC format.');
+    }
+
+    const parsed = Date.parse(text);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      throw new Error('Enter a valid mission time with a UTC offset, for example 2026-07-29T16:51:25.000Z.');
+    }
+    return parsed;
+  };
+
+  const targetLogMissionTimeError = (value) => {
+    try {
+      parseTargetLogMissionTime(value);
+      return null;
+    } catch (error) {
+      return String(error?.message || error);
+    }
+  };
+
+  const saveTargetLogEditor = async () => {
+    if (!targetLogEditor || targetLogInFlight) return;
+    setTargetLogInFlight(true);
+    try {
+      const isCreate = targetLogEditor.mode === 'create';
+      const missionTimeMs = parseTargetLogMissionTime(targetLogEditor.missionTimeText);
+      const position = normalizedTargetLogDraftPosition(targetLogEditor.position);
+      const positionSource = position ? targetLogEditor.positionSource : 'UNAVAILABLE';
+      const url = isCreate
+        ? `/streams/${encodeURIComponent(streamId)}/target-log/entries`
+        : `/streams/${encodeURIComponent(streamId)}/target-log/entries/${encodeURIComponent(targetLogEditor.id)}`;
+      const result = await api(url, {
+        method: isCreate ? 'POST' : 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(isCreate ? {
+          missionTimeMs,
+          missionId: targetLogEditor.missionId,
+          position,
+          positionSource,
+          observation: targetLogEditor.observation,
+          customFields: targetLogEditor.customFields
+        } : {
+          observation: targetLogEditor.observation,
+          customFields: targetLogEditor.customFields,
+          missionTimeMs,
+          position,
+          positionSource
+        })
+      });
+      if (!result?.ok || !result?.entry) throw new Error(result?.error || 'Could not save target-log entry.');
+      setSelectedTargetLogId(result.entry.id);
+      setTargetLogEditor(null);
+      await refreshTargetLog(streamId, { silent: true });
+      setStatus(isCreate ? 'Target mark added.' : 'Target mark updated.');
+    } catch (error) {
+      setStatus(`Target mark save failed: ${String(error?.message || error)}`);
+    } finally {
+      setTargetLogInFlight(false);
+    }
+  };
+
+  const deleteTargetLogEntry = async (entry) => {
+    if (!entry || targetLogInFlight) return;
+    setTargetLogInFlight(true);
+    try {
+      const result = await api(`/streams/${encodeURIComponent(streamId)}/target-log/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+      if (!result?.ok) throw new Error(result?.error || 'Could not remove target-log entry.');
+      if (selectedTargetLogId === entry.id) setSelectedTargetLogId(null);
+      await refreshTargetLog(streamId, { silent: true });
+      setStatus('Target mark removed.');
+    } catch (error) {
+      setStatus(`Target mark removal failed: ${String(error?.message || error)}`);
+    } finally {
+      setTargetLogInFlight(false);
+    }
+  };
+
+  const seekTargetLogEntry = (entry) => {
+    if (selectedTargetLogId === entry.id) {
+      setSelectedTargetLogId(null);
+      return;
+    }
+    if (activeTabRef.current === 'live-webrtc') {
+      setSelectedTargetLogId(entry.id);
+      setStatus('Target mark selected. Live WebRTC playback cannot seek to a prior mission time.');
+      return;
+    }
+    const player = getActiveHlsPlayer();
+    if (!player) {
+      setStatus('The HLS player is not ready.');
+      return;
+    }
+    const videoTimeSeconds = targetLogVideoTimeSeconds(entry);
+    if (videoTimeSeconds == null) {
+      setStatus('This target mark has no video alignment time.');
+      return;
+    }
+    const { start, end } = getHlsSeekBounds(player);
+    player.currentTime(clampToBounds(videoTimeSeconds, start, end));
+    setSelectedTargetLogId(entry.id);
+  };
+
+  const selectTargetLogEntryById = (entryId) => {
+    const entry = targetLogEntries.find((item) => item.id === entryId);
+    if (entry) seekTargetLogEntry(entry);
+  };
+
+  const createTargetLogField = async () => {
+    const draft = targetLogFieldDraft;
+    if (targetLogInFlight) return;
+    setTargetLogInFlight(true);
+    try {
+      const result = await api(`/streams/${encodeURIComponent(streamId)}/target-log/fields`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(draft)
+      });
+      if (!result?.ok) throw new Error(result?.error || 'Could not add target-log field.');
+      setTargetLogFieldDraft({ key: '', label: '', dataType: 'text', required: false });
+      await refreshTargetLog(streamId, { silent: true });
+      setStatus('Target-log field added.');
+    } catch (error) {
+      setStatus(`Target-log field add failed: ${String(error?.message || error)}`);
+    } finally {
+      setTargetLogInFlight(false);
+    }
+  };
+
+  const deactivateTargetLogField = async (field) => {
+    if (!field || targetLogInFlight) return;
+    if (!window.confirm(`Deactivate “${field.label}”? Existing target-log values will be retained.`)) return;
+    setTargetLogInFlight(true);
+    try {
+      const result = await api(`/streams/${encodeURIComponent(streamId)}/target-log/fields/${encodeURIComponent(field.id)}`, { method: 'DELETE' });
+      if (!result?.ok) throw new Error(result?.error || 'Could not deactivate target-log field.');
+      await refreshTargetLog(streamId, { silent: true });
+      setStatus('Target-log field deactivated; historical values were retained.');
+    } catch (error) {
+      setStatus(`Target-log field change failed: ${String(error?.message || error)}`);
+    } finally {
+      setTargetLogInFlight(false);
+    }
   };
 
   const getHlsRepresentations = (player = getActiveHlsPlayer()) => {
@@ -1609,6 +1895,18 @@ function App() {
     const n = Number(seconds);
     if (!Number.isFinite(n)) return 'n/a';
     return `${n.toFixed(2)}s`;
+  };
+
+  const formatMissionTime = (milliseconds) => {
+    const value = Number(milliseconds);
+    if (!Number.isFinite(value) || value < 0) return 'n/a';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 'n/a' : date.toISOString();
+  };
+
+  const targetLogVideoTimeSeconds = (entry) => {
+    const value = Number(entry?.videoTimeMs);
+    return Number.isFinite(value) && value >= 0 ? value / 1000 : null;
   };
 
   const formatConversionTime = (seconds) => {
@@ -2442,6 +2740,14 @@ function App() {
   }, [streamId]);
 
   useEffect(() => {
+    setTargetLogEntries([]);
+    setTargetLogFields([]);
+    setSelectedTargetLogId(null);
+    setTargetLogEditor(null);
+    if (serverOnline) void refreshTargetLog(streamId, { silent: true });
+  }, [streamId, serverOnline]);
+
+  useEffect(() => {
     if (serverOnline) {
       clearOfflinePollLoop();
       return;
@@ -2519,6 +2825,12 @@ function App() {
   const liveKlvOverlayEntries = overlayData?.mode === 'live-ws'
     ? Object.entries(overlayData)
     : [];
+  const targetLogActiveFields = targetLogFields.filter((field) => field.active);
+  const selectedTargetLogEntry = targetLogEntries.find((entry) => entry.id === selectedTargetLogId) || null;
+  const missionTimeValidationError = targetLogEditor ? targetLogMissionTimeError(targetLogEditor.missionTimeText) : null;
+  const missionTimePickerValue = targetLogEditor && !missionTimeValidationError
+    ? new Date(parseTargetLogMissionTime(targetLogEditor.missionTimeText))
+    : null;
   const activeHlsRendition = activeHlsMode === 'abr'
     ? activeHlsRenditions.find((rendition) => (
       [dvrDiag.currentPlaylistUri, dvrDiag.currentPlaylistResolvedUri]
@@ -2931,6 +3243,7 @@ function App() {
                               </Menu.Dropdown>
                             </Menu>
                           ) : <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>}
+                          <Tooltip label="Add target mark" withArrow><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></Tooltip>
                         </Group>
                       ) : null}
                        {clipSourceIsActive ? (
@@ -2962,6 +3275,25 @@ function App() {
                              </div>
                              {clipWidgetReady ? (
                                <>
+                                 {targetLogEntries.filter((entry) => {
+                                   const seconds = targetLogVideoTimeSeconds(entry);
+                                   return Number.isFinite(seconds) && seconds >= 0 && seconds <= clipTimelineEndSeconds;
+                                 }).map((entry, index) => {
+                                   const left = (targetLogVideoTimeSeconds(entry) / clipTimelineEndSeconds) * 100;
+                                   const positionText = entry.position
+                                     ? `${entry.position.lat.toFixed(5)}, ${entry.position.lon.toFixed(5)}`
+                                     : 'Position unavailable';
+                                   return <Tooltip key={entry.id} multiline w={280} label={`${formatMissionTime(entry.missionTimeMs)} · ${entry.observation || 'No observation'} · ${positionText}`} withArrow>
+                                     <button
+                                       type="button"
+                                       className={`clip-target-log-marker${entry.id === selectedTargetLogId ? ' is-selected' : ''}`}
+                                       style={{ left: `calc(${left}% - 6px)`, transform: `translateX(${((index % 3) - 1) * 4}px)` }}
+                                       onPointerDown={(event) => event.stopPropagation()}
+                                       onClick={() => seekTargetLogEntry(entry)}
+                                       aria-label={`Seek to target mark at mission time ${formatMissionTime(entry.missionTimeMs)}`}
+                                     />
+                                   </Tooltip>;
+                                 })}
                                  <div
                                    className="clip-selection"
                                    style={{
@@ -3041,10 +3373,14 @@ function App() {
                           )}
                         </Tabs.Panel>
                         <Tabs.Panel value="map" pt="xs">
-                          <Text size="xs" c="dimmed" mb="xs">Following the active WebVTT cue.</Text>
+                          <Text size="xs" c="dimmed" mb="xs">Following the active WebVTT cue. Click an empty map area to place a target mark; select an existing target pin to seek to it.</Text>
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
+                            onPositionSelect={openNewTargetLogEntry}
+                            targetLogEntries={targetLogEntries}
+                            selectedTargetLogId={selectedTargetLogId}
+                            onTargetLogSelect={selectTargetLogEntryById}
                           />
                           <Text size="xs" c="dimmed" mt="xs">
                             Mission timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
@@ -3076,13 +3412,14 @@ function App() {
                         browser freezes: {webRtcBrowserStats?.freezeCount ?? 'n/a'}{webRtcBrowserStats?.freezeSeconds != null ? ` (${webRtcBrowserStats.freezeSeconds}s total)` : ''}
                       </Text>
                       <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
-                      <Group mt="xs" justify="center">
+                      {liveVideoStreaming ? <Group mt="xs" justify="center">
                         <Tooltip label="Download snapshot" withArrow>
                           <ActionIcon variant="light" size="lg" onClick={downloadWebRtcSnapshot} aria-label="Download WebRTC snapshot">
                             <PlaybackControlIcon name="snapshot" />
                           </ActionIcon>
                         </Tooltip>
-                      </Group>
+                        <Tooltip label="Add target mark" withArrow><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></Tooltip>
+                      </Group> : null}
                     </Paper>
                     <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
                       <Text size="sm" fw={600}>Live KLV Telemetry</Text>
@@ -3113,10 +3450,14 @@ function App() {
                           )}
                         </Tabs.Panel>
                         <Tabs.Panel value="map" pt="xs">
-                          <Text size="xs" c="dimmed" mb="xs">Following the live WebSocket KLV feed.</Text>
+                          <Text size="xs" c="dimmed" mb="xs">Following the live WebSocket KLV feed. Click an empty map area to place a target mark; select an existing target pin to select it.</Text>
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
+                            onPositionSelect={openNewTargetLogEntry}
+                            targetLogEntries={targetLogEntries}
+                            selectedTargetLogId={selectedTargetLogId}
+                            onTargetLogSelect={selectTargetLogEntryById}
                           />
                           <Text size="xs" c="dimmed" mt="xs">
                             Mission timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
@@ -3127,6 +3468,66 @@ function App() {
                   </Group>
                 </Tabs.Panel>
               </Tabs>
+              <div className="target-log-panel">
+                <Group justify="space-between" align="center" mt="md" mb="xs">
+                  <div>
+                    <Text size="sm" fw={700}>Mission Target Log</Text>
+                    <Text size="xs" c="dimmed">Shared across live and DVR playback for stream {streamId}. File marks are pinned on the clip filmstrip.</Text>
+                  </div>
+                  <Group gap="xs">
+                    {targetLogLoading ? <Loader size="xs" /> : <Badge variant="light">{targetLogEntries.length} mark{targetLogEntries.length === 1 ? '' : 's'}</Badge>}
+                    <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)}>Manage fields</Button>
+                    {showTargetMarkAction ? <Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button> : null}
+                  </Group>
+                </Group>
+                {targetLogEntries.length ? (
+                  <div className="target-log-grid-scroll">
+                    <table className="target-log-grid">
+                      <thead>
+                        <tr>
+                          <th scope="col">Mission time (UTC)</th>
+                          <th scope="col">Latitude</th>
+                          <th scope="col">Longitude</th>
+                          <th scope="col">Observation</th>
+                          {targetLogActiveFields.map((field) => <th scope="col" key={field.id}>{field.label}</th>)}
+                          <th scope="col" className="target-log-grid-actions">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {targetLogEntries.map((entry) => (
+                          <tr
+                            key={entry.id}
+                            className={`target-log-grid-row${entry.id === selectedTargetLogId ? ' is-selected' : ''}`}
+                            onClick={() => seekTargetLogEntry(entry)}
+                            onDoubleClick={() => openEditTargetLogEntry(entry)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                seekTargetLogEntry(entry);
+                              }
+                            }}
+                            tabIndex={0}
+                            aria-label={`Select target mark at ${formatMissionTime(entry.missionTimeMs)}`}
+                          >
+                            <td>{formatMissionTime(entry.missionTimeMs)}</td>
+                            <td>{entry.position ? entry.position.lat.toFixed(6) : '—'}</td>
+                            <td>{entry.position ? entry.position.lon.toFixed(6) : '—'}</td>
+                            <td className={!entry.observation ? 'target-log-empty' : undefined}>{entry.observation || 'No observation'}</td>
+                            {targetLogActiveFields.map((field) => (
+                              <td key={field.id}>{entry.customFields?.[field.key] == null || entry.customFields?.[field.key] === '' ? '—' : String(entry.customFields[field.key])}</td>
+                            ))}
+                            <td className="target-log-grid-actions">
+                              <Button size="compact-xs" variant="subtle" onClick={(event) => { event.stopPropagation(); openEditTargetLogEntry(entry); }} onKeyDown={(event) => event.stopPropagation()}>Edit</Button>
+                              <Button size="compact-xs" color="red" variant="subtle" onClick={(event) => { event.stopPropagation(); deleteTargetLogEntry(entry); }} onKeyDown={(event) => event.stopPropagation()} disabled={targetLogInFlight}>Remove</Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : <Text size="sm" c="dimmed">No target marks for this stream yet. Add a mark from either playback mode.</Text>}
+                {selectedTargetLogEntry ? <Text size="xs" c="dimmed" mt="xs">Selected mission time: {formatMissionTime(selectedTargetLogEntry.missionTimeMs)}</Text> : null}
+              </div>
             </Paper>
 
             <Paper shadow="xs" p="md">
@@ -3147,6 +3548,140 @@ function App() {
             </Paper>
           </Stack>
         </AppShell.Main>
+        <Modal
+          opened={!!targetLogEditor}
+          onClose={() => !targetLogInFlight && setTargetLogEditor(null)}
+          title={targetLogEditor?.mode === 'create' ? 'Add target mark' : 'Edit target mark'}
+          centered
+        >
+          {targetLogEditor ? <Stack gap="sm">
+            <Paper p="xs" withBorder>
+              <DateTimePicker
+                label="Mission date and time"
+                description="Choose in your local time zone; it is converted to UTC below. Seconds are supported."
+                value={missionTimePickerValue}
+                onChange={(value) => setTargetLogEditor((current) => current ? {
+                  ...current,
+                  missionTimeText: value instanceof Date && Number.isFinite(value.getTime()) ? value.toISOString() : ''
+                } : current)}
+                valueFormat="YYYY-MM-DD HH:mm:ss"
+                withSeconds
+                clearable
+              />
+              <TextInput
+                label="Mission time (UTC)"
+                description="KLV mission time; editable. Must be a valid ISO 8601 date/time with UTC offset."
+                placeholder="2026-07-29T16:51:25.000Z"
+                value={targetLogEditor.missionTimeText || ''}
+                onChange={(event) => setTargetLogEditor((current) => current ? { ...current, missionTimeText: event.currentTarget.value } : current)}
+                error={missionTimeValidationError || undefined}
+              />
+              {targetLogEditor.missionId ? <Text size="xs" c="dimmed">Mission: {targetLogEditor.missionId}</Text> : null}
+            </Paper>
+            <Group grow>
+              <TextInput
+                label="Latitude"
+                description="Decimal degrees (−90 to 90)"
+                type="number"
+                min={-90}
+                max={90}
+                step="any"
+                inputMode="decimal"
+                value={targetLogEditor.position?.lat == null ? '' : String(targetLogEditor.position.lat)}
+                onChange={(event) => updateTargetLogPosition('lat', event.currentTarget.value)}
+              />
+              <TextInput
+                label="Longitude"
+                description="Decimal degrees (−180 to 180)"
+                type="number"
+                min={-180}
+                max={180}
+                step="any"
+                inputMode="decimal"
+                value={targetLogEditor.position?.lon == null ? '' : String(targetLogEditor.position.lon)}
+                onChange={(event) => updateTargetLogPosition('lon', event.currentTarget.value)}
+              />
+            </Group>
+            <Text size="xs" c="dimmed">Coordinates are editable and can be pasted in decimal degrees for Google Maps or Google Earth. Leave both fields blank to save a mark without a position.</Text>
+            <Textarea
+              label="Observation"
+              autosize
+              minRows={3}
+              placeholder="Describe the target or observation"
+              value={targetLogEditor.observation || ''}
+              onChange={(event) => setTargetLogEditor((current) => current ? { ...current, observation: event.currentTarget.value } : current)}
+            />
+            {targetLogActiveFields.length ? targetLogActiveFields.map((field) => field.dataType === 'boolean' ? (
+              <Select
+                key={field.id}
+                label={field.label}
+                required={field.required}
+                placeholder="Not set"
+                clearable={!field.required}
+                data={[{ value: 'true', label: 'True' }, { value: 'false', label: 'False' }]}
+                value={targetLogEditor.customFields?.[field.key] === true ? 'true' : targetLogEditor.customFields?.[field.key] === false ? 'false' : null}
+                onChange={(value) => updateTargetLogDraftField(field.key, value == null ? '' : value === 'true')}
+              />
+            ) : (
+              <TextInput
+                key={field.id}
+                label={field.label}
+                required={field.required}
+                type={field.dataType === 'number' ? 'number' : 'text'}
+                value={targetLogEditor.customFields?.[field.key] == null ? '' : String(targetLogEditor.customFields[field.key])}
+                onChange={(event) => updateTargetLogDraftField(field.key, event.currentTarget.value)}
+              />
+            )) : <Text size="xs" c="dimmed">No active custom fields. Use Manage fields to add optional metadata.</Text>}
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setTargetLogEditor(null)} disabled={targetLogInFlight}>Cancel</Button>
+              <Button onClick={saveTargetLogEditor} loading={targetLogInFlight}>{targetLogEditor.mode === 'create' ? 'Add Mark' : 'Save changes'}</Button>
+            </Group>
+          </Stack> : null}
+        </Modal>
+        <Modal
+          opened={targetLogSchemaOpen}
+          onClose={() => !targetLogInFlight && setTargetLogSchemaOpen(false)}
+          title="Target log fields"
+          centered
+        >
+          <Stack gap="sm">
+            <Text size="sm" c="dimmed">Fields are scoped to stream {streamId}. Deactivating a field preserves its historical values on existing marks.</Text>
+            {targetLogFields.length ? <Stack gap={4}>
+              {targetLogFields.map((field) => (
+                <Paper key={field.id} p="xs" withBorder>
+                  <Group justify="space-between" wrap="nowrap">
+                    <div>
+                      <Text size="sm" fw={600}>{field.label} {!field.active ? <Badge size="xs" color="gray">Inactive</Badge> : null}</Text>
+                      <Text size="xs" c="dimmed">{field.key} · {field.dataType}{field.required ? ' · required' : ''}</Text>
+                    </div>
+                    {field.active ? <Button size="compact-xs" color="red" variant="subtle" onClick={() => deactivateTargetLogField(field)} disabled={targetLogInFlight}>Deactivate</Button> : null}
+                  </Group>
+                </Paper>
+              ))}
+            </Stack> : <Text size="sm" c="dimmed">No fields configured for this stream.</Text>}
+            <Paper p="sm" withBorder>
+              <Text size="sm" fw={600} mb="xs">Add field</Text>
+              <Stack gap="xs">
+                <Group grow align="end">
+                  <TextInput label="Key" placeholder="priority" value={targetLogFieldDraft.key} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, key: event.currentTarget.value }))} />
+                  <TextInput label="Label" placeholder="Priority" value={targetLogFieldDraft.label} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, label: event.currentTarget.value }))} />
+                </Group>
+                <Group justify="space-between" align="end">
+                  <Select
+                    w={170}
+                    label="Type"
+                    data={[{ value: 'text', label: 'Text' }, { value: 'number', label: 'Number' }, { value: 'boolean', label: 'Boolean' }]}
+                    value={targetLogFieldDraft.dataType}
+                    onChange={(value) => setTargetLogFieldDraft((draft) => ({ ...draft, dataType: value || 'text' }))}
+                    allowDeselect={false}
+                  />
+                  <Checkbox label="Required" checked={targetLogFieldDraft.required} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, required: event.currentTarget.checked }))} />
+                  <Button onClick={createTargetLogField} loading={targetLogInFlight}>Add field</Button>
+                </Group>
+              </Stack>
+            </Paper>
+          </Stack>
+        </Modal>
       </AppShell>
     </MantineProvider>
   );

@@ -9,7 +9,7 @@ import TileLayer from 'ol/layer/Tile.js';
 import VectorLayer from 'ol/layer/Vector.js';
 import OSM from 'ol/source/OSM.js';
 import VectorSource from 'ol/source/Vector.js';
-import { fromLonLat } from 'ol/proj.js';
+import { fromLonLat, toLonLat } from 'ol/proj.js';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from 'ol/style.js';
 import 'ol/ol.css';
 
@@ -66,6 +66,20 @@ const frameGeometryStyle = new Style({
   })
 });
 
+const targetLogStyle = (selected) => new Style({
+  image: new CircleStyle({
+    radius: selected ? 9 : 7,
+    fill: new Fill({ color: selected ? '#e8590c' : '#7048e8' }),
+    stroke: new Stroke({ color: '#ffffff', width: 2 })
+  }),
+  text: new Text({
+    text: 'Target',
+    offsetY: -18,
+    fill: new Fill({ color: '#ffffff' }),
+    stroke: new Stroke({ color: '#1a1b1e', width: 3 })
+  })
+});
+
 const isCoordinate = (lat, lon) => (
   Number.isFinite(Number(lat))
   && Number.isFinite(Number(lon))
@@ -109,7 +123,14 @@ function MapControlIcon({ name }) {
   );
 }
 
-export default function KlvMap({ telemetry, active }) {
+export default function KlvMap({
+  telemetry,
+  active,
+  onPositionSelect = null,
+  targetLogEntries = [],
+  selectedTargetLogId = null,
+  onTargetLogSelect = null
+}) {
   const targetRef = useRef(null);
   const mapRef = useRef(null);
   const sourceRef = useRef(null);
@@ -120,12 +141,24 @@ export default function KlvMap({ telemetry, active }) {
   const frameCenterRef = useRef(null);
   const lineRef = useRef(null);
   const frameGeometryRef = useRef(null);
+  const targetLogFeaturesRef = useRef([]);
   const focusPositionRef = useRef(null);
   const hasCenteredRef = useRef(false);
   const centerRequestRef = useRef(0);
+  const onPositionSelectRef = useRef(onPositionSelect);
+  const onTargetLogSelectRef = useRef(onTargetLogSelect);
   const [hasCoordinates, setHasCoordinates] = useState(false);
+  const [hasTargetLogPositions, setHasTargetLogPositions] = useState(false);
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
   const [followFrameCenter, setFollowFrameCenter] = useState(false);
+
+  useEffect(() => {
+    onPositionSelectRef.current = onPositionSelect;
+  }, [onPositionSelect]);
+
+  useEffect(() => {
+    onTargetLogSelectRef.current = onTargetLogSelect;
+  }, [onTargetLogSelect]);
 
   const centerOnPosition = (position) => {
     const map = mapRef.current;
@@ -147,7 +180,13 @@ export default function KlvMap({ telemetry, active }) {
     const map = mapRef.current;
     if (!map) return;
     const fit = () => {
-      const features = [platformRef.current, frameCenterRef.current, lineRef.current, frameGeometryRef.current];
+      const features = [
+        platformRef.current,
+        frameCenterRef.current,
+        lineRef.current,
+        frameGeometryRef.current,
+        ...targetLogFeaturesRef.current
+      ];
       const extents = features
         .map((feature) => feature?.getGeometry?.()?.getExtent?.())
         .filter((extent) => Array.isArray(extent) && extent.every(Number.isFinite));
@@ -251,22 +290,74 @@ export default function KlvMap({ telemetry, active }) {
     frameGeometryRef.current = frameGeometry;
     const view = map.getView();
     const onResolutionChange = () => updatePlatformHeadingLine();
+    const onMapSingleClick = (event) => {
+      let targetLogId = null;
+      map.forEachFeatureAtPixel(event.pixel, (feature) => {
+        const id = feature.get('targetLogEntryId');
+        if (id) {
+          targetLogId = id;
+          return feature;
+        }
+        return undefined;
+      }, { hitTolerance: 6 });
+      if (targetLogId) {
+        onTargetLogSelectRef.current?.(targetLogId);
+        return;
+      }
+
+      const callback = onPositionSelectRef.current;
+      if (!callback || !event?.coordinate) return;
+      const [lon, lat] = toLonLat(event.coordinate);
+      if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+        callback({ lat, lon });
+      }
+    };
     view.on('change:resolution', onResolutionChange);
+    map.on('singleclick', onMapSingleClick);
 
     return () => {
       resizeObserver.disconnect();
       view.un('change:resolution', onResolutionChange);
+      map.un('singleclick', onMapSingleClick);
       map.setTarget(undefined);
       mapRef.current = null;
       sourceRef.current = null;
+      targetLogFeaturesRef.current = [];
       platformHeadingLineRef.current = null;
     };
   }, []);
 
   useEffect(() => {
+    const source = sourceRef.current;
+    if (!source) return;
+
+    source.removeFeatures(targetLogFeaturesRef.current);
+    const features = (Array.isArray(targetLogEntries) ? targetLogEntries : [])
+      .filter((entry) => entry?.id && isCoordinate(entry?.position?.lat, entry?.position?.lon))
+      .map((entry) => {
+        const feature = new Feature({
+          geometry: new Point(fromLonLat([Number(entry.position.lon), Number(entry.position.lat)]))
+        });
+        feature.set('targetLogEntryId', entry.id);
+        feature.setStyle(targetLogStyle(entry.id === selectedTargetLogId));
+        return feature;
+      });
+    source.addFeatures(features);
+    targetLogFeaturesRef.current = features;
+    setHasTargetLogPositions(features.length > 0);
+  }, [targetLogEntries, selectedTargetLogId]);
+
+  useEffect(() => {
     hasCenteredRef.current = false;
     centerRequestRef.current += 1;
   }, [active]);
+
+  useEffect(() => {
+    if (active && hasTargetLogPositions && !hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      centerOnInitialGeometry();
+    }
+  }, [active, hasTargetLogPositions]);
 
   useEffect(() => {
     if (!mapRef.current || !sourceRef.current) return;
@@ -333,9 +424,9 @@ export default function KlvMap({ telemetry, active }) {
           type="button"
           className="klv-map-control-button"
           onClick={centerOnAllFeatures}
-          disabled={!hasCoordinates}
-          aria-label="Center map on all telemetry"
-          title="Center map on all telemetry"
+          disabled={!hasCoordinates && !hasTargetLogPositions}
+          aria-label="Center map on telemetry and targets"
+          title="Center map on telemetry and targets"
           data-tooltip="Center map"
         >
           <MapControlIcon name="map" />

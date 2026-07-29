@@ -68,6 +68,17 @@ fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
 if (!process.env.LOCAL_VIDEO_SOURCE_ROOTS) fs.mkdirSync(DEFAULT_LOCAL_VIDEO_SOURCE_ROOT, { recursive: true });
 
+/** Removes generated recording artifacts before a new service session begins. */
+async function purgeRecordingsOnStartup() {
+  const expectedRoot = path.resolve("./recordings");
+  if (RECORD_ROOT !== expectedRoot || path.basename(RECORD_ROOT).toLowerCase() !== "recordings") {
+    throw new Error(`refusing to purge unexpected recording root: ${RECORD_ROOT}`);
+  }
+  await fs.promises.rm(RECORD_ROOT, { recursive: true, force: true });
+  await fs.promises.mkdir(RECORD_ROOT, { recursive: true });
+  log.info("startup_recordings_purge_complete", { recordRoot: RECORD_ROOT });
+}
+
 const activeResumableUploads = new Set();
 const clipThumbnailJobs = new Map();
 
@@ -103,8 +114,11 @@ server.on("connection", (socket) => {
 });
 
 // ---------- Storage ----------
+await purgeRecordingsOnStartup();
 const store = new SqliteKlvStore({ dbPath: path.join(DB_DIR, "klv.sqlite") });
 await store.init();
+const startupDatabasePurge = await store.purgeAllMissionData();
+log.info("startup_database_purge_complete", startupDatabasePurge);
 store.startRetentionJob({ maxAgeMs: 2 * 60 * 60 * 1000 }); // keep 2h (demo)
 
 // ---------- Sources ----------
@@ -742,8 +756,11 @@ async function resetSourceArtifacts(streamId) {
 
   await fs.promises.rm(outDir, { recursive: true, force: true });
   await fs.promises.rm(sdpFile, { force: true });
-  const deletedEvents = await store.purgeStream(streamId);
-  return { outDir, sdpFile, deletedEvents };
+  const [deletedEvents, deletedTargetLog] = await Promise.all([
+    store.purgeStream(streamId),
+    store.purgeTargetLog(streamId)
+  ]);
+  return { outDir, sdpFile, deletedEvents, deletedTargetLog };
 }
 
 /** Returns the internal runtime handle for an active source, if any. */
@@ -2058,6 +2075,7 @@ app.delete("/sources/:streamId", async (req, res) => {
   await stopKlvStreamWorker(s.klvWorker);
   await stopHlsRecorder(s.hls);
   await sfuClient.stopIngest(streamId);
+  const deletedTargetLog = await store.purgeTargetLog(streamId);
 
   setSourceState(streamId, {
     state: "stopped",
@@ -2070,8 +2088,8 @@ app.delete("/sources/:streamId", async (req, res) => {
     etaSeconds: null,
     lastError: null
   });
-  log.info("source_delete_success", { streamId });
-  res.json({ ok: true });
+  log.info("source_delete_success", { streamId, deletedTargetLog });
+  res.json({ ok: true, deletedTargetLog });
 });
 
 // ---------- API: direct KLV query ----------
@@ -2084,6 +2102,157 @@ app.get("/streams/:streamId/klv", async (req, res) => {
   }
   const events = await store.query(streamId, fromMs, toMs);
   res.json({ streamId, fromMs, toMs, events });
+});
+
+// ---------- API: stream-scoped mission target log ----------
+function validateTargetLogStreamId(streamId) {
+  resolveStreamRecordingDir(streamId);
+  return streamId;
+}
+
+function hasTargetLogValue(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+
+/** Validates active schema fields while retaining historic values from inactive fields. */
+async function normalizeTargetLogCustomFields(streamId, suppliedFields, existingFields = {}) {
+  if (suppliedFields != null && (typeof suppliedFields !== "object" || Array.isArray(suppliedFields))) {
+    throw new Error("customFields must be an object");
+  }
+  const { fields } = await store.getTargetLog(streamId);
+  const result = { ...(existingFields || {}) };
+  const supplied = suppliedFields || {};
+  for (const field of fields.filter((item) => item.active)) {
+    if (Object.prototype.hasOwnProperty.call(supplied, field.key)) {
+      const raw = supplied[field.key];
+      if (!hasTargetLogValue(raw)) {
+        delete result[field.key];
+      } else if (field.dataType === "number") {
+        const numeric = Number(raw);
+        if (!Number.isFinite(numeric)) throw new Error(`${field.label} must be a number`);
+        result[field.key] = numeric;
+      } else if (field.dataType === "boolean") {
+        if (raw !== true && raw !== false) throw new Error(`${field.label} must be true or false`);
+        result[field.key] = raw;
+      } else {
+        result[field.key] = String(raw);
+      }
+    }
+    if (field.required && !hasTargetLogValue(result[field.key])) {
+      throw new Error(`${field.label} is required`);
+    }
+  }
+  return result;
+}
+
+/** Resolves a KLV mission timestamp to a video offset only when it is within known telemetry coverage. */
+async function videoTimeForMissionTime(streamId, missionTimeMs) {
+  const timeline = await store.getMissionTimeline(streamId);
+  if (!timeline || missionTimeMs < timeline.missionMinMs || missionTimeMs > timeline.missionMaxMs) return null;
+  const videoTimeMs = Math.round(timeline.videoBaseMs + (missionTimeMs - timeline.missionBaseMs));
+  return Number.isFinite(videoTimeMs) && videoTimeMs >= 0 ? videoTimeMs : null;
+}
+
+app.get("/streams/:streamId/target-log", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    res.json({ ok: true, streamId, ...(await store.getTargetLog(streamId)) });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.post("/streams/:streamId/target-log/entries", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const missionTimeMs = Math.round(Number(req.body?.missionTimeMs));
+    if (!Number.isFinite(missionTimeMs) || missionTimeMs < 0) {
+      throw new Error("missionTimeMs must be a non-negative number");
+    }
+    const videoTimeMs = await videoTimeForMissionTime(streamId, missionTimeMs);
+    const customFields = await normalizeTargetLogCustomFields(streamId, req.body?.customFields);
+    const entry = await store.createTargetLogEntry({
+      id: randomUUID(),
+      streamId,
+      missionId: req.body?.missionId == null ? null : String(req.body.missionId),
+      videoProductId: req.body?.videoProductId == null ? null : String(req.body.videoProductId),
+      missionTimeMs,
+      videoTimeMs,
+      observation: req.body?.observation == null ? "" : String(req.body.observation),
+      position: req.body?.position,
+      positionSource: req.body?.positionSource,
+      customFields,
+      createdBy: req.body?.createdBy == null ? null : String(req.body.createdBy)
+    });
+    log.info("target_log_entry_created", { streamId, entryId: entry.id, missionTimeMs: entry.missionTimeMs, videoTimeMs: entry.videoTimeMs });
+    res.status(201).json({ ok: true, entry });
+  } catch (error) {
+    log.warn("target_log_entry_create_error", { streamId: req.params.streamId, error: serializeError(error) });
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.patch("/streams/:streamId/target-log/entries/:entryId", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const existing = await store.getTargetLogEntry(streamId, req.params.entryId);
+    if (!existing) return res.status(404).json({ ok: false, error: "target-log entry not found" });
+    const customFields = await normalizeTargetLogCustomFields(streamId, req.body?.customFields, existing.customFields);
+    const missionTimeMs = req.body?.missionTimeMs == null ? undefined : Math.round(Number(req.body.missionTimeMs));
+    if (missionTimeMs !== undefined && (!Number.isFinite(missionTimeMs) || missionTimeMs < 0)) {
+      throw new Error("missionTimeMs must be a non-negative number");
+    }
+    const entry = await store.updateTargetLogEntry(streamId, req.params.entryId, {
+      observation: req.body?.observation,
+      customFields,
+      position: req.body?.position,
+      positionSource: req.body?.positionSource,
+      missionTimeMs,
+      videoTimeMs: missionTimeMs === undefined ? undefined : await videoTimeForMissionTime(streamId, missionTimeMs)
+    });
+    res.json({ ok: true, entry });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.delete("/streams/:streamId/target-log/entries/:entryId", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const deleted = await store.deleteTargetLogEntry(streamId, req.params.entryId);
+    if (!deleted) return res.status(404).json({ ok: false, error: "target-log entry not found" });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.post("/streams/:streamId/target-log/fields", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const field = await store.createTargetLogField({
+      id: randomUUID(),
+      streamId,
+      key: req.body?.key,
+      label: req.body?.label,
+      dataType: req.body?.dataType,
+      required: !!req.body?.required
+    });
+    res.status(201).json({ ok: true, field });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.delete("/streams/:streamId/target-log/fields/:fieldId", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const deactivated = await store.deactivateTargetLogField(streamId, req.params.fieldId);
+    if (!deactivated) return res.status(404).json({ ok: false, error: "target-log field not found" });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
 });
 
 // ---------- WebRTC signaling ----------
