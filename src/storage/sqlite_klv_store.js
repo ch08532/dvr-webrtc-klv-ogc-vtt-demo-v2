@@ -322,6 +322,26 @@ export class SqliteKlvStore {
     };
   }
 
+  /** Summarizes the SQLite-backed mission records used by KML and target-log workflows. */
+  async getMissionDataSummary(streamId) {
+    const [telemetry, targetEntries, targetFields] = await Promise.all([
+      get(this.db, `
+        SELECT COUNT(*) AS event_count, MIN(t_ms) AS first_mission_time_ms, MAX(t_ms) AS last_mission_time_ms
+        FROM klv_events
+        WHERE stream_id=?
+      `, [streamId]),
+      get(this.db, `SELECT COUNT(*) AS entry_count FROM target_log_entries WHERE stream_id=?`, [streamId]),
+      get(this.db, `SELECT COUNT(*) AS field_count FROM target_log_fields WHERE stream_id=? AND active=1`, [streamId])
+    ]);
+    return {
+      klvEventCount: Number(telemetry?.event_count || 0),
+      firstMissionTimeMs: telemetry?.first_mission_time_ms == null ? null : Number(telemetry.first_mission_time_ms),
+      lastMissionTimeMs: telemetry?.last_mission_time_ms == null ? null : Number(telemetry.last_mission_time_ms),
+      targetLogEntryCount: Number(targetEntries?.entry_count || 0),
+      activeTargetLogFieldCount: Number(targetFields?.field_count || 0)
+    };
+  }
+
   /** Returns the persisted target-log schema and entries for one stream. */
   async getTargetLog(streamId) {
     const [entryRows, fieldRows] = await Promise.all([
@@ -455,7 +475,8 @@ export class SqliteKlvStore {
 
   /** Clears telemetry and target-log data for every stream in one startup transaction. */
   async purgeAllMissionData() {
-    return retryBusyWrite("startup_purge_all_mission_data", async () => {
+    log.warn("purge_all_mission_data_start", { dbPath: this.dbPath });
+    const result = await retryBusyWrite("startup_purge_all_mission_data", async () => {
       await run(this.db, "BEGIN IMMEDIATE");
       try {
         const telemetry = await run(this.db, `DELETE FROM klv_events`);
@@ -474,6 +495,8 @@ export class SqliteKlvStore {
         throw error;
       }
     });
+    log.warn("purge_all_mission_data_complete", { dbPath: this.dbPath, ...result });
+    return result;
   }
 
   /** Starts periodic removal of telemetry older than the DVR retention window. */

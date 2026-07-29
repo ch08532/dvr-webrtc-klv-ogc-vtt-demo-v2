@@ -375,6 +375,7 @@ function App() {
     streamRuntime?.running === true
     || ['running', 'degraded', 'finalizing', 'ready'].includes(streamRuntime?.state)
   );
+  const klvExportAvailable = serverOnline && streamRuntime?.state === 'ready';
   const canAddTargetMark = targetLogSourceActive && !targetLogInFlight;
   const canManageTargetLogFields = targetLogSourceActive && !targetLogInFlight;
   const showTargetMarkAction = activeTab !== 'live-webrtc' || liveVideoStreaming;
@@ -1762,7 +1763,7 @@ function App() {
   const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC');
 
   const downloadKlvExport = async (format) => {
-    if (!targetLogSourceActive || klvExportInFlight) return;
+    if (!klvExportAvailable || klvExportInFlight) return;
     const normalizedFormat = format === 'kml' ? 'kml' : 'csv';
     setKlvExportInFlight(normalizedFormat);
     let response = null;
@@ -3399,12 +3400,12 @@ function App() {
                         <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
                         <Menu shadow="md" width={190} position="bottom-end" withArrow>
                           <Menu.Target>
-                            <Tooltip label="Export KLV data" withArrow><ActionIcon variant="light" size="sm" disabled={!targetLogSourceActive || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                            <Tooltip label={klvExportAvailable ? "Export KLV data" : "KLV export is available after processing completes"} withArrow><ActionIcon variant="light" size="sm" disabled={!klvExportAvailable || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
                           </Menu.Target>
                           <Menu.Dropdown>
                             <Menu.Label>Export KLV data</Menu.Label>
-                            <Menu.Item onClick={() => downloadKlvExport('csv')} disabled={!!klvExportInFlight}>Export as CSV</Menu.Item>
-                            <Menu.Item onClick={() => downloadKlvExport('kml')} disabled={!!klvExportInFlight}>Export as KML</Menu.Item>
+                            <Menu.Item onClick={() => downloadKlvExport('csv')} disabled={!klvExportAvailable || !!klvExportInFlight}>Export as CSV</Menu.Item>
+                            <Menu.Item onClick={() => downloadKlvExport('kml')} disabled={!klvExportAvailable || !!klvExportInFlight}>Export as KML</Menu.Item>
                           </Menu.Dropdown>
                         </Menu>
                       </Group>
@@ -3488,12 +3489,12 @@ function App() {
                         <Text size="sm" fw={600}>Live KLV Telemetry</Text>
                         <Menu shadow="md" width={190} position="bottom-end" withArrow>
                           <Menu.Target>
-                            <Tooltip label="Export KLV data" withArrow><ActionIcon variant="light" size="sm" disabled={!targetLogSourceActive || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                            <Tooltip label={klvExportAvailable ? "Export KLV data" : "KLV export is available after processing completes"} withArrow><ActionIcon variant="light" size="sm" disabled={!klvExportAvailable || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
                           </Menu.Target>
                           <Menu.Dropdown>
                             <Menu.Label>Export KLV data</Menu.Label>
-                            <Menu.Item onClick={() => downloadKlvExport('csv')} disabled={!!klvExportInFlight}>Export as CSV</Menu.Item>
-                            <Menu.Item onClick={() => downloadKlvExport('kml')} disabled={!!klvExportInFlight}>Export as KML</Menu.Item>
+                            <Menu.Item onClick={() => downloadKlvExport('csv')} disabled={!klvExportAvailable || !!klvExportInFlight}>Export as CSV</Menu.Item>
+                            <Menu.Item onClick={() => downloadKlvExport('kml')} disabled={!klvExportAvailable || !!klvExportInFlight}>Export as KML</Menu.Item>
                           </Menu.Dropdown>
                         </Menu>
                       </Group>

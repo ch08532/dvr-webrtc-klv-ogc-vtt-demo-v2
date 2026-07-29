@@ -756,10 +756,11 @@ async function resetSourceArtifacts(streamId) {
 
   await fs.promises.rm(outDir, { recursive: true, force: true });
   await fs.promises.rm(sdpFile, { force: true });
-  const [deletedEvents, deletedTargetLog] = await Promise.all([
-    store.purgeStream(streamId),
-    store.purgeTargetLog(streamId)
-  ]);
+  // Both methods use BEGIN IMMEDIATE on the shared SQLite connection. They
+  // must be serialized; concurrent transactions cause SQLITE_ERROR: cannot
+  // start a transaction within a transaction.
+  const deletedEvents = await store.purgeStream(streamId);
+  const deletedTargetLog = await store.purgeTargetLog(streamId);
   return { outDir, sdpFile, deletedEvents, deletedTargetLog };
 }
 
@@ -1960,6 +1961,24 @@ app.post("/sources", async (req, res) => {
           etaSeconds: 0,
           lastError: null
         });
+        try {
+          const missionData = await store.getMissionDataSummary(streamId);
+          log.info("file_source_ready_sqlite_mission_data", {
+            streamId,
+            // KML exports are built only from these persisted KLV rows.
+            kmlTelemetryEventCount: missionData.klvEventCount,
+            firstMissionTimeMs: missionData.firstMissionTimeMs,
+            lastMissionTimeMs: missionData.lastMissionTimeMs,
+            targetLogEntryCount: missionData.targetLogEntryCount,
+            activeTargetLogFieldCount: missionData.activeTargetLogFieldCount
+          });
+        } catch (error) {
+          // Readiness must not be downgraded if the diagnostic count fails.
+          log.warn("file_source_ready_sqlite_mission_data_error", {
+            streamId,
+            error: serializeError(error)
+          });
+        }
         log.info("file_source_ready", { streamId });
       } catch (error) {
         setSourceState(streamId, {
@@ -2170,7 +2189,11 @@ function xmlEscape(value) {
 }
 
 function validKmlPosition(lat, lon) {
-  return Number.isFinite(Number(lat))
+  const hasLatitude = lat !== null && lat !== undefined && String(lat).trim() !== "";
+  const hasLongitude = lon !== null && lon !== undefined && String(lon).trim() !== "";
+  return hasLatitude
+    && hasLongitude
+    && Number.isFinite(Number(lat))
     && Number.isFinite(Number(lon))
     && Math.abs(Number(lat)) <= 90
     && Math.abs(Number(lon)) <= 180;
@@ -2178,7 +2201,8 @@ function validKmlPosition(lat, lon) {
 
 function kmlTime(event) {
   const preferred = String(event.data?.timestampIso || "").trim();
-  if (preferred && Number.isFinite(Date.parse(preferred))) return preferred;
+  const preferredMs = Date.parse(preferred);
+  if (preferred && Number.isFinite(preferredMs)) return new Date(preferredMs).toISOString();
   return csvMissionTimeIso(event.tMs);
 }
 
@@ -2291,10 +2315,21 @@ ${fovFootprints || "      <description>No valid frame-corner geometry was presen
 app.get("/streams/:streamId/klv/export.csv", async (req, res) => {
   try {
     const streamId = validateTargetLogStreamId(req.params.streamId);
-    const [events, timeline] = await Promise.all([
+    const [events, timeline, missionData] = await Promise.all([
       store.listForExport(streamId),
-      store.getMissionTimeline(streamId)
+      store.getMissionTimeline(streamId),
+      store.getMissionDataSummary(streamId)
     ]);
+    log.info("klv_export_sqlite_mission_data", {
+      streamId,
+      exportFormat: "csv",
+      kmlTelemetryEventCount: missionData.klvEventCount,
+      firstMissionTimeMs: missionData.firstMissionTimeMs,
+      lastMissionTimeMs: missionData.lastMissionTimeMs,
+      targetLogEntryCount: missionData.targetLogEntryCount,
+      activeTargetLogFieldCount: missionData.activeTargetLogFieldCount,
+      exportedEventCount: events.length
+    });
     const safeStreamId = streamId.replace(/[^a-z0-9_-]+/gi, "_");
     const csv = `\uFEFF${KLV_CSV_COLUMNS.join(",")}\r\n${events.map((event) => klvCsvRow(streamId, event, timeline)).join("\r\n")}${events.length ? "\r\n" : ""}`;
     res.status(200)
@@ -2310,8 +2345,21 @@ app.get("/streams/:streamId/klv/export.csv", async (req, res) => {
 app.get("/streams/:streamId/klv/export.kml", async (req, res) => {
   try {
     const streamId = validateTargetLogStreamId(req.params.streamId);
-    const events = await store.listForExport(streamId);
+    const [events, missionData] = await Promise.all([
+      store.listForExport(streamId),
+      store.getMissionDataSummary(streamId)
+    ]);
     const safeStreamId = streamId.replace(/[^a-z0-9_-]+/gi, "_");
+    log.info("klv_export_sqlite_mission_data", {
+      streamId,
+      exportFormat: "kml",
+      kmlTelemetryEventCount: missionData.klvEventCount,
+      firstMissionTimeMs: missionData.firstMissionTimeMs,
+      lastMissionTimeMs: missionData.lastMissionTimeMs,
+      targetLogEntryCount: missionData.targetLogEntryCount,
+      activeTargetLogFieldCount: missionData.activeTargetLogFieldCount,
+      exportedEventCount: events.length
+    });
     res.status(200)
       .type("application/vnd.google-earth.kml+xml; charset=utf-8")
       .attachment(`${safeStreamId}-klv-telemetry.kml`)
