@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader, Modal, Textarea, Checkbox } from '@mantine/core';
+import { Accordion, ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader, Modal, Textarea, Checkbox } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import '@mantine/dates/styles.css';
 import { Device } from 'mediasoup-client';
@@ -83,7 +83,7 @@ function App() {
     error: null,
     testedAt: null
   });
-  const [status, setStatus] = useState('Ready. Start Source, then choose Live or Time Shifted Playback. Telemetry is from segmented WebVTT.');
+  const [status, setStatus] = useState('Ready. Start a source to begin playback. Telemetry is from segmented WebVTT.');
   const [overlayData, setOverlayData] = useState(null);
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
@@ -161,6 +161,7 @@ function App() {
   const vttDiscoverTimerRef = useRef(null);
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
+  const startRequestInFlightRef = useRef(false);
   const hlsStallTimerRef = useRef(null);
   const hlsRecoveryTimerRef = useRef(null);
   const hlsRecoveryPendingRef = useRef(false);
@@ -331,6 +332,12 @@ function App() {
   const canStartSource = serverOnline && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
   const currentSourceIsFile = streamRuntime?.sourceType === 'file';
+  const hasActiveViewerSource = !['stopped', 'error', 'offline'].includes(streamRuntime?.state);
+  const playbackTitle = currentSourceIsFile ? 'Post Mission Playback' : 'Time Shifted Playback (HLS)';
+  const playbackDescription = currentSourceIsFile
+    ? 'Post Mission Playback with synchronized WebVTT telemetry.'
+    : 'Time Shifted Playback via HLS with synchronized WebVTT telemetry.';
+  const playbackPlayerName = currentSourceIsFile ? 'playback player' : 'HLS player';
   const clipSourceIsActive = currentSourceIsFile && !['stopping', 'stopped', 'error', 'offline'].includes(streamRuntime?.state);
   const sourceDurationSeconds = Number(streamRuntime?.durationSeconds);
   const clipTimelineEndSeconds = Number.isFinite(sourceDurationSeconds) && sourceDurationSeconds > 0
@@ -375,7 +382,12 @@ function App() {
     streamRuntime?.running === true
     || ['running', 'degraded', 'finalizing', 'ready'].includes(streamRuntime?.state)
   );
-  const klvExportAvailable = serverOnline && streamRuntime?.state === 'ready';
+  const klvExportAvailable = serverOnline && (currentSourceIsFile
+    ? streamRuntime?.state === 'ready'
+    : streamRuntime?.state === 'running');
+  const klvExportUnavailableMessage = currentSourceIsFile
+    ? 'KLV export is available after post-mission processing completes'
+    : 'KLV export is available while the live stream is running';
   const canAddTargetMark = targetLogSourceActive && !targetLogInFlight;
   const canManageTargetLogFields = targetLogSourceActive && !targetLogInFlight;
   const showTargetMarkAction = activeTab !== 'live-webrtc' || liveVideoStreaming;
@@ -419,6 +431,13 @@ function App() {
     if (!targetStreamId) return;
     const result = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
     if (result?.streamId) {
+      // A file upload is part of the Start Source workflow, but the server
+      // cannot create its source runtime until the upload has completed. Keep
+      // the in-progress `starting` state rather than briefly displaying the
+      // stale stopped state returned during that interval.
+      if (startRequestInFlightRef.current
+        && streamRuntimeRef.current?.state === 'starting'
+        && result.state === 'stopped') return;
       streamRuntimeRef.current = result;
       setStreamRuntime(result);
       if (!hasDvrKlvTelemetry(result)) setOverlayData(null);
@@ -984,13 +1003,16 @@ function App() {
 
   const startSource = async () => {
     if (!canStartSource) return;
+    startRequestInFlightRef.current = true;
     setStartRequestInFlight(true);
     setFileStartProgress(null);
     setHlsMediaLoaded(false);
     hlsQualityRef.current = 'auto';
     setHlsQuality('auto');
     setHlsQualityControlAvailable(false);
-    setStreamRuntime({ streamId, sourceType: selectedFileSource ? 'file' : sourceType, state: 'starting', running: false, lastError: null });
+    const startingRuntime = { streamId, sourceType: selectedFileSource ? 'file' : sourceType, state: 'starting', running: false, lastError: null };
+    streamRuntimeRef.current = startingRuntime;
+    setStreamRuntime(startingRuntime);
     try {
       setStatus('Clearing previous recording artifacts...');
       await api(`/sources/${encodeURIComponent(streamId)}/reset`, { method: 'POST' });
@@ -1072,6 +1094,7 @@ function App() {
         lastError: String(error?.message || error)
       }));
     } finally {
+      startRequestInFlightRef.current = false;
       setStartRequestInFlight(false);
     }
   };
@@ -1484,7 +1507,7 @@ function App() {
     }
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus('The HLS player is not ready.');
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     const videoTimeSeconds = targetLogVideoTimeSeconds(entry);
@@ -1654,7 +1677,7 @@ function App() {
   const seekHlsBySeconds = (deltaSeconds) => {
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus("HLS player is not ready.");
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     const { start, end } = getHlsSeekBounds(player);
@@ -1666,7 +1689,7 @@ function App() {
   const seekHlsToStart = () => {
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus("HLS player is not ready.");
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     const { start } = getHlsSeekBounds(player);
@@ -1676,7 +1699,7 @@ function App() {
   const seekHlsToEnd = () => {
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus("HLS player is not ready.");
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     const { end } = getHlsSeekBounds(player);
@@ -1690,7 +1713,7 @@ function App() {
     }
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus('HLS player is not ready.');
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     const target = marker === 'start' ? clipStartSeconds : clipEndSeconds;
@@ -1701,7 +1724,7 @@ function App() {
   const toggleHlsPlayPause = () => {
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus("HLS player is not ready.");
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     if (player.paused?.()) {
@@ -1718,7 +1741,7 @@ function App() {
     setHlsPlaybackRate(rate);
     const player = getActiveHlsPlayer();
     try { player?.playbackRate?.(rate); } catch {}
-    setStatus(`HLS playback speed set to ${rate}×.`);
+    setStatus(`${currentSourceIsFile ? 'Playback' : 'HLS playback'} speed set to ${rate}×.`);
   };
 
   /** Captures the currently decoded video frame and downloads it as a PNG. */
@@ -1900,7 +1923,7 @@ function App() {
   const setClipBoundaryAtPlayhead = (boundary) => {
     const player = getActiveHlsPlayer();
     if (!player) {
-      setStatus('HLS player is not ready.');
+      setStatus(`The ${playbackPlayerName} is not ready.`);
       return;
     }
     updateClipBoundary(boundary, Number(player.currentTime?.() || 0));
@@ -2987,9 +3010,9 @@ function App() {
                 </>}
               </Group>
               {sourceType === 'file' ? (
-                <Text size="xs" mt="xs" c="dimmed">The file uploads to this server, then packages into HLS and segmented WebVTT. Playback is available in Time Shifted Playback (HLS); WebRTC is disabled.</Text>
+                <Text size="xs" mt="xs" c="dimmed">The file uploads to this server, then packages into HLS and segmented WebVTT. Playback is available in Post Mission Playback; WebRTC is disabled.</Text>
               ) : sourceType === 'local-file' ? (
-                <Text size="xs" mt="xs" c="dimmed">Choose a supported file from the server&apos;s videos folder. The server copies it directly into the authoritative source folder without a browser upload. Playback is available in Time Shifted Playback (HLS); WebRTC is disabled.</Text>
+                <Text size="xs" mt="xs" c="dimmed">Choose a supported file from the server&apos;s videos folder. The server copies it directly into the authoritative source folder without a browser upload. Playback is available in Post Mission Playback; WebRTC is disabled.</Text>
               ) : null}
               {(inputProbe.container || inputProbe.video || inputProbe.klv || inputProbe.error) ? (
                 <Text size="xs" mt="xs" c={inputProbe.error ? 'red' : 'dimmed'}>
@@ -3182,20 +3205,25 @@ function App() {
 
             <Paper shadow="xs" p="md">
               <Text size="lg" fw={500}>FMV Viewer</Text>
+              {hasActiveViewerSource ? <>
               <Tabs value={activeTab} onChange={setActiveTab}>
                 <Tabs.List>
-                  <Tabs.Tab value="dvr">Time Shifted Playback (HLS)</Tabs.Tab>
-                  <Tabs.Tab value="live-webrtc" disabled={currentSourceIsFile}>Live (WebRTC)</Tabs.Tab>
+                  <Tabs.Tab value="dvr">{playbackTitle}</Tabs.Tab>
+                  {!currentSourceIsFile ? <Tabs.Tab value="live-webrtc">Live (WebRTC)</Tabs.Tab> : null}
                 </Tabs.List>
 
                 <Tabs.Panel value="dvr" pt="xs">
-                  <Text>Time Shifted Playback via HLS with synchronized WebVTT telemetry.</Text>
+                  <Text>{playbackDescription}</Text>
                   <Group mt="xs" align="flex-start" grow wrap="wrap">
                     <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
                       <Group gap="xs" mb="xs">
                         <Text size="sm" c="dimmed">Status: {dvrStatus}</Text>
                         <Badge color={dvrBadge.color} variant="light">{dvrBadge.label}</Badge>
                       </Group>
+                      <Accordion defaultValue="quality-details" variant="contained" mb="xs">
+                        <Accordion.Item value="quality-details">
+                          <Accordion.Control>Video Quality &amp; Stream Details</Accordion.Control>
+                          <Accordion.Panel>
                       <Group gap="xs" mb="xs" align="flex-end">
                         <Select
                           label="Video quality"
@@ -3217,7 +3245,7 @@ function App() {
                             ? 'Auto switches based on network conditions.'
                             : hlsMediaLoaded
                               ? 'Manual selection is unavailable with native HLS playback.'
-                              : 'Manual selection becomes available when the HLS player is ready.'}
+                              : `Manual selection becomes available when the ${playbackPlayerName} is ready.`}
                         </Text>
                       </Group>
                       <Text size="xs" c="dimmed" mb="xs">
@@ -3234,6 +3262,9 @@ function App() {
                       {dvrDiag.error ? (
                         <Text size="xs" c="red" mb="xs">error: {dvrDiag.error}</Text>
                       ) : null}
+                          </Accordion.Panel>
+                        </Accordion.Item>
+                      </Accordion>
                       <div ref={dvrVideoHostRef} style={{ width: '100%', minHeight: '180px' }} />
                        <Text size="xs" c="dimmed" mt="xs">
                          {currentSourceIsFile
@@ -3252,7 +3283,7 @@ function App() {
                           <Menu shadow="md" width={152} position="top" withArrow>
                             <Menu.Target>
                               <Tooltip label="Playback speed" withArrow>
-                                <ActionIcon variant="light" size="lg" aria-label="HLS playback speed">
+                                <ActionIcon variant="light" size="lg" aria-label={currentSourceIsFile ? 'Playback speed' : 'HLS playback speed'}>
                                   <Text size="xs" fw={700}>{formatHlsPlaybackRate(hlsPlaybackRate)}</Text>
                                 </ActionIcon>
                               </Tooltip>
@@ -3290,7 +3321,7 @@ function App() {
                                 <Menu.Item onClick={downloadAuthoritativeSnapshot} disabled={!hlsMediaLoaded || authoritativeSnapshotInFlight}>
                                   {authoritativeSnapshotInFlight ? 'Creating authoritative snapshot…' : 'Authoritative uploaded source (FFmpeg)'}
                                 </Menu.Item>
-                                <Menu.Item onClick={downloadHlsSnapshot} disabled={!hlsMediaLoaded}>Displayed HLS player frame</Menu.Item>
+                                <Menu.Item onClick={downloadHlsSnapshot} disabled={!hlsMediaLoaded}>Displayed playback frame</Menu.Item>
                               </Menu.Dropdown>
                             </Menu>
                           ) : <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>}
@@ -3302,7 +3333,7 @@ function App() {
                            <Group justify="space-between" align="center" mb={4}>
                              <div>
                                <Text size="sm" fw={700}>Create video clip</Text>
-                              <Text size="xs" c="dimmed">Drag either edge to preview a point in HLS. Exports stream-copy the uploaded source and may begin at a preceding keyframe.</Text>
+                              <Text size="xs" c="dimmed">Drag either edge to preview a point in the video. Exports stream-copy the uploaded source and may begin at a preceding keyframe.</Text>
                              </div>
                              <Group gap="xs">
                                {clipThumbnailLoading ? <Badge color="blue" variant="light">Building thumbnails…</Badge> : null}
@@ -3400,7 +3431,7 @@ function App() {
                         <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
                         <Menu shadow="md" width={190} position="bottom-end" withArrow>
                           <Menu.Target>
-                            <Tooltip label={klvExportAvailable ? "Export KLV data" : "KLV export is available after processing completes"} withArrow><ActionIcon variant="light" size="sm" disabled={!klvExportAvailable || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                            <Tooltip label={klvExportAvailable ? "Export KLV data" : klvExportUnavailableMessage} withArrow><ActionIcon variant="light" size="sm" disabled={!klvExportAvailable || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
                           </Menu.Target>
                           <Menu.Dropdown>
                             <Menu.Label>Export KLV data</Menu.Label>
@@ -3455,13 +3486,18 @@ function App() {
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
-                  <Text>Live video via WebRTC</Text>
+                  <Text>Live video via WebRTC with synchronized KLV metadata via WebSocket.
+                  </Text>
                   <Group mt="xs" align="flex-start" grow wrap="wrap">
                     <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
                       <Group gap="xs" mb="xs">
                         <Text size="sm" c="dimmed">Status: {liveStatus}</Text>
                         <Badge color={webrtcBadge.color} variant="light">{webrtcBadge.label}</Badge>
                       </Group>
+                      <Accordion defaultValue="webrtc-details" variant="contained" mb="xs">
+                        <Accordion.Item value="webrtc-details">
+                          <Accordion.Control>Live Video Stream Details</Accordion.Control>
+                          <Accordion.Panel>
                       <Text size="xs" c="dimmed" mb="xs">
                         producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | resolution: {webRtcBrowserStats?.frameWidth && webRtcBrowserStats?.frameHeight ? `${webRtcBrowserStats.frameWidth}×${webRtcBrowserStats.frameHeight}` : 'n/a'} | bitrate: {webRtcBrowserStats?.bitrateKbps != null ? `${webRtcBrowserStats.bitrateKbps} kbps` : 'n/a'}
                       </Text>
@@ -3474,6 +3510,9 @@ function App() {
                       <Text size="xs" c="dimmed" mb="xs">
                         browser freezes: {webRtcBrowserStats?.freezeCount ?? 'n/a'}{webRtcBrowserStats?.freezeSeconds != null ? ` (${webRtcBrowserStats.freezeSeconds}s total)` : ''}
                       </Text>
+                          </Accordion.Panel>
+                        </Accordion.Item>
+                      </Accordion>
                       <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
                       {liveVideoStreaming ? <Group mt="xs" justify="center">
                         <Tooltip label="Download snapshot" withArrow>
@@ -3489,7 +3528,7 @@ function App() {
                         <Text size="sm" fw={600}>Live KLV Telemetry</Text>
                         <Menu shadow="md" width={190} position="bottom-end" withArrow>
                           <Menu.Target>
-                            <Tooltip label={klvExportAvailable ? "Export KLV data" : "KLV export is available after processing completes"} withArrow><ActionIcon variant="light" size="sm" disabled={!klvExportAvailable || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
+                            <Tooltip label={klvExportAvailable ? "Export KLV data" : klvExportUnavailableMessage} withArrow><ActionIcon variant="light" size="sm" disabled={!klvExportAvailable || !!klvExportInFlight} loading={!!klvExportInFlight} aria-label="Export KLV data"><PlaybackControlIcon name="exportCsv" /></ActionIcon></Tooltip>
                           </Menu.Target>
                           <Menu.Dropdown>
                             <Menu.Label>Export KLV data</Menu.Label>
@@ -3547,11 +3586,15 @@ function App() {
                 <Group justify="space-between" align="center" mt="md" mb="xs">
                   <div>
                     <Text size="sm" fw={700}>Mission Target Log</Text>
-                    <Text size="xs" c="dimmed">Shared across live and time-shifted playback for stream {streamId}. File marks are pinned on the clip filmstrip.</Text>
+                    <Text size="xs" c="dimmed">
+                      {currentSourceIsFile
+                        ? 'Target marks for post-mission playback are pinned on the clip filmstrip.'
+                        : `Shared across live and time-shifted playback for stream ${streamId}.`}
+                    </Text>
                   </div>
                   <Group gap="xs">
                     {targetLogLoading ? <Loader size="xs" /> : <Badge variant="light">{targetLogEntries.length} mark{targetLogEntries.length === 1 ? '' : 's'}</Badge>}
-                    <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)} disabled={!canManageTargetLogFields}>Manage fields</Button>
+                    <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)} disabled={!canManageTargetLogFields}>User-Defined Metadata</Button>
                     {showTargetMarkAction ? <Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button> : null}
                   </Group>
                 </Group>
@@ -3603,6 +3646,10 @@ function App() {
                 ) : <Text size="sm" c="dimmed">No target marks for this stream yet. Add a mark from either playback mode.</Text>}
                 {selectedTargetLogEntry ? <Text size="xs" c="dimmed" mt="xs">Selected mission time: {formatMissionTime(selectedTargetLogEntry.missionTimeMs)}</Text> : null}
               </div>
+              </> : <Stack align="center" gap={4} py="xl">
+                <Text fw={600}>No Active Stream Source</Text>
+                <Text size="sm" c="dimmed">Start a stream or select a video file to begin playback.</Text>
+              </Stack>}
             </Paper>
 
             <Paper shadow="xs" p="md">
@@ -3710,7 +3757,7 @@ function App() {
                 value={targetLogEditor.customFields?.[field.key] == null ? '' : String(targetLogEditor.customFields[field.key])}
                 onChange={(event) => updateTargetLogDraftField(field.key, event.currentTarget.value)}
               />
-            )) : <Text size="xs" c="dimmed">No active custom fields. Use Manage fields to add optional metadata.</Text>}
+            )) : <Text size="xs" c="dimmed">No user-defined metadata. Select User-Defined Metadata to add optional fields.</Text>}
             <Group justify="flex-end">
               <Button variant="default" onClick={() => setTargetLogEditor(null)} disabled={targetLogInFlight}>Cancel</Button>
               <Button onClick={saveTargetLogEditor} loading={targetLogInFlight}>{targetLogEditor.mode === 'create' ? 'Add Mark' : 'Save changes'}</Button>
@@ -3720,11 +3767,11 @@ function App() {
         <Modal
           opened={targetLogSchemaOpen}
           onClose={() => !targetLogInFlight && setTargetLogSchemaOpen(false)}
-          title="Target log fields"
+          title="User-Defined Metadata"
           centered
         >
           <Stack gap="sm">
-            <Text size="sm" c="dimmed">Fields are scoped to stream {streamId}. Deactivating a field preserves its historical values on existing marks.</Text>
+            <Text size="sm" c="dimmed">Define additional metadata for target marks on stream {streamId}. Deactivating a field keeps existing values but removes it from future entries.</Text>
             {targetLogFields.length ? <Stack gap={4}>
               {targetLogFields.map((field) => (
                 <Paper key={field.id} p="xs" withBorder>
@@ -3737,25 +3784,25 @@ function App() {
                   </Group>
                 </Paper>
               ))}
-            </Stack> : <Text size="sm" c="dimmed">No fields configured for this stream.</Text>}
+            </Stack> : <Text size="sm" c="dimmed">No user-defined metadata has been defined for this stream.</Text>}
             <Paper p="sm" withBorder>
-              <Text size="sm" fw={600} mb="xs">Add field</Text>
+              <Text size="sm" fw={600} mb="xs">Add metadata field</Text>
               <Stack gap="xs">
                 <Group grow align="end">
-                  <TextInput label="Key" placeholder="priority" value={targetLogFieldDraft.key} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, key: event.currentTarget.value }))} />
-                  <TextInput label="Label" placeholder="Priority" value={targetLogFieldDraft.label} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, label: event.currentTarget.value }))} />
+                  <TextInput label="Field key" description="Used internally; use lowercase letters, numbers, _ or -." placeholder="priority" value={targetLogFieldDraft.key} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, key: event.currentTarget.value }))} />
+                  <TextInput label="Display label" description="Shown to users on target marks." placeholder="Priority" value={targetLogFieldDraft.label} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, label: event.currentTarget.value }))} />
                 </Group>
                 <Group justify="space-between" align="end">
                   <Select
                     w={170}
-                    label="Type"
+                    label="Value type"
                     data={[{ value: 'text', label: 'Text' }, { value: 'number', label: 'Number' }, { value: 'boolean', label: 'Boolean' }]}
                     value={targetLogFieldDraft.dataType}
                     onChange={(value) => setTargetLogFieldDraft((draft) => ({ ...draft, dataType: value || 'text' }))}
                     allowDeselect={false}
                   />
-                  <Checkbox label="Required" checked={targetLogFieldDraft.required} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, required: event.currentTarget.checked }))} />
-                  <Button onClick={createTargetLogField} loading={targetLogInFlight}>Add field</Button>
+                  <Checkbox label="Required for new marks" checked={targetLogFieldDraft.required} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, required: event.currentTarget.checked }))} />
+                  <Button onClick={createTargetLogField} loading={targetLogInFlight}>Add metadata field</Button>
                 </Group>
               </Stack>
             </Paper>

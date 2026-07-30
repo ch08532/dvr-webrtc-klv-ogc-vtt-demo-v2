@@ -4,7 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node server.js",
+    "start": "node scripts/service-manager.mjs start",
+    "stop": "node scripts/service-manager.mjs stop",
+    "status": "node scripts/service-manager.mjs status",
+    "start:direct": "node server.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

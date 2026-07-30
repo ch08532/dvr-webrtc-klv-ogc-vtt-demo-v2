@@ -34,6 +34,9 @@ const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
 const INPUT_PROBE_TIMEOUT_MS = Math.max(1000, Number(process.env.INPUT_PROBE_TIMEOUT_MS || 7000));
 const LIVE_DIMENSION_PROBE_TIMEOUT_MS = Math.max(INPUT_PROBE_TIMEOUT_MS, Number(process.env.LIVE_DIMENSION_PROBE_TIMEOUT_MS || 15000));
 const SHUTDOWN_FORCE_EXIT_MS = Math.max(1000, Number(process.env.SHUTDOWN_FORCE_EXIT_MS || 10000));
+// Set only by scripts/service-manager.mjs.  Keeping this unset preserves the
+// normal direct-start behaviour while preventing unauthenticated HTTP shutdowns.
+const SHUTDOWN_CONTROL_TOKEN = process.env.SHUTDOWN_CONTROL_TOKEN || "";
 const log = createServiceLogger("server");
 
 const RECORD_ROOT = path.resolve("./recordings");
@@ -2685,6 +2688,31 @@ app.get("/healthz", async (req, res) => {
       ok: false,
       error: sfuError
     }
+  });
+});
+
+// This is intentionally a local, token-authenticated control endpoint used by
+// `npm run stop`.  It is not part of the public API and cannot be used when the
+// server was started directly without a control token.
+app.post("/_internal/shutdown", (req, res) => {
+  const remoteAddress = req.socket.remoteAddress || "";
+  const isLocal = remoteAddress === "127.0.0.1"
+    || remoteAddress === "::1"
+    || remoteAddress === "::ffff:127.0.0.1";
+  const token = req.get("x-shutdown-token") || "";
+
+  if (!SHUTDOWN_CONTROL_TOKEN || !isLocal || token !== SHUTDOWN_CONTROL_TOKEN) {
+    res.status(403).json({ ok: false, error: "shutdown control is not authorized" });
+    return;
+  }
+  if (shuttingDown) {
+    res.status(409).json({ ok: false, error: "shutdown already in progress" });
+    return;
+  }
+
+  res.status(202).json({ ok: true, message: "graceful shutdown started" });
+  setImmediate(() => {
+    shutdown("control_request").catch(() => process.exit(1));
   });
 });
 

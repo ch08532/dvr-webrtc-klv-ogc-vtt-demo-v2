@@ -39,6 +39,14 @@ npm run build
 npm start
 ```
 
+`npm start` now runs the service under a small local lifecycle manager. Stop it
+cleanly from any terminal in the project with `npm run stop`; use `npm run status`
+to confirm whether it is running. Pressing Ctrl+C in the start terminal also asks
+the server to perform the same graceful shutdown. The manager waits 15 seconds
+for workers and FFmpeg to close, then terminates only that service's remaining
+process tree if necessary. Use `npm run start:direct` only when you specifically
+want to run `server.js` without the lifecycle commands.
+
 Use `npm run dev` during frontend development. `npm run build` regenerates the ignored `public/assets/` bundle that `npm start` serves.
 
 ## API documentation
