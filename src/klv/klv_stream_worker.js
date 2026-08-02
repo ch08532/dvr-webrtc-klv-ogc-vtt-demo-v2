@@ -180,35 +180,15 @@ function send(msg) {
   } catch {}
 }
 
-/** Builds the compact cue payload consumed by the browser telemetry view. */
+/**
+ * Builds the VTT cue payload consumed by the browser telemetry view.
+ *
+ * A cue carries every decoded ST 0601 value that is present. JSON serialization
+ * omits undefined properties, keeping sparse packets compact while ensuring new
+ * decoder fields do not need a second, easy-to-miss VTT whitelist update.
+ */
 function buildVttCuePayload(payload) {
-  return {
-    timestampIso: payload.timestampIso,
-    ingestTimestampIso: payload.ingestTimestampIso,
-    ingestTimestampUnixMicros: payload.ingestTimestampUnixMicros,
-    sensorLat: payload.sensorLat,
-    sensorLon: payload.sensorLon,
-    frameCenterLat: payload.frameCenterLat,
-    frameCenterLon: payload.frameCenterLon,
-    frameCorner1Lat: payload.frameCorner1Lat,
-    frameCorner1Lon: payload.frameCorner1Lon,
-    frameCorner2Lat: payload.frameCorner2Lat,
-    frameCorner2Lon: payload.frameCorner2Lon,
-    frameCorner3Lat: payload.frameCorner3Lat,
-    frameCorner3Lon: payload.frameCorner3Lon,
-    frameCorner4Lat: payload.frameCorner4Lat,
-    frameCorner4Lon: payload.frameCorner4Lon,
-    frameCornerSource: payload.frameCornerSource,
-    sensorAltMslM: payload.sensorAltMslM,
-    platformHeadingDeg: payload.platformHeadingDeg,
-    platformPitchDeg: payload.platformPitchDeg,
-    platformRollDeg: payload.platformRollDeg,
-    sensorRelAzDeg: payload.sensorRelAzDeg,
-    sensorRelElDeg: payload.sensorRelElDeg,
-    sensorHfovDeg: payload.sensorHfovDeg,
-    sensorVfovDeg: payload.sensorVfovDeg,
-    slantRangeM: payload.slantRangeM
-  };
+  return { ...payload };
 }
 
 /** Writes one VTT file from KLV records that fall within a video segment. */

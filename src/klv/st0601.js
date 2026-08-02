@@ -41,6 +41,18 @@ function mapInt16ToRange(v, min, max) {
   return min + ((v + 32767) / 65534) * (max - min);
 }
 
+/** Reads a null-padded MISB UTF-8 string. */
+function readText(v) {
+  const text = v.toString('utf8').replace(/\0+$/g, '').trim();
+  return text || null;
+}
+
+/** Reads an 8-bit signed value, reserving the MISB invalid sentinel. */
+function readInt8(v) {
+  const value = v.readInt8(0);
+  return value === -128 ? null : value;
+}
+
 /** Tests whether every frame-corner coordinate needed for a footprint exists. */
 function hasCompleteCorners(payload) {
   return [1, 2, 3, 4].every((index) => Number.isFinite(payload[`frameCorner${index}Lat`]) && Number.isFinite(payload[`frameCorner${index}Lon`]));
@@ -141,7 +153,7 @@ function computeFlatFrameCorners(payload) {
   return corners.every(Boolean) ? corners : null;
 }
 
-/** Decodes supported ST 0601 tags, retaining raw values for unsupported fields. */
+/** Decodes the supported MISB ST 0601 local-set tags into engineering units. */
 export function decodeSt0601LocalSet(lsBuf) {
   const out = {};
   let off = 0;
@@ -170,12 +182,19 @@ export function decodeSt0601LocalSet(lsBuf) {
         }
         break;
 
-      // MISB ST 0601 tag 3: Mission ID, encoded as a UTF-8 string.
       case 3: {
-        const missionId = v.toString('utf8').replace(/\0+$/g, '').trim();
+        const missionId = readText(v);
         if (missionId) out.missionId = missionId;
         break;
       }
+
+      // Platform, sensor, and image identity.
+      case 4: { const value = readText(v); if (value) out.platformTailNumber = value; break; }
+      case 8: if (v.length === 1) out.platformTrueAirspeedMps = v[0]; break;
+      case 9: if (v.length === 1) out.platformIndicatedAirspeedMps = v[0]; break;
+      case 10: { const value = readText(v); if (value) out.platformDesignation = value; break; }
+      case 11: { const value = readText(v); if (value) out.imageSourceSensor = value; break; }
+      case 12: { const value = readText(v); if (value) out.imageCoordinateSystem = value; break; }
 
       case 13: if (v.length === 4) out.sensorLat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
       case 14: if (v.length === 4) out.sensorLon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
@@ -190,6 +209,9 @@ export function decodeSt0601LocalSet(lsBuf) {
 
       case 21: if (v.length === 4) out.slantRangeM = mapUint32ToRange(v.readUInt32BE(0), 0, 5_000_000); break;
 
+      // Target geometry, location, tracking gate, and position-error metadata.
+      case 22: if (v.length === 2) out.targetWidthM = mapUint16ToRange(v.readUInt16BE(0), 0, 10_000); break;
+
       case 23: if (v.length === 4) out.frameCenterLat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
       case 24: if (v.length === 4) out.frameCenterLon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
       case 25: if (v.length === 2) out.frameCenterElevationMslM = mapUint16ToRange(v.readUInt16BE(0), -900, 19000); break;
@@ -202,6 +224,33 @@ export function decodeSt0601LocalSet(lsBuf) {
       case 31: if (v.length === 2) out.offsetCorner3Lon = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
       case 32: if (v.length === 2) out.offsetCorner4Lat = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
       case 33: if (v.length === 2) out.offsetCorner4Lon = mapInt16ToRange(v.readInt16BE(0), -0.075, 0.075); break;
+
+      // Environmental conditions and platform/aircraft state.
+      case 34: if (v.length === 1) out.icingDetectedCode = v[0]; break;
+      case 35: if (v.length === 2) out.windDirectionDeg = mapUint16ToRange(v.readUInt16BE(0), 0, 360); break;
+      case 36: if (v.length === 1) out.windSpeedMps = v[0]; break;
+      case 37: if (v.length === 2) out.staticPressureMbar = mapUint16ToRange(v.readUInt16BE(0), 0, 5_000); break;
+      case 38: if (v.length === 2) out.densityAltitudeM = mapUint16ToRange(v.readUInt16BE(0), -900, 19_000); break;
+      case 39: if (v.length === 1) out.outsideAirTemperatureC = readInt8(v); break;
+
+      case 40: if (v.length === 4) out.targetLat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
+      case 41: if (v.length === 4) out.targetLon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;
+      case 42: if (v.length === 2) out.targetElevationMslM = mapUint16ToRange(v.readUInt16BE(0), -900, 19_000); break;
+      case 43: if (v.length === 1) out.targetTrackGateWidthPx = v[0]; break;
+      case 44: if (v.length === 1) out.targetTrackGateHeightPx = v[0]; break;
+      case 45: if (v.length === 2) out.targetLocationCe90M = mapUint16ToRange(v.readUInt16BE(0), 0, 4_095); break;
+      case 46: if (v.length === 2) out.targetLocationLe90M = mapUint16ToRange(v.readUInt16BE(0), 0, 4_095); break;
+
+      case 49: if (v.length === 2) out.differentialPressureMbar = mapUint16ToRange(v.readUInt16BE(0), 0, 5_000); break;
+      case 50: if (v.length === 2) out.platformAngleOfAttackDeg = mapInt16ToRange(v.readInt16BE(0), -20, 20); break;
+      case 51: if (v.length === 2) out.platformVerticalSpeedMps = mapInt16ToRange(v.readInt16BE(0), -180, 180); break;
+      case 52: if (v.length === 2) out.platformSideslipAngleDeg = mapInt16ToRange(v.readInt16BE(0), -20, 20); break;
+      case 53: if (v.length === 2) out.airfieldBarometricPressureMbar = mapUint16ToRange(v.readUInt16BE(0), 0, 5_000); break;
+      case 54: if (v.length === 2) out.airfieldElevationM = mapUint16ToRange(v.readUInt16BE(0), -900, 19_000); break;
+      case 55: if (v.length === 1) out.relativeHumidityPercent = v[0]; break;
+      case 56: if (v.length === 1) out.platformGroundSpeedMps = v[0]; break;
+      case 58: if (v.length === 2) out.platformFuelRemainingKg = mapUint16ToRange(v.readUInt16BE(0), 0, 10_000); break;
+      case 59: { const value = readText(v); if (value) out.platformCallSign = value; break; }
 
       case 82: if (v.length === 4) out.frameCorner1Lat = mapInt32ToRange(v.readInt32BE(0), -90, 90); break;
       case 83: if (v.length === 4) out.frameCorner1Lon = mapInt32ToRange(v.readInt32BE(0), -180, 180); break;

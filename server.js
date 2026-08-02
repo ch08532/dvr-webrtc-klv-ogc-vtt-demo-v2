@@ -2129,11 +2129,19 @@ app.delete("/sources/:streamId", async (req, res) => {
 // ---------- API: direct KLV query ----------
 const KLV_CSV_COLUMNS = [
   "stream_id", "mission_time_utc", "mission_time_unix_ms", "video_time_seconds", "timestamp_source", "mission_id",
+  "platform_tail_number", "platform_designation", "platform_call_sign", "image_source_sensor", "image_coordinate_system",
+  "platform_true_airspeed_mps", "platform_indicated_airspeed_mps", "platform_ground_speed_mps",
   "sensor_latitude", "sensor_longitude", "sensor_alt_msl_m",
   "platform_heading_deg", "platform_pitch_deg", "platform_roll_deg",
   "frame_center_latitude", "frame_center_longitude", "frame_center_elevation_msl_m",
   "sensor_relative_azimuth_deg", "sensor_relative_elevation_deg", "sensor_relative_roll_deg",
   "sensor_horizontal_fov_deg", "sensor_vertical_fov_deg", "slant_range_m",
+  "target_width_m", "target_latitude", "target_longitude", "target_elevation_msl_m",
+  "target_track_gate_width_px", "target_track_gate_height_px", "target_location_ce90_m", "target_location_le90_m",
+  "icing_detected_code", "wind_direction_deg", "wind_speed_mps", "static_pressure_mbar", "differential_pressure_mbar",
+  "density_altitude_m", "outside_air_temperature_c", "airfield_barometric_pressure_mbar", "airfield_elevation_m",
+  "relative_humidity_percent", "platform_angle_of_attack_deg", "platform_vertical_speed_mps",
+  "platform_sideslip_angle_deg", "platform_fuel_remaining_kg",
   "frame_corner_1_latitude", "frame_corner_1_longitude", "frame_corner_2_latitude", "frame_corner_2_longitude",
   "frame_corner_3_latitude", "frame_corner_3_longitude", "frame_corner_4_latitude", "frame_corner_4_longitude",
   "frame_corner_source"
@@ -2167,11 +2175,19 @@ function klvCsvRow(streamId, event, timeline) {
     streamId, data.timestampIso || csvMissionTimeIso(missionTimeMs), missionTimeMs,
     Number.isFinite(videoTimeMs) && videoTimeMs >= 0 ? videoTimeMs / 1000 : null,
     data.timestampUnixMicros ? "klv" : "ingest", data.missionId,
+    data.platformTailNumber, data.platformDesignation, data.platformCallSign, data.imageSourceSensor, data.imageCoordinateSystem,
+    data.platformTrueAirspeedMps, data.platformIndicatedAirspeedMps, data.platformGroundSpeedMps,
     data.sensorLat, data.sensorLon, data.sensorAltMslM,
     data.platformHeadingDeg, data.platformPitchDeg, data.platformRollDeg,
     data.frameCenterLat, data.frameCenterLon, data.frameCenterElevationMslM,
     data.sensorRelAzDeg, data.sensorRelElDeg, data.sensorRelRollDeg,
     data.sensorHfovDeg, data.sensorVfovDeg, data.slantRangeM,
+    data.targetWidthM, data.targetLat, data.targetLon, data.targetElevationMslM,
+    data.targetTrackGateWidthPx, data.targetTrackGateHeightPx, data.targetLocationCe90M, data.targetLocationLe90M,
+    data.icingDetectedCode, data.windDirectionDeg, data.windSpeedMps, data.staticPressureMbar, data.differentialPressureMbar,
+    data.densityAltitudeM, data.outsideAirTemperatureC, data.airfieldBarometricPressureMbar, data.airfieldElevationM,
+    data.relativeHumidityPercent, data.platformAngleOfAttackDeg, data.platformVerticalSpeedMps,
+    data.platformSideslipAngleDeg, data.platformFuelRemainingKg,
     data.frameCorner1Lat, data.frameCorner1Lon, data.frameCorner2Lat, data.frameCorner2Lon,
     data.frameCorner3Lat, data.frameCorner3Lon, data.frameCorner4Lat, data.frameCorner4Lon,
     data.frameCornerSource
@@ -2181,6 +2197,14 @@ function klvCsvRow(streamId, event, timeline) {
 const KML_METADATA_FIELDS = [
   ["mission_time_unix_ms", "Mission time (Unix ms)", (event) => event.tMs],
   ["mission_id", "Mission ID", (event) => event.data?.missionId],
+  ["platform_tail_number", "Platform tail number", (event) => event.data?.platformTailNumber],
+  ["platform_designation", "Platform designation", (event) => event.data?.platformDesignation],
+  ["platform_call_sign", "Platform call sign", (event) => event.data?.platformCallSign],
+  ["image_source_sensor", "Image source sensor", (event) => event.data?.imageSourceSensor],
+  ["image_coordinate_system", "Image coordinate system", (event) => event.data?.imageCoordinateSystem],
+  ["platform_true_airspeed_mps", "Platform true airspeed (m/s)", (event) => event.data?.platformTrueAirspeedMps],
+  ["platform_indicated_airspeed_mps", "Platform indicated airspeed (m/s)", (event) => event.data?.platformIndicatedAirspeedMps],
+  ["platform_ground_speed_mps", "Platform ground speed (m/s)", (event) => event.data?.platformGroundSpeedMps],
   ["sensor_alt_msl_m", "Sensor altitude MSL (m)", (event) => event.data?.sensorAltMslM],
   ["platform_heading_deg", "Platform heading (deg)", (event) => event.data?.platformHeadingDeg],
   ["platform_pitch_deg", "Platform pitch (deg)", (event) => event.data?.platformPitchDeg],
@@ -2191,6 +2215,28 @@ const KML_METADATA_FIELDS = [
   ["sensor_horizontal_fov_deg", "Sensor horizontal FOV (deg)", (event) => event.data?.sensorHfovDeg],
   ["sensor_vertical_fov_deg", "Sensor vertical FOV (deg)", (event) => event.data?.sensorVfovDeg],
   ["slant_range_m", "Slant range (m)", (event) => event.data?.slantRangeM],
+  ["target_width_m", "Target width (m)", (event) => event.data?.targetWidthM],
+  ["target_latitude", "Target latitude (deg)", (event) => event.data?.targetLat],
+  ["target_longitude", "Target longitude (deg)", (event) => event.data?.targetLon],
+  ["target_elevation_msl_m", "Target elevation MSL (m)", (event) => event.data?.targetElevationMslM],
+  ["target_track_gate_width_px", "Target track-gate width (px)", (event) => event.data?.targetTrackGateWidthPx],
+  ["target_track_gate_height_px", "Target track-gate height (px)", (event) => event.data?.targetTrackGateHeightPx],
+  ["target_location_ce90_m", "Target-location CE90 (m)", (event) => event.data?.targetLocationCe90M],
+  ["target_location_le90_m", "Target-location LE90 (m)", (event) => event.data?.targetLocationLe90M],
+  ["icing_detected_code", "Icing detected code", (event) => event.data?.icingDetectedCode],
+  ["wind_direction_deg", "Wind direction (deg)", (event) => event.data?.windDirectionDeg],
+  ["wind_speed_mps", "Wind speed (m/s)", (event) => event.data?.windSpeedMps],
+  ["static_pressure_mbar", "Static pressure (mbar)", (event) => event.data?.staticPressureMbar],
+  ["differential_pressure_mbar", "Differential pressure (mbar)", (event) => event.data?.differentialPressureMbar],
+  ["density_altitude_m", "Density altitude (m)", (event) => event.data?.densityAltitudeM],
+  ["outside_air_temperature_c", "Outside-air temperature (C)", (event) => event.data?.outsideAirTemperatureC],
+  ["airfield_barometric_pressure_mbar", "Airfield barometric pressure (mbar)", (event) => event.data?.airfieldBarometricPressureMbar],
+  ["airfield_elevation_m", "Airfield elevation (m)", (event) => event.data?.airfieldElevationM],
+  ["relative_humidity_percent", "Relative humidity (%)", (event) => event.data?.relativeHumidityPercent],
+  ["platform_angle_of_attack_deg", "Platform angle of attack (deg)", (event) => event.data?.platformAngleOfAttackDeg],
+  ["platform_vertical_speed_mps", "Platform vertical speed (m/s)", (event) => event.data?.platformVerticalSpeedMps],
+  ["platform_sideslip_angle_deg", "Platform sideslip angle (deg)", (event) => event.data?.platformSideslipAngleDeg],
+  ["platform_fuel_remaining_kg", "Platform fuel remaining (kg)", (event) => event.data?.platformFuelRemainingKg],
   ["frame_corner_source", "Frame corner source", (event) => event.data?.frameCornerSource]
 ];
 
@@ -2299,6 +2345,15 @@ function buildKlvKml(streamId, events) {
     lonKey: "frameCenterLon",
     altitudeKey: "frameCenterElevationMslM"
   });
+  const targetTrack = kmlTrack({
+    name: "Target location",
+    description: "Target location from KLV target latitude, longitude, and elevation.",
+    styleUrl: "#targetTrackStyle",
+    events,
+    latKey: "targetLat",
+    lonKey: "targetLon",
+    altitudeKey: "targetElevationMslM"
+  });
   const fovFootprints = kmlFovFootprints(events);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
@@ -2310,6 +2365,7 @@ ${schema}
     </Schema>
     <Style id="platformTrackStyle"><IconStyle><scale>1.1</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle><LineStyle><color>ffff0000</color><width>3</width></LineStyle></Style>
     <Style id="spiTrackStyle"><IconStyle><scale>1.05</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/target.png</href></Icon></IconStyle><LineStyle><color>ff00a5ff</color><width>3</width></LineStyle></Style>
+    <Style id="targetTrackStyle"><IconStyle><scale>1.1</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/target.png</href></Icon></IconStyle><LineStyle><color>ff00ff00</color><width>3</width></LineStyle></Style>
     <Style id="fovFootprintStyle"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4d00a5ff</color></PolyStyle></Style>
     <Folder>
       <name>Platform location</name>
@@ -2318,6 +2374,10 @@ ${platformTrack || "      <description>No platform positions were present in the
     <Folder>
       <name>Sensor - Frame Center</name>
 ${spiTrack || "      <description>No SPI/frame-center positions were present in the stored KLV telemetry.</description>"}
+    </Folder>
+    <Folder>
+      <name>Target location</name>
+${targetTrack || "      <description>No target positions were present in the stored KLV telemetry.</description>"}
     </Folder>
     <Folder>
       <name>FOV footprints</name>
