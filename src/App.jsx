@@ -78,6 +78,20 @@ function playbackViewTransform(view) {
   return `translate(${translateX}%, ${translateY}%) scale(${zoom})`;
 }
 
+function sameMapPointerPosition(a, b) {
+  if (!a || !b) return a === b;
+  return Math.abs(Number(a.lat) - Number(b.lat)) < 1e-7
+    && Math.abs(Number(a.lon) - Number(b.lon)) < 1e-7;
+}
+
+function formatMapPointerPosition(position) {
+  const lat = Number(position?.lat);
+  const lon = Number(position?.lon);
+  return Number.isFinite(lat) && Number.isFinite(lon)
+    ? `Map pointer: Lat ${lat.toFixed(6)}°, Lon ${lon.toFixed(6)}°`
+    : 'Map pointer: —';
+}
+
 /** Parses ffprobe's display/sample aspect-ratio form, e.g. "16:9". */
 function parseAspectRatio(value) {
   const match = String(value || '').match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
@@ -226,6 +240,8 @@ function App() {
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
   const [liveTelemetryTab, setLiveTelemetryTab] = useState('map');
+  const [dvrMapPointerPosition, setDvrMapPointerPosition] = useState(null);
+  const [liveMapPointerPosition, setLiveMapPointerPosition] = useState(null);
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [hlsQuality, setHlsQuality] = useState('auto');
@@ -278,6 +294,12 @@ function App() {
   const [hostMetrics, setHostMetrics] = useState(null);
   const [mediaTools, setMediaTools] = useState(null);
   const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
+  const updateDvrMapPointerPosition = (position) => {
+    setDvrMapPointerPosition((previous) => sameMapPointerPosition(previous, position) ? previous : position);
+  };
+  const updateLiveMapPointerPosition = (position) => {
+    setLiveMapPointerPosition((previous) => sameMapPointerPosition(previous, position) ? previous : position);
+  };
   const activeHlsMode = hlsRuntimeIsActive
     ? streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode
     : hlsMode;
@@ -3757,13 +3779,19 @@ function App() {
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
                             onPositionSelect={openNewTargetLogEntry}
+                            onPointerCoordinate={updateDvrMapPointerPosition}
                             targetLogEntries={targetLogEntries}
                             selectedTargetLogId={selectedTargetLogId}
                             onTargetLogSelect={selectTargetLogEntryById}
                           />
-                          <Text size="xs" c="dimmed" mt="xs">
-                            Mission timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
-                          </Text>
+                          <Group mt="xs" justify="space-between" gap="xs" wrap="nowrap">
+                            <Text size="xs" c="dimmed">
+                              Mission timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
+                            </Text>
+                            <Text size="xs" c="dimmed" style={{ textAlign: 'right' }}>
+                              {formatMapPointerPosition(dvrMapPointerPosition)}
+                            </Text>
+                          </Group>
                         </Tabs.Panel>
                       </Tabs>
                     </Paper>
@@ -3864,13 +3892,19 @@ function App() {
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
                             onPositionSelect={openNewTargetLogEntry}
+                            onPointerCoordinate={updateLiveMapPointerPosition}
                             targetLogEntries={targetLogEntries}
                             selectedTargetLogId={selectedTargetLogId}
                             onTargetLogSelect={selectTargetLogEntryById}
                           />
-                          <Text size="xs" c="dimmed" mt="xs">
-                            Mission timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
-                          </Text>
+                          <Group mt="xs" justify="space-between" gap="xs" wrap="nowrap">
+                            <Text size="xs" c="dimmed">
+                              Mission timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
+                            </Text>
+                            <Text size="xs" c="dimmed" style={{ textAlign: 'right' }}>
+                              {formatMapPointerPosition(liveMapPointerPosition)}
+                            </Text>
+                          </Group>
                         </Tabs.Panel>
                       </Tabs>
                     </Paper>

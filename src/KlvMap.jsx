@@ -127,6 +127,7 @@ export default function KlvMap({
   telemetry,
   active,
   onPositionSelect = null,
+  onPointerCoordinate = null,
   targetLogEntries = [],
   selectedTargetLogId = null,
   onTargetLogSelect = null
@@ -146,6 +147,7 @@ export default function KlvMap({
   const hasCenteredRef = useRef(false);
   const centerRequestRef = useRef(0);
   const onPositionSelectRef = useRef(onPositionSelect);
+  const onPointerCoordinateRef = useRef(onPointerCoordinate);
   const onTargetLogSelectRef = useRef(onTargetLogSelect);
   const [hasCoordinates, setHasCoordinates] = useState(false);
   const [hasTargetLogPositions, setHasTargetLogPositions] = useState(false);
@@ -155,6 +157,10 @@ export default function KlvMap({
   useEffect(() => {
     onPositionSelectRef.current = onPositionSelect;
   }, [onPositionSelect]);
+
+  useEffect(() => {
+    onPointerCoordinateRef.current = onPointerCoordinate;
+  }, [onPointerCoordinate]);
 
   useEffect(() => {
     onTargetLogSelectRef.current = onTargetLogSelect;
@@ -312,13 +318,27 @@ export default function KlvMap({
         callback({ lat, lon });
       }
     };
+    const onMapPointerMove = (event) => {
+      const callback = onPointerCoordinateRef.current;
+      if (!callback || !event?.coordinate) return;
+      const [lon, lat] = toLonLat(event.coordinate);
+      callback(Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+        ? { lat, lon }
+        : null);
+    };
+    const onMapPointerLeave = () => onPointerCoordinateRef.current?.(null);
     view.on('change:resolution', onResolutionChange);
     map.on('singleclick', onMapSingleClick);
+    map.on('pointermove', onMapPointerMove);
+    targetRef.current.addEventListener('pointerleave', onMapPointerLeave);
 
     return () => {
       resizeObserver.disconnect();
       view.un('change:resolution', onResolutionChange);
       map.un('singleclick', onMapSingleClick);
+      map.un('pointermove', onMapPointerMove);
+      targetRef.current?.removeEventListener('pointerleave', onMapPointerLeave);
+      onPointerCoordinateRef.current?.(null);
       map.setTarget(undefined);
       mapRef.current = null;
       sourceRef.current = null;
