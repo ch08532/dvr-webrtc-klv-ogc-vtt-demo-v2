@@ -30,6 +30,53 @@ function hlsQualityOptionsFor(renditions) {
 const HLS_PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 const formatHlsPlaybackRate = (rate) => `${rate}×`;
 const RESUMABLE_UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
+const PLAYBACK_ZOOM_MIN = 1;
+const PLAYBACK_ZOOM_MAX = 4;
+const PLAYBACK_ZOOM_STEP = 0.25;
+const INITIAL_PLAYBACK_VIEW = { zoom: 1, panX: 0.5, panY: 0.5 };
+
+function clampPlaybackZoom(value) {
+  const rounded = Math.round(Number(value) * 100) / 100;
+  return Math.min(PLAYBACK_ZOOM_MAX, Math.max(PLAYBACK_ZOOM_MIN, rounded));
+}
+
+function clampUnit(value) {
+  return Math.min(1, Math.max(0, Number(value)));
+}
+
+/**
+ * Updates a scaled viewport while retaining the source pixel below `focus`.
+ * Pan is normalized, so a resized player keeps its chosen area in view.
+ */
+function zoomPlaybackView(view, requestedZoom, focus = { x: 0.5, y: 0.5 }) {
+  const zoom = clampPlaybackZoom(requestedZoom);
+  if (zoom <= PLAYBACK_ZOOM_MIN) return { ...INITIAL_PLAYBACK_VIEW };
+
+  const previousZoom = Math.max(PLAYBACK_ZOOM_MIN, Number(view?.zoom) || PLAYBACK_ZOOM_MIN);
+  const previousPanX = clampUnit(view?.panX ?? 0.5);
+  const previousPanY = clampUnit(view?.panY ?? 0.5);
+  const focusX = clampUnit(focus.x);
+  const focusY = clampUnit(focus.y);
+  const denominator = zoom - 1;
+
+  const panAtFocus = (previousPan, focalPoint) => clampUnit(
+    (previousPan * (previousZoom - 1) - focalPoint * (1 - zoom / previousZoom)) / denominator
+  );
+
+  return {
+    zoom,
+    panX: panAtFocus(previousPanX, focusX),
+    panY: panAtFocus(previousPanY, focusY)
+  };
+}
+
+function playbackViewTransform(view) {
+  const zoom = Number(view?.zoom) || 1;
+  if (zoom <= 1) return undefined;
+  const translateX = -clampUnit(view?.panX ?? 0.5) * (zoom - 1) * 100;
+  const translateY = -clampUnit(view?.panY ?? 0.5) * (zoom - 1) * 100;
+  return `translate(${translateX}%, ${translateY}%) scale(${zoom})`;
+}
 
 /** Parses ffprobe's display/sample aspect-ratio form, e.g. "16:9". */
 function parseAspectRatio(value) {
@@ -70,6 +117,46 @@ function emptyWebRtcDiag() {
     browser: null,
     error: null
   };
+}
+
+/** Shared display-only digital zoom controls for either playback path. */
+function PlaybackZoomControls({ zoom, onZoomChange, disabled = false }) {
+  const zoomLabel = `${Number(zoom).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}×`;
+  return <Group gap={4} wrap="nowrap">
+    <Tooltip label="Zoom out" withArrow>
+      <ActionIcon
+        variant="light"
+        size="lg"
+        onClick={() => onZoomChange((current) => clampPlaybackZoom(current - PLAYBACK_ZOOM_STEP))}
+        disabled={disabled || zoom <= PLAYBACK_ZOOM_MIN}
+        aria-label="Zoom out"
+      >
+        <Text size="lg" fw={700}>−</Text>
+      </ActionIcon>
+    </Tooltip>
+    <Tooltip label="Reset zoom" withArrow>
+      <ActionIcon
+        variant={zoom === 1 ? 'light' : 'filled'}
+        size="lg"
+        onClick={() => onZoomChange(1)}
+        disabled={disabled || zoom === 1}
+        aria-label={`Reset zoom (currently ${zoomLabel})`}
+      >
+        <Text size="xs" fw={700}>{zoomLabel}</Text>
+      </ActionIcon>
+    </Tooltip>
+    <Tooltip label="Zoom in" withArrow>
+      <ActionIcon
+        variant="light"
+        size="lg"
+        onClick={() => onZoomChange((current) => clampPlaybackZoom(current + PLAYBACK_ZOOM_STEP))}
+        disabled={disabled || zoom >= PLAYBACK_ZOOM_MAX}
+        aria-label="Zoom in"
+      >
+        <Text size="lg" fw={700}>+</Text>
+      </ActionIcon>
+    </Tooltip>
+  </Group>;
 }
 
 /** Startup FFmpeg diagnostics, reused both with and without an active viewer source. */
@@ -143,6 +230,10 @@ function App() {
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [hlsQuality, setHlsQuality] = useState('auto');
   const [hlsPlaybackRate, setHlsPlaybackRate] = useState(1);
+  const [hlsView, setHlsView] = useState(INITIAL_PLAYBACK_VIEW);
+  const [webRtcView, setWebRtcView] = useState(INITIAL_PLAYBACK_VIEW);
+  const [hlsPanning, setHlsPanning] = useState(false);
+  const [webRtcPanning, setWebRtcPanning] = useState(false);
   const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
   const [clipStartSeconds, setClipStartSeconds] = useState(0);
@@ -203,6 +294,9 @@ function App() {
   const videoRef = useRef(null);
   const dvrVideoHostRef = useRef(null);
   const liveVideoRef = useRef(null);
+  const liveVideoViewportRef = useRef(null);
+  const hlsPanGestureRef = useRef(null);
+  const webRtcPanGestureRef = useRef(null);
   const wsWorkerRef = useRef(null);
   const vttHookedRef = useRef(false);
   const vttTrackRef = useRef(null);
@@ -431,8 +525,8 @@ function App() {
     }
     : { width: '100%' };
   const liveVideoStyle = liveDisplayAspect
-    ? { width: '100%', height: '100%', objectFit: 'fill' }
-    : { width: '100%', maxHeight: '400px' };
+    ? { width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left' }
+    : { width: '100%', maxHeight: '400px', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left' };
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -1811,6 +1905,114 @@ function App() {
     setStatus(`${currentSourceIsFile ? 'Playback' : 'HLS playback'} speed set to ${rate}×.`);
   };
 
+  const changePlaybackZoomAtCenter = (setView, change) => {
+    setView((current) => {
+      const requested = typeof change === 'function' ? change(current.zoom) : change;
+      return zoomPlaybackView(current, requested);
+    });
+  };
+
+  const changeHlsZoom = (change) => changePlaybackZoomAtCenter(setHlsView, change);
+  const changeWebRtcZoom = (change) => changePlaybackZoomAtCenter(setWebRtcView, change);
+
+  const handlePlaybackZoomWheel = (event, setView) => {
+    // Preserve the browser's Ctrl+wheel page-zoom shortcut.
+    if (event.ctrlKey || event.deltaY === 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    if (event.cancelable) event.preventDefault();
+    const focus = {
+      x: (event.clientX - rect.left) / rect.width,
+      y: (event.clientY - rect.top) / rect.height
+    };
+    // This gives a natural response for both mouse wheels and trackpads.
+    const multiplier = Math.exp(-event.deltaY * 0.0015);
+    setView((current) => zoomPlaybackView(current, current.zoom * multiplier, focus));
+  };
+
+  const handleHlsZoomWheel = (event) => handlePlaybackZoomWheel(event, setHlsView);
+  const handleWebRtcZoomWheel = (event) => handlePlaybackZoomWheel(event, setWebRtcView);
+
+  const beginPlaybackPan = (event, view, gestureRef, setPanning, { ignoreVideoJsControls = false } = {}) => {
+    if (event.button !== 0 || view.zoom <= 1) return;
+    if (ignoreVideoJsControls && event.target instanceof Element && event.target.closest('.vjs-control-bar')) return;
+    const viewport = event.currentTarget;
+    const rect = viewport.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    gestureRef.current = {
+      pointerId: event.pointerId,
+      viewport,
+      startX: event.clientX,
+      startY: event.clientY,
+      width: rect.width,
+      height: rect.height,
+      view
+    };
+    try { viewport.setPointerCapture(event.pointerId); } catch {}
+    setPanning(true);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const movePlaybackPan = (event, setView, gestureRef) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const zoomRange = gesture.view.zoom - 1;
+    if (zoomRange <= 0) return;
+
+    const deltaX = event.clientX - gesture.startX;
+    const deltaY = event.clientY - gesture.startY;
+    setView({
+      ...gesture.view,
+      panX: clampUnit(gesture.view.panX - deltaX / (gesture.width * zoomRange)),
+      panY: clampUnit(gesture.view.panY - deltaY / (gesture.height * zoomRange))
+    });
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const endPlaybackPan = (event, gestureRef, setPanning) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    try { gesture.viewport.releasePointerCapture(event.pointerId); } catch {}
+    gestureRef.current = null;
+    setPanning(false);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const beginHlsPan = (event) => beginPlaybackPan(event, hlsView, hlsPanGestureRef, setHlsPanning, { ignoreVideoJsControls: true });
+  const moveHlsPan = (event) => movePlaybackPan(event, setHlsView, hlsPanGestureRef);
+  const endHlsPan = (event) => endPlaybackPan(event, hlsPanGestureRef, setHlsPanning);
+  const beginWebRtcPan = (event) => beginPlaybackPan(event, webRtcView, webRtcPanGestureRef, setWebRtcPanning);
+  const moveWebRtcPan = (event) => movePlaybackPan(event, setWebRtcView, webRtcPanGestureRef);
+  const endWebRtcPan = (event) => endPlaybackPan(event, webRtcPanGestureRef, setWebRtcPanning);
+
+  useEffect(() => {
+    const hlsViewport = dvrVideoHostRef.current;
+    const webRtcViewport = liveVideoViewportRef.current;
+    if (!hlsViewport && !webRtcViewport) return undefined;
+
+    // React may install delegated wheel handlers as passive in some browser
+    // paths. Native non-passive listeners are required to reliably suppress
+    // document scrolling while the pointer is over a zoomable video frame.
+    if (hlsViewport) hlsViewport.addEventListener('wheel', handleHlsZoomWheel, { passive: false });
+    if (webRtcViewport) webRtcViewport.addEventListener('wheel', handleWebRtcZoomWheel, { passive: false });
+    return () => {
+      if (hlsViewport) hlsViewport.removeEventListener('wheel', handleHlsZoomWheel);
+      if (webRtcViewport) webRtcViewport.removeEventListener('wheel', handleWebRtcZoomWheel);
+    };
+  }, [hasActiveViewerSource, activeTab]);
+
+  useEffect(() => {
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+    videoEl.style.transform = playbackViewTransform(hlsView) || '';
+    videoEl.style.transformOrigin = 'top left';
+  }, [hlsView]);
+
   /** Captures the currently decoded video frame and downloads it as a PNG. */
   const downloadVideoSnapshot = (video, playbackKind, displayAspect = null) => {
     const width = Number(video?.videoWidth);
@@ -2381,6 +2583,8 @@ function App() {
         videoEl.muted = true;
         videoEl.playsInline = true;
         videoEl.style.width = "100%";
+        videoEl.style.transform = playbackViewTransform(hlsView) || "";
+        videoEl.style.transformOrigin = "top left";
         hostEl.appendChild(videoEl);
         videoRef.current = videoEl;
       }
@@ -3338,7 +3542,14 @@ function App() {
                           </Accordion.Panel>
                         </Accordion.Item>
                       </Accordion>
-                      <div ref={dvrVideoHostRef} style={{ width: '100%', minHeight: '180px' }} />
+                      <div
+                        ref={dvrVideoHostRef}
+                        style={{ width: '100%', minHeight: '180px', overflow: 'hidden', cursor: hlsPanning ? 'grabbing' : hlsView.zoom > 1 ? 'grab' : undefined }}
+                        onPointerDownCapture={beginHlsPan}
+                        onPointerMoveCapture={moveHlsPan}
+                        onPointerUpCapture={endHlsPan}
+                        onPointerCancelCapture={endHlsPan}
+                      />
                        <Text size="xs" c="dimmed" mt="xs">
                          {currentSourceIsFile
                            ? `player time: ${formatPlayerTime(dvrDiag.currentTimeSec)} / ${formatPlayerTime(dvrDiag.durationSec)}`
@@ -3353,6 +3564,7 @@ function App() {
                           {clipSourceIsActive ? <Tooltip label="Seek to clip end marker" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsToClipMarker('end')} disabled={!clipWidgetReady} aria-label="Seek to clip end marker"><PlaybackControlIcon name="clipEnd" /></ActionIcon></Tooltip> : null}
                           <Tooltip label="Fast-forward 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(15)} aria-label="Fast-forward 15 seconds"><PlaybackControlIcon name="forward" /></ActionIcon></Tooltip>
                           <Tooltip label="Go to end" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToEnd} aria-label="Go to end"><PlaybackControlIcon name="end" /></ActionIcon></Tooltip>
+                          <PlaybackZoomControls zoom={hlsView.zoom} onZoomChange={changeHlsZoom} />
                           <Menu shadow="md" width={152} position="top" withArrow>
                             <Menu.Target>
                               <Tooltip label="Playback speed" withArrow>
@@ -3586,10 +3798,18 @@ function App() {
                           </Accordion.Panel>
                         </Accordion.Item>
                       </Accordion>
-                      <div style={liveVideoFrameStyle}>
+                      <div
+                        ref={liveVideoViewportRef}
+                        style={{ ...liveVideoFrameStyle, overflow: 'hidden', cursor: webRtcPanning ? 'grabbing' : webRtcView.zoom > 1 ? 'grab' : undefined }}
+                        onPointerDownCapture={beginWebRtcPan}
+                        onPointerMoveCapture={moveWebRtcPan}
+                        onPointerUpCapture={endWebRtcPan}
+                        onPointerCancelCapture={endWebRtcPan}
+                      >
                         <video ref={liveVideoRef} muted playsInline autoPlay style={liveVideoStyle}></video>
                       </div>
                       {liveVideoStreaming ? <Group mt="xs" justify="center">
+                        <PlaybackZoomControls zoom={webRtcView.zoom} onZoomChange={changeWebRtcZoom} />
                         <Tooltip label="Download snapshot" withArrow>
                           <ActionIcon variant="light" size="lg" onClick={downloadWebRtcSnapshot} aria-label="Download WebRTC snapshot">
                             <PlaybackControlIcon name="snapshot" />
