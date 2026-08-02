@@ -881,7 +881,9 @@ async function generateSourcePoster(streamId) {
       ...(captureSeconds != null ? ["-ss", String(Number(captureSeconds.toFixed(3)))] : []),
       "-i", source.inputUrl,
       "-frames:v", "1",
-      "-vf", `scale=${SOURCE_POSTER_WIDTH}:-2`,
+      // JPEG viewers are inconsistent about honoring a non-square SAR. Bake
+      // the input DAR into the output dimensions and make the poster square-pixel.
+      "-vf", `scale=${SOURCE_POSTER_WIDTH}:trunc(${SOURCE_POSTER_WIDTH}/dar/2)*2,setsar=1/1`,
       "-q:v", "4",
       posterPath
     ], { label: "source poster capture", timeoutMs: SOURCE_POSTER_TIMEOUT_MS });
@@ -1390,7 +1392,7 @@ async function getClipThumbnailFrames(streamId, source, durationSeconds) {
         Number((durationSeconds * ((index + 0.5) / CLIP_THUMBNAIL_COUNT)).toFixed(3))
       );
       const filterInputs = times.map((_, index) =>
-        `[${index}:v:0]scale=${CLIP_THUMBNAIL_WIDTH}:-2,crop=${CLIP_THUMBNAIL_WIDTH}:ih[thumb${index}]`
+        `[${index}:v:0]scale=${CLIP_THUMBNAIL_WIDTH}:trunc(${CLIP_THUMBNAIL_WIDTH}/dar/2)*2,setsar=1/1[thumb${index}]`
       ).join(";");
       const hstackInputs = times.map((_, index) => `[thumb${index}]`).join("");
       await runFfmpeg([
@@ -1625,6 +1627,9 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
       "-i", sourceInputPath,
       "-map", "0:v:0",
       "-frames:v", "1",
+      // A still image should be square-pixel, so expand a 1440×1080 frame
+      // with 4:3 SAR to its 1920×1080 display geometry before JPEG encoding.
+      "-vf", "scale=trunc(ih*dar/2)*2:ih,setsar=1/1",
       "-q:v", "2",
       outputPath
     ], { label: "authoritative snapshot", timeoutMs: AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS });
