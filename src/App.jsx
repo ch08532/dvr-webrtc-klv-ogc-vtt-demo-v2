@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { Accordion, ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader, Modal, Textarea, Checkbox } from '@mantine/core';
+import { Accordion, ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader, Modal, Textarea, Checkbox, Slider } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import '@mantine/dates/styles.css';
 import { Device } from 'mediasoup-client';
@@ -34,6 +34,9 @@ const PLAYBACK_ZOOM_MIN = 1;
 const PLAYBACK_ZOOM_MAX = 4;
 const PLAYBACK_ZOOM_STEP = 0.25;
 const INITIAL_PLAYBACK_VIEW = { zoom: 1, panX: 0.5, panY: 0.5 };
+const IMAGE_ADJUSTMENT_MIN = 50;
+const IMAGE_ADJUSTMENT_MAX = 150;
+const DEFAULT_IMAGE_ADJUSTMENT = 100;
 
 function clampPlaybackZoom(value) {
   const rounded = Math.round(Number(value) * 100) / 100;
@@ -173,6 +176,55 @@ function PlaybackZoomControls({ zoom, onZoomChange, disabled = false }) {
   </Group>;
 }
 
+/** Browser-only image controls; values are CSS percentages. */
+function ImageAdjustmentMenu({ brightness, contrast, onBrightnessChange, onContrastChange }) {
+  const isDefault = brightness === DEFAULT_IMAGE_ADJUSTMENT && contrast === DEFAULT_IMAGE_ADJUSTMENT;
+  return <Menu shadow="md" width={235} position="top" withArrow closeOnItemClick={false}>
+    <Menu.Target>
+      <Tooltip label="Brightness and contrast" withArrow>
+        <ActionIcon variant={isDefault ? 'light' : 'filled'} size="lg" aria-label="Brightness and contrast">
+          <Text size="xs" fw={700}>B/C</Text>
+        </ActionIcon>
+      </Tooltip>
+    </Menu.Target>
+    <Menu.Dropdown>
+      <Stack gap="xs" p="xs">
+        <Text size="xs" fw={600}>Brightness: {brightness}%</Text>
+        <Slider
+          min={IMAGE_ADJUSTMENT_MIN}
+          max={IMAGE_ADJUSTMENT_MAX}
+          step={1}
+          value={brightness}
+          onChange={onBrightnessChange}
+          label={(value) => `${value}%`}
+          aria-label="Brightness"
+        />
+        <Text size="xs" fw={600}>Contrast: {contrast}%</Text>
+        <Slider
+          min={IMAGE_ADJUSTMENT_MIN}
+          max={IMAGE_ADJUSTMENT_MAX}
+          step={1}
+          value={contrast}
+          onChange={onContrastChange}
+          label={(value) => `${value}%`}
+          aria-label="Contrast"
+        />
+        <Button
+          size="xs"
+          variant="light"
+          onClick={() => {
+            onBrightnessChange(DEFAULT_IMAGE_ADJUSTMENT);
+            onContrastChange(DEFAULT_IMAGE_ADJUSTMENT);
+          }}
+          disabled={isDefault}
+        >
+          Reset image
+        </Button>
+      </Stack>
+    </Menu.Dropdown>
+  </Menu>;
+}
+
 /** Startup FFmpeg diagnostics, reused both with and without an active viewer source. */
 function MediaToolsStatus({ mediaTools }) {
   return <Stack gap="sm">
@@ -250,6 +302,10 @@ function App() {
   const [webRtcView, setWebRtcView] = useState(INITIAL_PLAYBACK_VIEW);
   const [hlsPanning, setHlsPanning] = useState(false);
   const [webRtcPanning, setWebRtcPanning] = useState(false);
+  const [hlsBrightness, setHlsBrightness] = useState(DEFAULT_IMAGE_ADJUSTMENT);
+  const [hlsContrast, setHlsContrast] = useState(DEFAULT_IMAGE_ADJUSTMENT);
+  const [webRtcBrightness, setWebRtcBrightness] = useState(DEFAULT_IMAGE_ADJUSTMENT);
+  const [webRtcContrast, setWebRtcContrast] = useState(DEFAULT_IMAGE_ADJUSTMENT);
   const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
   const [clipStartSeconds, setClipStartSeconds] = useState(0);
@@ -547,8 +603,8 @@ function App() {
     }
     : { width: '100%' };
   const liveVideoStyle = liveDisplayAspect
-    ? { width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left' }
-    : { width: '100%', maxHeight: '400px', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left' };
+    ? { width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` }
+    : { width: '100%', maxHeight: '400px', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` };
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -2033,7 +2089,8 @@ function App() {
     if (!videoEl) return;
     videoEl.style.transform = playbackViewTransform(hlsView) || '';
     videoEl.style.transformOrigin = 'top left';
-  }, [hlsView]);
+    videoEl.style.filter = `brightness(${hlsBrightness}%) contrast(${hlsContrast}%)`;
+  }, [hlsView, hlsBrightness, hlsContrast]);
 
   /** Captures the currently decoded video frame and downloads it as a PNG. */
   const downloadVideoSnapshot = (video, playbackKind, displayAspect = null) => {
@@ -2607,6 +2664,7 @@ function App() {
         videoEl.style.width = "100%";
         videoEl.style.transform = playbackViewTransform(hlsView) || "";
         videoEl.style.transformOrigin = "top left";
+        videoEl.style.filter = `brightness(${hlsBrightness}%) contrast(${hlsContrast}%)`;
         hostEl.appendChild(videoEl);
         videoRef.current = videoEl;
       }
@@ -3587,6 +3645,12 @@ function App() {
                           <Tooltip label="Fast-forward 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(15)} aria-label="Fast-forward 15 seconds"><PlaybackControlIcon name="forward" /></ActionIcon></Tooltip>
                           <Tooltip label="Go to end" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToEnd} aria-label="Go to end"><PlaybackControlIcon name="end" /></ActionIcon></Tooltip>
                           <PlaybackZoomControls zoom={hlsView.zoom} onZoomChange={changeHlsZoom} />
+                          <ImageAdjustmentMenu
+                            brightness={hlsBrightness}
+                            contrast={hlsContrast}
+                            onBrightnessChange={setHlsBrightness}
+                            onContrastChange={setHlsContrast}
+                          />
                           <Menu shadow="md" width={152} position="top" withArrow>
                             <Menu.Target>
                               <Tooltip label="Playback speed" withArrow>
@@ -3838,6 +3902,12 @@ function App() {
                       </div>
                       {liveVideoStreaming ? <Group mt="xs" justify="center">
                         <PlaybackZoomControls zoom={webRtcView.zoom} onZoomChange={changeWebRtcZoom} />
+                        <ImageAdjustmentMenu
+                          brightness={webRtcBrightness}
+                          contrast={webRtcContrast}
+                          onBrightnessChange={setWebRtcBrightness}
+                          onContrastChange={setWebRtcContrast}
+                        />
                         <Tooltip label="Download snapshot" withArrow>
                           <ActionIcon variant="light" size="lg" onClick={downloadWebRtcSnapshot} aria-label="Download WebRTC snapshot">
                             <PlaybackControlIcon name="snapshot" />
