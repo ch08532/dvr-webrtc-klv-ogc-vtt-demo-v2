@@ -18,6 +18,7 @@ import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
 import { registerOgcMovingFeaturesRoutes } from "./src/ogc_moving_features.js";
 import { getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
 import { getGpuMetrics } from "./src/gpu_metrics.js";
+import { checkMediaTools } from "./src/media_tool_preflight.js";
 import {
   createServiceLogger,
   newRequestId,
@@ -38,6 +39,12 @@ const SHUTDOWN_FORCE_EXIT_MS = Math.max(1000, Number(process.env.SHUTDOWN_FORCE_
 // normal direct-start behaviour while preventing unauthenticated HTTP shutdowns.
 const SHUTDOWN_CONTROL_TOKEN = process.env.SHUTDOWN_CONTROL_TOKEN || "";
 const log = createServiceLogger("server");
+
+// Keep this immutable for the service lifetime: the selected executables and
+// encoder come from startup environment, and repeatedly encoding a test frame
+// on every health request would add unnecessary GPU work.
+const mediaTools = checkMediaTools({ ffprobeCommand: FFPROBE_BIN });
+log[mediaTools.ok ? "info" : "warn"]("media_tools_checked", mediaTools);
 
 const RECORD_ROOT = path.resolve("./recordings");
 const DB_DIR = path.resolve("./db");
@@ -2653,7 +2660,8 @@ app.get("/metrics/runtime", async (req, res) => {
     workers: {
       sfu: sfuError ? { ok: false, error: sfuError } : { ok: true, ...sfuHealth },
       klv: klvWorkers
-    }
+    },
+    mediaTools
   });
 });
 
@@ -2673,13 +2681,14 @@ app.get("/healthz", async (req, res) => {
     sfuError = String(e?.message || e);
   }
 
-  const ok = sfuOk;
+  const ok = sfuOk && mediaTools.ok;
   res.status(ok ? 200 : 503).json({
     ok,
     timestampIso: new Date().toISOString(),
     activeSources: sources.size,
     degradedOrErrorSources: degradedOrError,
     eventLoopLagP99Ms: runtime.process.eventLoopLagMs.p99,
+    mediaTools,
     sfu: sfuOk ? {
       ok: true,
       pid: sfuInfo?.pid ?? null,

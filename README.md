@@ -18,6 +18,7 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 ## Prereqs
 - Node.js 18+
 - `ffmpeg` installed and on PATH
+- `ffprobe` installed and on PATH (normally distributed with FFmpeg)
 - For GPU encode (default), install FFmpeg with hardware encoder support (for example `h264_nvenc`).
 
 ### FFmpeg GPU settings
@@ -25,6 +26,7 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 - `FFMPEG_GPU_CODEC=h264_nvenc` selects the GPU encoder.
 - `FFMPEG_HWACCEL=auto` selects decode hwaccel mode.
 - Set `FFMPEG_USE_GPU=0` to force CPU `libx264` fallback.
+- On startup, the service logs the FFmpeg and FFprobe version lines and runs a one-frame encode using `FFMPEG_GPU_CODEC`. Read the same result from `/healthz` or `/metrics/runtime` under `mediaTools`. Missing FFmpeg/FFprobe makes `/healthz` return `503`; an unavailable GPU encoder is reported but does not prevent CPU fallback.
 
 ### Processing modes
 - **HLS passthrough** is the default: confirmed H.264 video is copied without video encoding; audio is omitted from browser playback. A separate copy-only carrier playlist retains the original video, audio, and KLV for extraction and clips.

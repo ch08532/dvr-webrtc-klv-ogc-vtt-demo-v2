@@ -24,6 +24,24 @@ function formatCommandArg(value) {
   return /[\s"]/u.test(text) ? `"${text.replace(/(["\\])/g, '\\$1')}"` : text;
 }
 
+/** Formats a child-process exit code consistently on Windows and preserves FFmpeg's useful stderr. */
+function describeFfmpegExit(code, signal, stderrTail) {
+  // Windows exposes native signed process status values as unsigned 32-bit
+  // numbers.  For example, 4294967256 is FFmpeg's -40 (ELOOP).
+  const numericCode = Number(code);
+  const signedCode = Number.isInteger(numericCode) && numericCode > 0x7fffffff
+    ? numericCode - 0x1_0000_0000
+    : code;
+  const stderr = stderrTail.filter(Boolean).join("\n");
+  const details = [
+    `code=${String(code)}`,
+    signedCode !== code ? `signedCode=${String(signedCode)}` : "",
+    `signal=${String(signal)}`,
+    stderr ? `stderr:\n${stderr}` : ""
+  ].filter(Boolean).join(", ");
+  return details;
+}
+
 /** Adds resilient UDP buffering options when the input is a UDP URL. */
 function bufferedInputUrl(inputUrl) {
   if (!/^udp:\/\//i.test(String(inputUrl || ''))) return inputUrl;
@@ -211,7 +229,7 @@ export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requ
   for (let i = 0; i < maxAttempts; i++) {
     if (exited) {
       throw new Error(
-        `FFmpeg exited before RTP ingest was ready (code=${String(exitCode)}, signal=${String(exitSignal)})`
+        `FFmpeg exited before RTP ingest was ready (${describeFfmpegExit(exitCode, exitSignal, stderrTail)})`
       );
     }
 
@@ -234,13 +252,13 @@ export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requ
       }
       if (exited) {
         throw new Error(
-          `FFmpeg exited before RTP ingest producer was created (code=${String(exitCode)}, signal=${String(exitSignal)})`
+          `FFmpeg exited before RTP ingest producer was created (${describeFfmpegExit(exitCode, exitSignal, stderrTail)})`
         );
       }
       const producerId = await sfu.setIngestProducer(streamId, rtpParameters);
       if (exited) {
         throw new Error(
-          `FFmpeg exited immediately after producer creation (code=${String(exitCode)}, signal=${String(exitSignal)})`
+          `FFmpeg exited immediately after producer creation (${describeFfmpegExit(exitCode, exitSignal, stderrTail)})`
         );
       }
       log.info("ready", { requestId, streamId, producerId, attempts: i + 1 });

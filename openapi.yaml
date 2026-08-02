@@ -21,7 +21,7 @@ paths:
   /healthz:
     get:
       tags: [Health]
-      summary: Read service health and runtime status
+      summary: Read service health, runtime status, and FFmpeg/FFprobe/GPU-encoder diagnostics
       responses:
         '200': { description: Service health payload }
   /metrics/runtime:

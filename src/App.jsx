@@ -31,6 +31,36 @@ const HLS_PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 const formatHlsPlaybackRate = (rate) => `${rate}×`;
 const RESUMABLE_UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 
+/** Parses ffprobe's display/sample aspect-ratio form, e.g. "16:9". */
+function parseAspectRatio(value) {
+  const match = String(value || '').match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height, value: width / height };
+}
+
+/**
+ * WebRTC commonly presents H.264 frames as square pixels.  Use the source
+ * probe's DAR (or its coded size multiplied by SAR) to preserve the intended
+ * shape in the browser without changing the RTP video bitstream.
+ */
+function resolveDisplayAspectRatio(sourceVideo) {
+  const declaredDar = parseAspectRatio(sourceVideo?.displayAspectRatio);
+  if (declaredDar) return declaredDar;
+
+  const sourceWidth = Number(sourceVideo?.width);
+  const sourceHeight = Number(sourceVideo?.height);
+  const sampleAspect = parseAspectRatio(sourceVideo?.sampleAspectRatio);
+  if (!Number.isFinite(sourceWidth) || sourceWidth <= 0 || !Number.isFinite(sourceHeight) || sourceHeight <= 0) return null;
+
+  const value = (sourceWidth / sourceHeight) * (sampleAspect?.value || 1);
+  return Number.isFinite(value) && value > 0
+    ? { width: value, height: 1, value }
+    : null;
+}
+
 function emptyWebRtcDiag() {
   return {
     consumerId: null,
@@ -40,6 +70,27 @@ function emptyWebRtcDiag() {
     browser: null,
     error: null
   };
+}
+
+/** Startup FFmpeg diagnostics, reused both with and without an active viewer source. */
+function MediaToolsStatus({ mediaTools }) {
+  return <Stack gap="sm">
+    <Group gap="xs">
+      <Text size="lg" fw={500}>Media Tools</Text>
+      <Badge color={mediaTools?.ok ? 'green' : mediaTools ? 'red' : 'gray'} variant="light">
+        {mediaTools?.ok ? 'Ready' : mediaTools ? 'Missing tools' : 'Checking...'}
+      </Badge>
+    </Group>
+    <Text size="sm" style={{ overflowWrap: 'anywhere' }}>
+      FFmpeg version: {mediaTools?.ffmpeg?.available ? mediaTools.ffmpeg.versionNumber || mediaTools.ffmpeg.version : mediaTools?.ffmpeg?.error || 'Not checked'}
+    </Text>
+    <Text size="sm" style={{ overflowWrap: 'anywhere' }}>
+      FFprobe version: {mediaTools?.ffprobe?.available ? mediaTools.ffprobe.versionNumber || mediaTools.ffprobe.version : mediaTools?.ffprobe?.error || 'Not checked'}
+    </Text>
+    <Text size="sm" c={mediaTools?.gpu?.available === false ? 'red' : undefined} style={{ overflowWrap: 'anywhere' }}>
+      GPU encoder ({mediaTools?.gpu?.encoder || 'not configured'}): {mediaTools?.gpu?.available ? 'Available' : mediaTools?.gpu?.error || 'Not checked'}
+    </Text>
+  </Stack>;
 }
 
 /** Compact SVG icons for video transport and capture actions. */
@@ -134,6 +185,7 @@ function App() {
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
   const [hostMetrics, setHostMetrics] = useState(null);
+  const [mediaTools, setMediaTools] = useState(null);
   const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
   const activeHlsMode = hlsRuntimeIsActive
     ? streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode
@@ -367,6 +419,20 @@ function App() {
     const rendition = activeHlsRenditions.find((item) => playlistUri.includes(item.playlist));
     return rendition?.width && rendition?.height ? `${rendition.width}×${rendition.height}` : 'n/a';
   })();
+  const liveDisplayAspect = resolveDisplayAspectRatio(streamRuntime?.sourceVideo);
+  const liveDisplayAspectLabel = liveDisplayAspect
+    ? `${Math.round(liveDisplayAspect.value * 1080)}×1080`
+    : null;
+  const liveVideoFrameStyle = liveDisplayAspect
+    ? {
+      width: `min(100%, ${400 * liveDisplayAspect.value}px)`,
+      aspectRatio: `${liveDisplayAspect.width} / ${liveDisplayAspect.height}`,
+      margin: '0 auto'
+    }
+    : { width: '100%' };
+  const liveVideoStyle = liveDisplayAspect
+    ? { width: '100%', height: '100%', objectFit: 'fill' }
+    : { width: '100%', maxHeight: '400px' };
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -1162,6 +1228,7 @@ function App() {
   const refreshHostMetrics = async () => {
     const result = await api('/metrics/runtime');
     if (result?.host) setHostMetrics(result.host);
+    if (result?.mediaTools) setMediaTools(result.mediaTools);
   };
 
   const refreshWebRtcDebug = async (targetStreamId = streamId) => {
@@ -1745,7 +1812,7 @@ function App() {
   };
 
   /** Captures the currently decoded video frame and downloads it as a PNG. */
-  const downloadVideoSnapshot = (video, playbackKind) => {
+  const downloadVideoSnapshot = (video, playbackKind, displayAspect = null) => {
     const width = Number(video?.videoWidth);
     const height = Number(video?.videoHeight);
     if (!video || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
@@ -1755,11 +1822,17 @@ function App() {
 
     try {
       const canvas = document.createElement('canvas');
-      canvas.width = width;
+      // A WebRTC decoder can expose coded dimensions (1440×1080) even when
+      // the source's DAR is 16:9.  Stretch only the exported image, matching
+      // the player presentation; the live video itself is never re-encoded.
+      const outputWidth = displayAspect && Number.isFinite(displayAspect.value)
+        ? Math.max(1, Math.round(height * displayAspect.value))
+        : width;
+      canvas.width = outputWidth;
       canvas.height = height;
       const context = canvas.getContext('2d');
       if (!context) throw new Error('browser did not provide a canvas context');
-      context.drawImage(video, 0, 0, width, height);
+      context.drawImage(video, 0, 0, outputWidth, height);
       canvas.toBlob((blob) => {
         if (!blob) {
           setStatus(`${playbackKind} snapshot could not be encoded.`);
@@ -1783,7 +1856,7 @@ function App() {
   };
 
   const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS');
-  const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC');
+  const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC', liveDisplayAspect);
 
   const downloadKlvExport = async (format) => {
     if (!klvExportAvailable || klvExportInFlight) return;
@@ -3499,7 +3572,7 @@ function App() {
                           <Accordion.Control>Live Video Stream Details</Accordion.Control>
                           <Accordion.Panel>
                       <Text size="xs" c="dimmed" mb="xs">
-                        producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | resolution: {webRtcBrowserStats?.frameWidth && webRtcBrowserStats?.frameHeight ? `${webRtcBrowserStats.frameWidth}×${webRtcBrowserStats.frameHeight}` : 'n/a'} | bitrate: {webRtcBrowserStats?.bitrateKbps != null ? `${webRtcBrowserStats.bitrateKbps} kbps` : 'n/a'}
+                        producerScore: {webrtcDiag.producerScore ?? 'n/a'} | consumerScore: {webrtcDiag.consumerScore ?? 'n/a'} | coded: {webRtcBrowserStats?.frameWidth && webRtcBrowserStats?.frameHeight ? `${webRtcBrowserStats.frameWidth}×${webRtcBrowserStats.frameHeight}` : 'n/a'} | display: {liveDisplayAspectLabel || 'source default'} | bitrate: {webRtcBrowserStats?.bitrateKbps != null ? `${webRtcBrowserStats.bitrateKbps} kbps` : 'n/a'}
                       </Text>
                       <Text size="xs" c="dimmed" mb="xs">
                         receiver: fps: {webRtcBrowserStats?.framesPerSecond ?? 'n/a'} | decoded: {webRtcBrowserStats?.framesDecoded ?? 'n/a'}{webRtcBrowserStats?.decodedSinceLast != null ? ` (+${webRtcBrowserStats.decodedSinceLast}/2s)` : ''} | rendered: {webRtcBrowserStats?.framesRendered ?? 'n/a'}{webRtcBrowserStats?.renderedSinceLast != null ? ` (+${webRtcBrowserStats.renderedSinceLast}/2s)` : ''}
@@ -3513,7 +3586,9 @@ function App() {
                           </Accordion.Panel>
                         </Accordion.Item>
                       </Accordion>
-                      <video ref={liveVideoRef} muted playsInline autoPlay style={{ width: '100%', maxHeight: '400px' }}></video>
+                      <div style={liveVideoFrameStyle}>
+                        <video ref={liveVideoRef} muted playsInline autoPlay style={liveVideoStyle}></video>
+                      </div>
                       {liveVideoStreaming ? <Group mt="xs" justify="center">
                         <Tooltip label="Download snapshot" withArrow>
                           <ActionIcon variant="light" size="lg" onClick={downloadWebRtcSnapshot} aria-label="Download WebRTC snapshot">
@@ -3653,24 +3728,35 @@ function App() {
             </Paper>
 
             <Paper shadow="xs" p="md">
-              <Text size="lg" fw={500}>System Utilization</Text>
-              <Group mt="xs" grow align="flex-start">
-                <Stack gap={2}>
-                  <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
-                  <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
-                </Stack>
-                <Stack gap={2}>
-                  <Text size="sm">Disk I/O: read {formatBytesPerSecond(hostMetrics?.disk?.readBytesPerSec)} · write {formatBytesPerSecond(hostMetrics?.disk?.writeBytesPerSec)}</Text>
-                  <Text size="sm">Network: down {formatBytesPerSecond(hostMetrics?.network?.receiveBytesPerSec)} · up {formatBytesPerSecond(hostMetrics?.network?.transmitBytesPerSec)}</Text>
-                </Stack>
-                <Stack gap={2}>
-                  {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (
-                    <Text key={gpu.name} size="sm">
-                      GPU: {gpu.name} · {gpu.utilizationPercent ?? 'n/a'}% · {gpu.memoryUsedMiB ?? 'n/a'} / {gpu.memoryTotalMiB ?? 'n/a'} MiB{gpu.temperatureC != null ? ' · ' + gpu.temperatureC + '°C' : ''}
-                    </Text>
-                  )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
-                </Stack>
-              </Group>
+              <Text size="lg" fw={500}>System</Text>
+              <Tabs defaultValue="utilization" mt="xs">
+                <Tabs.List>
+                  <Tabs.Tab value="status">Status</Tabs.Tab>
+                  <Tabs.Tab value="utilization">Utilization</Tabs.Tab>
+                </Tabs.List>
+                <Tabs.Panel value="status" pt="md">
+                  <MediaToolsStatus mediaTools={mediaTools} />
+                </Tabs.Panel>
+                <Tabs.Panel value="utilization" pt="md">
+                  <Group grow align="flex-start">
+                    <Stack gap={2}>
+                      <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
+                      <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
+                    </Stack>
+                    <Stack gap={2}>
+                      <Text size="sm">Disk I/O: read {formatBytesPerSecond(hostMetrics?.disk?.readBytesPerSec)} · write {formatBytesPerSecond(hostMetrics?.disk?.writeBytesPerSec)}</Text>
+                      <Text size="sm">Network: down {formatBytesPerSecond(hostMetrics?.network?.receiveBytesPerSec)} · up {formatBytesPerSecond(hostMetrics?.network?.transmitBytesPerSec)}</Text>
+                    </Stack>
+                    <Stack gap={2}>
+                      {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (
+                        <Text key={gpu.name} size="sm">
+                          GPU: {gpu.name} · {gpu.utilizationPercent ?? 'n/a'}% · {gpu.memoryUsedMiB ?? 'n/a'} / {gpu.memoryTotalMiB ?? 'n/a'} MiB{gpu.temperatureC != null ? ' · ' + gpu.temperatureC + '°C' : ''}
+                        </Text>
+                      )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
+                    </Stack>
+                  </Group>
+                </Tabs.Panel>
+              </Tabs>
             </Paper>
           </Stack>
         </AppShell.Main>
