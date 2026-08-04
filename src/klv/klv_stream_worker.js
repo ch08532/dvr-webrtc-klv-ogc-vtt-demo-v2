@@ -456,9 +456,7 @@ async function processPendingSegments() {
         .flatMap((item) => item.records)
         .filter((record) => record.timeSource === "source_timestamp" && Number.isFinite(record.klvUnixMs));
       if (current.writeSqlite) {
-        await current.store.addMany(current.streamId, decodedForStorage, {
-          isEphemeral: current.sourceType !== "file"
-        });
+        await current.store.addMany(current.streamId, decodedForStorage);
       } else {
         log.debug("sqlite_write_skipped", {
           requestId: current.requestId,

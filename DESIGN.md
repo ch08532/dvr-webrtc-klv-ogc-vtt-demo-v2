@@ -41,7 +41,7 @@ The browser does not render KLV directly from the media container. Instead, it r
 | `src/hls_recorder.js` | Starts FFmpeg for browser HLS output and the private KLV carrier HLS output. Reports file packaging progress. |
 | `src/klv/klv_stream_worker.js` | Dedicated child process that monitors carrier segments, parses KLV, stores telemetry, and creates ordered WebVTT sidecars. |
 | `src/klv/klv_ts_parser.js`, `ts_psi.js`, `st0601.js` | MPEG-TS program/data discovery, KLV extraction, and supported ST 0601 local-set decoding. |
-| `src/storage/sqlite_klv_store.js` | SQLite schema, WAL-mode writes, retention, direct queries, and batched transactions. |
+| `src/storage/sqlite_klv_store.js` | SQLite schema, WAL-mode writes, direct queries, and batched transactions. |
 | `src/webrtc_sfu.js`, `src/sfu/`, `src/ffmpeg_rtp_ingest.js` | mediasoup worker/client and FFmpeg RTP ingest for live WebRTC. |
 | `src/vtt_segmenter.js` | Builds VTT cues and subtitle playlists aligned to HLS segment timing. |
 | `src/App.jsx` | React/Mantine control surface: source setup, upload progress, playback, active-source previews, telemetry, clip controls, and system utilization. |
@@ -144,9 +144,9 @@ For finite files, waiting for every segment serially made finalization expensive
 
 This improves storage and I/O throughput without allowing concurrent work to change VTT cue order or timeline alignment. The default batch size is `workers × 4`, controlled by `KLV_SEGMENT_DECODE_BATCH_SIZE` (clamped to `workers`–`64`).
 
-### 6.4 SQLite and retention
+### 6.4 SQLite persistence
 
-`db/klv.sqlite` stores `stream_id`, source-time milliseconds, decoded JSON, and an ephemeral marker. The store uses WAL journal mode, normal synchronous mode, a busy timeout, bounded retry/backoff for writer contention, and indexes for stream-time and retention queries. The server's demo retention job removes only ephemeral live-stream records older than two hours every 30 seconds; uploaded-file telemetry is retained for its DVR/OGC lifetime. The WebVTT rate controls do not reduce the full-rate records persisted to SQLite.
+`db/klv.sqlite` stores `stream_id`, source-time milliseconds, and decoded JSON. The store uses WAL journal mode, normal synchronous mode, a busy timeout, bounded retry/backoff for writer contention, and stream-time queries. Telemetry is retained with its HLS and WebVTT artifacts until the source is reset; server startup clears all mission data. The WebVTT rate controls do not reduce the full-rate records persisted to SQLite.
 
 The direct telemetry endpoint is:
 

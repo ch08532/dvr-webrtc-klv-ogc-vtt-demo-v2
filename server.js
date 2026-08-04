@@ -129,7 +129,6 @@ const store = new SqliteKlvStore({ dbPath: path.join(DB_DIR, "klv.sqlite") });
 await store.init();
 const startupDatabasePurge = await store.purgeAllMissionData();
 log.info("startup_database_purge_complete", startupDatabasePurge);
-store.startRetentionJob({ maxAgeMs: 2 * 60 * 60 * 1000 }); // keep 2h (demo)
 
 // ---------- Sources ----------
 /**
