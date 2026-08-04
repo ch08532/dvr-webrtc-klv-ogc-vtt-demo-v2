@@ -143,6 +143,10 @@ The DVR **Create video clip** control is available only for an uploaded file sou
 
 For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame including the active zoom/pan, brightness, and contrast adjustments. Live streams retain the adjusted browser-frame snapshot only.
 
+For the HLS ABR ladder, the native top rendition retains the source sample aspect ratio when it must be encoded. The lower square-pixel rungs first normalize non-square sources to their display geometry before scaling, preventing side bars for a 1440×1080 source with 4:3 SAR. WebRTC itself is not changed.
+
+The DVR diagnostics show the active rendition and an **ABR processing** line that identifies every rung as `encoded` or `source copy`. The same per-rung plan is written to the HLS recorder startup log.
+
 ### Mission Target Log
 
 The **Add Mark** action creates a SQLite-backed target-log entry for the current stream in DVR or live playback. Its displayed and sorted mission time is a user-editable KLV timestamp, not the player offset. The service derives a separate internal video offset from the stream's KLV timeline, keeping file-backed pins aligned to the clip filmstrip and supporting DVR seeking. Editing mission time updates that alignment; a time outside the known KLV mission range remains a valid mark but has no clip pin. New marks initially use frame-center telemetry when available, falling back to platform position; latitude and longitude can be edited in decimal degrees or set by clicking either telemetry map. Marks are persisted in `db/klv.sqlite`; selecting a list entry or pin seeks the HLS player and highlights the matching mark.

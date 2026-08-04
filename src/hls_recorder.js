@@ -65,8 +65,18 @@ function parseProgressSpeed(value) {
   return Number.isFinite(speed) && speed > 0 ? speed : null;
 }
 
+/** Returns a filter-safe source sample-aspect ratio, defaulting to square pixels. */
+function normalizeSampleAspectRatio(value) {
+  const match = String(value || "").match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
+  if (!match) return "1/1";
+  const numerator = Number(match[1]);
+  const denominator = Number(match[2]);
+  if (!Number.isFinite(numerator) || numerator <= 0 || !Number.isFinite(denominator) || denominator <= 0) return "1/1";
+  return `${numerator}/${denominator}`;
+}
+
 /** Creates the scaling filter graph for encoded ABR rendition branches. */
-function buildLadderFilter(renditions, copyRenditionIndex = null) {
+function buildLadderFilter(renditions, copyRenditionIndex = null, nativeRenditionSampleAspectRatio = "1/1") {
   const encodedRenditionIndexes = renditions
     .map((_, index) => index)
     .filter((index) => index !== copyRenditionIndex);
@@ -78,8 +88,20 @@ function buildLadderFilter(renditions, copyRenditionIndex = null) {
 
   encodedRenditionIndexes.forEach((renditionIndex, inputIndex) => {
     const rendition = renditions[renditionIndex];
+    // The native top rung remains in its source-coded dimensions. When it is
+    // encoded rather than source-copied, retain its source SAR so browsers
+    // present the same display aspect as the live WebRTC path.
+    const outputSampleAspectRatio = renditionIndex === 1
+      ? nativeRenditionSampleAspectRatio
+      : "1/1";
+    // The fixed lower rungs are 16:9, square-pixel frames. Normalize a
+    // non-square source to its display geometry before fitting it to those
+    // dimensions so it is not pillarboxed as its coded 4:3 frame shape.
+    const lowerRungNormalization = renditionIndex === 1
+      ? ""
+      : "scale=trunc(ih*dar/2)*2:ih,setsar=1,";
     filters.push(
-      `[input${inputIndex}]scale=${rendition.width}:${rendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[video${renditionIndex}]`
+      `[input${inputIndex}]${lowerRungNormalization}scale=${rendition.width}:${rendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=${outputSampleAspectRatio}[video${renditionIndex}]`
     );
   });
   return filters.join(";");
@@ -128,6 +150,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const ladder = resolveHlsRenditions(sourceVideo);
   const renditions = ladder.renditions;
   const copyNativeTopRung = chosen === "xcode-any" && ladder.copyNativeTopRung;
+  const nativeRenditionSampleAspectRatio = normalizeSampleAspectRatio(sourceVideo?.sampleAspectRatio);
   const sourceAlignedKeyframes = copyNativeTopRung ? "source" : `expr:gte(t,n_forced*${segmentSeconds})`;
   const encodedAbrRenditionIndexes = renditions
     .map((_, index) => index)
@@ -273,8 +296,24 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
       ? [...carrierOutput, ...passthroughVideoOutput]
       : isSingleTranscode
         ? [...carrierOutput, ...singleTranscodeOutput]
-        : ["-filter_complex", buildLadderFilter(renditions, copyNativeTopRung ? nativeTopRenditionIndex : null), ...carrierOutput, ...abrOutput])
+        : ["-filter_complex", buildLadderFilter(
+          renditions,
+          copyNativeTopRung ? nativeTopRenditionIndex : null,
+          nativeRenditionSampleAspectRatio
+        ), ...carrierOutput, ...abrOutput])
   ];
+  const renditionPlan = chosen === "xcode-any"
+    ? renditions.map((rendition, index) => ({
+      ...rendition,
+      sourceCopy: copyNativeTopRung && index === nativeTopRenditionIndex,
+      processing: copyNativeTopRung && index === nativeTopRenditionIndex ? "source-copy" : "encoded"
+    }))
+    : [{
+      id: isPassthrough ? "source" : "source-h264",
+      playlist: "v0/index.m3u8",
+      sourceCopy: isPassthrough,
+      processing: isPassthrough ? "source-copy" : "encoded"
+    }];
 
   log.info("start", {
     requestId,
@@ -289,17 +328,9 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     streamCopy: isPassthrough,
     encoder: videoProfile.encoder,
     usingGpu: videoProfile.usingGpu,
-    renditions: chosen === "xcode-any"
-      ? renditions.map(({ id, width, height, videoBitrate }, index) => ({
-        id,
-        width,
-        height,
-        videoBitrate,
-        sourceCopy: copyNativeTopRung && index === nativeTopRenditionIndex
-      }))
-      : [{ id: isPassthrough ? "source" : "source-h264", playlist: "v0/index.m3u8" }],
+    renditions: renditionPlan,
     copyNativeTopRung,
-    renditions,
+    renditions: renditionPlan,
     metadataPlaylist,
     hlsSegmentType: "mpegts",
     hlsSegmentFilename: chosen === "xcode-any" ? abrSegmentFilename : singleSegmentFilename

@@ -3295,12 +3295,15 @@ function App() {
     ))
     : null;
   const activeHlsRenditionLabel = activeHlsRendition
-    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.sourceCopy ? 'source copy' : activeHlsRendition.videoBitrate}`
+    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.processing === 'source-copy' ? 'source copy' : 'encoded'}`
     : dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri
       ? activeHlsMode === 'single-transcode'
         ? 'single transcoded rendition'
         : 'source (single rendition)'
       : 'n/a';
+  const hlsRenditionPlanLabel = activeHlsMode === 'abr'
+    ? activeHlsRenditions.map((rendition) => `${rendition.id}: ${rendition.processing === 'source-copy' ? 'source copy' : 'encoded'}`).join(' · ')
+    : null;
   return (
     <MantineProvider theme={theme}>
       <AppShell
@@ -3638,6 +3641,9 @@ function App() {
                           ? `${dvrDiag.decodedVideoWidth}×${dvrDiag.decodedVideoHeight}`
                           : 'n/a'}
                       </Text>
+                      {hlsRenditionPlanLabel ? (
+                        <Text size="xs" c="dimmed" mb="xs">ABR processing: {hlsRenditionPlanLabel}</Text>
+                      ) : null}
                       <Text size="xs" c="dimmed" mb="xs">
                         segment: {dvrDiag.currentSegmentSequence != null ? dvrDiag.currentSegmentSequence : 'n/a'}{dvrDiag.currentSegmentUri ? ` (${dvrDiag.currentSegmentUri})` : ''} | subtitle: {dvrDiag.currentSubtitleUri || 'n/a'}
                       </Text>
