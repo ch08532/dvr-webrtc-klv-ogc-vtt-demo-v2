@@ -2092,8 +2092,13 @@ function App() {
     videoEl.style.filter = `brightness(${hlsBrightness}%) contrast(${hlsContrast}%)`;
   }, [hlsView, hlsBrightness, hlsContrast]);
 
-  /** Captures the currently decoded video frame and downloads it as a PNG. */
-  const downloadVideoSnapshot = (video, playbackKind, displayAspect = null) => {
+  /** Captures the currently displayed video view and downloads it as a PNG. */
+  const downloadVideoSnapshot = (video, playbackKind, {
+    displayAspect = null,
+    view = INITIAL_PLAYBACK_VIEW,
+    brightness = DEFAULT_IMAGE_ADJUSTMENT,
+    contrast = DEFAULT_IMAGE_ADJUSTMENT
+  } = {}) => {
     const width = Number(video?.videoWidth);
     const height = Number(video?.videoHeight);
     if (!video || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
@@ -2113,7 +2118,18 @@ function App() {
       canvas.height = height;
       const context = canvas.getContext('2d');
       if (!context) throw new Error('browser did not provide a canvas context');
-      context.drawImage(video, 0, 0, outputWidth, height);
+      // The player transforms around its top-left corner, then clips the
+      // result to its viewport. Reproduce that view by cropping the same
+      // normalized source region and scaling it back to the displayed frame.
+      const zoom = clampPlaybackZoom(view?.zoom ?? PLAYBACK_ZOOM_MIN);
+      const sourceWidth = width / zoom;
+      const sourceHeight = height / zoom;
+      const sourceX = (width - sourceWidth) * clampUnit(view?.panX ?? 0.5);
+      const sourceY = (height - sourceHeight) * clampUnit(view?.panY ?? 0.5);
+      const snapshotBrightness = Math.min(IMAGE_ADJUSTMENT_MAX, Math.max(IMAGE_ADJUSTMENT_MIN, Number(brightness) || DEFAULT_IMAGE_ADJUSTMENT));
+      const snapshotContrast = Math.min(IMAGE_ADJUSTMENT_MAX, Math.max(IMAGE_ADJUSTMENT_MIN, Number(contrast) || DEFAULT_IMAGE_ADJUSTMENT));
+      context.filter = `brightness(${snapshotBrightness}%) contrast(${snapshotContrast}%)`;
+      context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, outputWidth, height);
       canvas.toBlob((blob) => {
         if (!blob) {
           setStatus(`${playbackKind} snapshot could not be encoded.`);
@@ -2136,8 +2152,17 @@ function App() {
     }
   };
 
-  const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS');
-  const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC', liveDisplayAspect);
+  const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS', {
+    view: hlsView,
+    brightness: hlsBrightness,
+    contrast: hlsContrast
+  });
+  const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC', {
+    displayAspect: liveDisplayAspect,
+    view: webRtcView,
+    brightness: webRtcBrightness,
+    contrast: webRtcContrast
+  });
 
   const downloadKlvExport = async (format) => {
     if (!klvExportAvailable || klvExportInFlight) return;
@@ -3692,7 +3717,7 @@ function App() {
                                 <Menu.Item onClick={downloadAuthoritativeSnapshot} disabled={!hlsMediaLoaded || authoritativeSnapshotInFlight}>
                                   {authoritativeSnapshotInFlight ? 'Creating authoritative snapshot…' : 'Authoritative uploaded source (FFmpeg)'}
                                 </Menu.Item>
-                                <Menu.Item onClick={downloadHlsSnapshot} disabled={!hlsMediaLoaded}>Displayed playback frame</Menu.Item>
+                                <Menu.Item onClick={downloadHlsSnapshot} disabled={!hlsMediaLoaded}>Displayed playback frame (with adjustments)</Menu.Item>
                               </Menu.Dropdown>
                             </Menu>
                           ) : <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>}

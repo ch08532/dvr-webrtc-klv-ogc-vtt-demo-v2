@@ -141,7 +141,7 @@ The DVR **Create video clip** control is available only for an uploaded file sou
 
 ### Snapshots
 
-For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame. Live streams retain the browser-frame snapshot only.
+For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame including the active zoom/pan, brightness, and contrast adjustments. Live streams retain the adjusted browser-frame snapshot only.
 
 ### Mission Target Log
 
