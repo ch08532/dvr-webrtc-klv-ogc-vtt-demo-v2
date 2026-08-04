@@ -65,18 +65,61 @@ function parseProgressSpeed(value) {
   return Number.isFinite(speed) && speed > 0 ? speed : null;
 }
 
+/** Parses ffprobe's DAR/SAR text into a safe positive ratio. */
+function parseAspectRatio(value) {
+  const match = String(value || "").match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
+  if (!match) return null;
+  const numerator = Number(match[1]);
+  const denominator = Number(match[2]);
+  if (!Number.isFinite(numerator) || numerator <= 0 || !Number.isFinite(denominator) || denominator <= 0) return null;
+  return { numerator, denominator, value: numerator / denominator };
+}
+
 /**
  * Converts ffprobe's SAR text to an FFmpeg filter expression. The strict
  * parser prevents untrusted probe output from being interpolated into the
  * filter graph; missing or invalid SAR means square pixels.
  */
 function normalizeSampleAspectRatio(value) {
-  const match = String(value || "").match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
-  if (!match) return "1/1";
-  const numerator = Number(match[1]);
-  const denominator = Number(match[2]);
-  if (!Number.isFinite(numerator) || numerator <= 0 || !Number.isFinite(denominator) || denominator <= 0) return "1/1";
-  return `${numerator}/${denominator}`;
+  const aspectRatio = parseAspectRatio(value);
+  return aspectRatio ? `${aspectRatio.numerator}/${aspectRatio.denominator}` : "1/1";
+}
+
+/** Resolves the source DAR used to fit square-pixel lower ABR rungs. */
+function resolveDisplayAspectRatio(sourceVideo) {
+  const declaredDar = parseAspectRatio(sourceVideo?.displayAspectRatio)?.value;
+  if (declaredDar) return declaredDar;
+  const width = Number(sourceVideo?.width);
+  const height = Number(sourceVideo?.height);
+  const sar = parseAspectRatio(sourceVideo?.sampleAspectRatio)?.value || 1;
+  const derivedDar = (width / height) * sar;
+  return Number.isFinite(derivedDar) && derivedDar > 0 ? derivedDar : 16 / 9;
+}
+
+function evenDimension(value, maximum) {
+  const even = Math.floor(Number(value) / 2) * 2;
+  return Math.max(2, Math.min(maximum, even));
+}
+
+/**
+ * Fits source display geometry into a square-pixel rendition without an
+ * intermediate full-resolution scale. Black padding is added only when the
+ * source DAR genuinely differs from the rendition DAR.
+ */
+function fitSquarePixelRendition(rendition, sourceDisplayAspectRatio) {
+  const targetWidth = Number(rendition.width);
+  const targetHeight = Number(rendition.height);
+  const targetDisplayAspectRatio = targetWidth / targetHeight;
+  if (sourceDisplayAspectRatio >= targetDisplayAspectRatio) {
+    return {
+      width: targetWidth,
+      height: evenDimension(targetWidth / sourceDisplayAspectRatio, targetHeight)
+    };
+  }
+  return {
+    width: evenDimension(targetHeight * sourceDisplayAspectRatio, targetWidth),
+    height: targetHeight
+  };
 }
 
 /**
@@ -85,10 +128,15 @@ function normalizeSampleAspectRatio(value) {
  * The native rung keeps its source-coded dimensions and source SAR. Fixed
  * lower rungs first convert non-square source pixels to their display geometry
  * (`width = height × DAR`), then scale to 16:9 square-pixel outputs. Do not
- * apply the source SAR to the lower rungs: their 640×360 and 160×90 frames
- * already encode the target 16:9 display shape.
+ * apply the source SAR to the Low 640×360 rung: its square-pixel frame
+ * already encodes the target 16:9 display shape.
  */
-function buildLadderFilter(renditions, copyRenditionIndex = null, nativeRenditionSampleAspectRatio = "1/1") {
+function buildLadderFilter(
+  renditions,
+  copyRenditionIndex = null,
+  nativeRenditionSampleAspectRatio = "1/1",
+  sourceDisplayAspectRatio = 16 / 9
+) {
   const encodedRenditionIndexes = renditions
     .map((_, index) => index)
     .filter((index) => index !== copyRenditionIndex);
@@ -103,17 +151,18 @@ function buildLadderFilter(renditions, copyRenditionIndex = null, nativeRenditio
     // The native top rung remains in its source-coded dimensions. When it is
     // encoded rather than source-copied, retain its source SAR so browsers
     // present the same display aspect as the live WebRTC path.
-    const outputSampleAspectRatio = renditionIndex === NATIVE_ABR_RENDITION_INDEX
-      ? nativeRenditionSampleAspectRatio
-      : "1/1";
-    // The fixed lower rungs are 16:9, square-pixel frames. Normalize a
-    // non-square source to its display geometry before fitting it to those
-    // dimensions so it is not pillarboxed as its coded 4:3 frame shape.
-    const lowerRungNormalization = renditionIndex === NATIVE_ABR_RENDITION_INDEX
-      ? ""
-      : "scale=trunc(ih*dar/2)*2:ih,setsar=1,";
+    if (renditionIndex === NATIVE_ABR_RENDITION_INDEX) {
+      // No scale or pad is necessary: High retains the source's coded frame.
+      // `setsar` writes display metadata only, avoiding a redundant frame pass.
+      filters.push(`[input${inputIndex}]setsar=${nativeRenditionSampleAspectRatio}[video${renditionIndex}]`);
+      return;
+    }
+    // The fixed lower rungs are square-pixel frames. Fit their scale directly
+    // from source DAR, rather than first expanding a 1440×1080/4:3-SAR source
+    // to 1920×1080 and then scaling it again.
+    const lowerRungFit = fitSquarePixelRendition(rendition, sourceDisplayAspectRatio);
     filters.push(
-      `[input${inputIndex}]${lowerRungNormalization}scale=${rendition.width}:${rendition.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=${outputSampleAspectRatio}[video${renditionIndex}]`
+      `[input${inputIndex}]scale=${lowerRungFit.width}:${lowerRungFit.height},setsar=1,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black[video${renditionIndex}]`
     );
   });
   return filters.join(";");
@@ -159,10 +208,15 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const isSingleTranscode = chosen === "xcode-single";
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
   const nativeTopRenditionIndex = NATIVE_ABR_RENDITION_INDEX;
-  const ladder = resolveHlsRenditions(sourceVideo);
+  // Passthrough has no ABR High rung. Every transcode path uses a ladder whose
+  // High rendition is derived from the source dimensions supplied by ffprobe.
+  const ladder = isPassthrough
+    ? { renditions: [{ id: "source", playlist: "v0/index.m3u8" }], copyNativeTopRung: false }
+    : resolveHlsRenditions(sourceVideo);
   const renditions = ladder.renditions;
   const copyNativeTopRung = chosen === "xcode-any" && ladder.copyNativeTopRung;
   const nativeRenditionSampleAspectRatio = normalizeSampleAspectRatio(sourceVideo?.sampleAspectRatio);
+  const sourceDisplayAspectRatio = resolveDisplayAspectRatio(sourceVideo);
   const sourceAlignedKeyframes = copyNativeTopRung ? "source" : `expr:gte(t,n_forced*${segmentSeconds})`;
   const encodedAbrRenditionIndexes = renditions
     .map((_, index) => index)
@@ -251,12 +305,14 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-hls_segment_filename", singleSegmentFilename,
     singlePlaylist
   ];
-  const singleTranscodeOutput = [
+  // Do not construct this for passthrough: its source-only rendition has no
+  // dynamic High entry, and this output is never used in that mode.
+  const singleTranscodeOutput = isSingleTranscode ? [
     "-map", "0:v:0",
     ...videoProfile.videoArgs,
-    "-b:v", renditions[1].videoBitrate,
-    "-maxrate:v", renditions[1].maxRate,
-    "-bufsize:v", renditions[1].bufferSize,
+    "-b:v", renditions[nativeTopRenditionIndex].videoBitrate,
+    "-maxrate:v", renditions[nativeTopRenditionIndex].maxRate,
+    "-bufsize:v", renditions[nativeTopRenditionIndex].bufferSize,
     "-force_key_frames", sourceAlignedKeyframes,
     "-muxpreload", "0",
     "-muxdelay", "0",
@@ -268,7 +324,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-hls_flags", "independent_segments+program_date_time",
     "-hls_segment_filename", singleSegmentFilename,
     singlePlaylist
-  ];
+  ] : [];
   const abrOutput = [
     ...renditions.flatMap((_, index) => ["-map", index === nativeTopRenditionIndex && copyNativeTopRung ? "0:v:0" : `[video${index}]`]),
     "-an",
@@ -311,7 +367,8 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
         : ["-filter_complex", buildLadderFilter(
           renditions,
           copyNativeTopRung ? nativeTopRenditionIndex : null,
-          nativeRenditionSampleAspectRatio
+          nativeRenditionSampleAspectRatio,
+          sourceDisplayAspectRatio
         ), ...carrierOutput, ...abrOutput])
   ];
   // Runtime state, UI diagnostics, and the startup log share this immutable
@@ -424,7 +481,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     usingGpu: videoProfile.usingGpu,
     isAbr: chosen === "xcode-any",
     copyNativeTopRung,
-    renditions,
+    renditions: renditionPlan,
     videoPlaylistName: chosen === "xcode-any" ? "v0/index.m3u8" : "playlist.m3u8"
   };
 }

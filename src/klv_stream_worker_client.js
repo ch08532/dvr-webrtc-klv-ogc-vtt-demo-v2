@@ -38,6 +38,7 @@ export async function startKlvStreamWorker({
   dbPath,
   requestId,
   onDecoded,
+  onFinalizationProgress,
   onError
 }) {
   const workerPath = path.resolve("./src/klv/klv_stream_worker.js");
@@ -138,6 +139,19 @@ export async function startKlvStreamWorker({
           onDecoded?.(message);
         } catch (error) {
           log.warn("on_decoded_handler_error", {
+            streamId,
+            requestId,
+            error: serializeError(error)
+          });
+        }
+        return;
+      }
+
+      if (message.type === "finalization_progress") {
+        try {
+          onFinalizationProgress?.(message);
+        } catch (error) {
+          log.warn("on_finalization_progress_handler_error", {
             streamId,
             requestId,
             error: serializeError(error)

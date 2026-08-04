@@ -5,7 +5,7 @@ A runnable Node.js demo that:
 - ingests an MPEG-TS stream (UDP or file)
 - parses STANAG 4609 / MISB ST 0601 KLV
 - records video as HLS MPEG-TS with `EXT-X-PROGRAM-DATE-TIME` (DVR)
-- publishes a three-rung adaptive-bitrate ladder: 90p/100 kbps, 360p/800 kbps, and 1080p/6 Mbps
+- publishes a two-rung adaptive-bitrate ladder: 360p/800 kbps and a source-native High rung (always derived from ffprobe; no fixed 1080p fallback)
 - generates a **segmented WebVTT sidecar track** (default 5 seconds/segment, configurable)
 - decodes ST 0601 Mission ID (tag 3) and precision timestamp alongside supported positional telemetry
 - serves HLS master playlist with subtitles group ("KLV")
@@ -31,7 +31,8 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 ### Processing modes
 - **HLS passthrough** is the default: confirmed H.264 video is copied without video encoding; audio is omitted from browser playback. A separate copy-only carrier playlist retains the original video, audio, and KLV for extraction and clips.
 - **HLS compatibility fallback** activates when passthrough input is not H.264 (for example MPEG-2 video): it produces browser-compatible H.264 playback renditions while retaining the original video, audio, and KLV carrier without re-encoding it.
-- **HLS ABR** creates three renditions: Low (90p), Medium (360p), and High (the source's native resolution). Only an H.264 Baseline source is copied into High; other source codecs or H.264 profiles are encoded to their native-resolution High rung so adaptive switches remain codec-compatible.
+- **HLS ABR** creates two renditions: Low (360p) and High (the source's native resolution). Only an H.264 Baseline source is copied into High; other source codecs or H.264 profiles are encoded to their native-resolution High rung so adaptive switches remain codec-compatible.
+- **ABR bitrate planning** uses the probed source video bitrate for the native rung when it is available and scales the 360p rung by display-pixel area. A frame-rate-aware estimate is used when a live source does not report bitrate; bounded targets prevent impractically low or high outputs.
 - **Live WebRTC auto-copy** copies H.264 into RTP when the input probe confirms H.264; it falls back to transcoding for other codecs. File sources are HLS-only.
 
 ## Install / run
@@ -128,8 +129,7 @@ DVR output will appear under `./recordings/<streamId>/`:
 - `source/.uploads/` (temporary resumable-upload chunks and session metadata)
 - `master.m3u8`
 - `v0/index.m3u8` (360p video; timing reference for the VTT playlist)
-- `v1/index.m3u8` (1080p video)
-- `v2/index.m3u8` (90p video)
+- `v1/index.m3u8` (native High video)
 - `playlist.m3u8` (private KLV carrier playlist)
 - `subtitles.m3u8` (VTT playlist)
 - `meta_<segNo>.vtt` (segmented metadata)
@@ -143,7 +143,7 @@ The DVR **Create video clip** control is available only for an uploaded file sou
 
 For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame including the active zoom/pan, brightness, and contrast adjustments. Live streams retain the adjusted browser-frame snapshot only.
 
-For the HLS ABR ladder, the native top rendition retains the source sample aspect ratio when it must be encoded. The lower square-pixel rungs first normalize non-square sources to their display geometry before scaling, preventing side bars for a 1440×1080 source with 4:3 SAR. WebRTC itself is not changed.
+For the HLS ABR ladder, the native High rendition retains the source sample aspect ratio when it must be encoded. The Low 360p square-pixel rung scales directly from the source display geometry before padding, preventing side bars for a 1440×1080 source with 4:3 SAR without an extra full-resolution scale. WebRTC itself is not changed.
 
 The DVR diagnostics show the active rendition and an **ABR processing** line that identifies every rung as `encoded` or `source copy`. The same per-rung plan is written to the HLS recorder startup log.
 

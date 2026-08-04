@@ -93,7 +93,7 @@ The initial probe selects the safest HLS path:
 
 - **Passthrough:** an H.264 source is copied into browser HLS without video re-encoding.
 - **Compatibility fallback:** a non-H.264 source receives one H.264 playback rendition.
-- **ABR:** produces low (90p), medium (360p), and a source-native top rendition. Only an H.264 Baseline native rung may be copied; other source codecs or H.264 profiles are encoded so adaptive switches remain codec-compatible. If a live source's short probe has not yet seen a video header, the server performs one longer resolution-focused probe before using the 1920×1080 fallback ladder.
+- **ABR:** produces a Low 360p rendition and a source-native High rendition. Only an H.264 Baseline native rung may be copied; other source codecs or H.264 profiles are encoded so adaptive switches remain codec-compatible. The High coded dimensions always come from `ffprobe`; when an initial probe has no dimensions, the server performs a fuller probe and rejects ABR rather than using an upscale fallback.
 
 Browser HLS is deliberately video-only. Source audio does not control HLS compatibility. GPU encoding is enabled by default for transcode paths when the selected FFmpeg encoder is available; setting `FFMPEG_USE_GPU=0` forces the CPU fallback.
 
@@ -105,9 +105,15 @@ The probe records coded width/height, sample aspect ratio (SAR), and display asp
 | --- | --- |
 | WebRTC | Does not alter the RTP video bitstream. The browser viewport uses the probed DAR (or coded dimensions × SAR) so square-pixel browser decoding still presents the source's intended shape. |
 | ABR native rung | Keeps source-coded dimensions. A source copy carries its original SAR; an encoded native rung explicitly writes the source SAR. |
-| ABR 360p and 90p rungs | Convert non-square source pixels to display geometry before scaling, then write 16:9 square-pixel output (`640×360` and `160×90`, SAR `1:1`). Applying the source SAR again would make these rungs too wide. |
+| ABR Low rung | Fits source display geometry directly into the `640×360` square-pixel output before padding (SAR `1:1`). This avoids side bars for a 16:9 source and avoids an unnecessary intermediate full-resolution scale. Applying the source SAR again would make this rung too wide. |
 
 `NATIVE_ABR_RENDITION_INDEX` identifies the native rung in both the ladder definition and FFmpeg filter graph. Keep the ladder ordering and that constant synchronized when changing ABR variants. The DVR diagnostics and HLS startup log publish each rung's processing plan (`source-copy` or `encoded`) so operators can verify the active behavior.
+
+### 5.1.2 ABR bitrate planning
+
+The ladder calculates each rung's target bitrate rather than using a fixed 6 Mbps native target. When `ffprobe` reports a positive video-stream bitrate, that is used for the native rung. The 360p target scales from the native target by display-pixel area raised to `0.8`, which avoids reducing bitrate too aggressively for low-resolution codec overhead. If the source bitrate is absent—which is common for live UDP—the native target falls back to `display pixels × FPS × 0.08 bits per pixel per frame`, using 30 FPS when the probe has no valid rate.
+
+Targets are bounded to keep output practical: native `250 kbps–12 Mbps` and 360p `400 kbps–1.5 Mbps`. FFmpeg uses a 7% higher `maxrate` and a 1.5× target `bufsize`; HLS master-playlist `AVERAGE-BANDWIDTH` and `BANDWIDTH` use the corresponding calculated values. These figures are exposed in DVR diagnostics and the recorder startup log.
 
 ### 5.2 Two HLS outputs per source
 
@@ -118,7 +124,7 @@ Each source produces two distinct segment families:
 | Browser HLS | Playback video and a linked segmented WebVTT subtitle/metadata track; no source KLV data stream. | Video.js/HLS browser player. |
 | Private carrier HLS | Copy of source video plus data streams, including KLV when present. | KLV worker only; never exposed as the playback experience. |
 
-All playlists use MPEG-TS segments and include program-date-time timing. File playlists retain the complete VOD history; live sources maintain their configured HLS behavior. The private carrier is necessary because a browser-compatible HLS rendition cannot be relied on to carry arbitrary KLV data streams.
+All playlists use MPEG-TS segments and include program-date-time timing. File playlists retain the complete VOD history; live sources maintain their configured HLS behavior. On Windows, `.m3u8` playlists are read fully into memory before their HTTP response is sent, closing the file handle before FFmpeg atomically renames its next update; media segments continue through static streaming. The private carrier is necessary because a browser-compatible HLS rendition cannot be relied on to carry arbitrary KLV data streams.
 
 ### 5.3 Source poster
 

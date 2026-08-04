@@ -423,6 +423,34 @@ function getVideoSegmentOffsetSec(current, videoEntry) {
   return Math.max(0, (videoEntry.sequence - current.timelineBaseSequence) * durationSec);
 }
 
+/** Reports real batch-based progress while a completed file is being finalized. */
+function reportFinalizationProgress(current, videoEntries) {
+  const finalization = current.finalization;
+  if (!finalization) return;
+
+  const totalSegments = Math.max(0, Number(finalization.totalSegments) || 0);
+  const processedSegments = current.lastProcessedSequence == null
+    ? 0
+    : videoEntries.filter((entry) => entry.sequence <= current.lastProcessedSequence).length;
+  const progressPercent = totalSegments > 0
+    ? Math.min(100, (processedSegments / totalSegments) * 100)
+    : 100;
+  const elapsedSeconds = Math.max(0, (Date.now() - finalization.startedAtMs) / 1000);
+  const etaSeconds = processedSegments > 0 && processedSegments < totalSegments
+    ? Math.max(0, ((totalSegments - processedSegments) * elapsedSeconds) / processedSegments)
+    : 0;
+
+  send({
+    type: "finalization_progress",
+    streamId: current.streamId,
+    finalizeId: finalization.finalizeId,
+    processedSegments,
+    totalSegments,
+    progressPercent,
+    etaSeconds
+  });
+}
+
 /** Polls playlists and processes every video segment not handled yet. */
 async function processPendingSegments() {
   const current = runtime;
@@ -477,6 +505,7 @@ async function processPendingSegments() {
         writePreparedSegmentVtt(current, prepared);
         current.lastProcessedSequence = prepared.videoEntry.sequence;
       }
+      reportFinalizationProgress(current, videoPlaylist.entries);
 
       if (batch.length < SEGMENT_DECODE_BATCH_SIZE) break;
     }
@@ -519,9 +548,14 @@ async function start(message) {
   const store = new SqliteKlvStore({ dbPath });
   await store.init();
 
+  const isFileSource = sourceType === "file";
   const videoPlaylistPath = path.join(outDir, videoPlaylistName || "v0/index.m3u8");
   const carrierPlaylistPath = path.join(outDir, "playlist.m3u8");
-  const segmentPollTimer = setInterval(() => {
+  // A finite file can publish HLS segments much faster than real time. Reading
+  // its playlist while FFmpeg atomically renames each update can cause a
+  // Windows sharing violation, so scan it once during finalization instead.
+  // Live sources retain the periodic scan needed for ongoing VTT updates.
+  const segmentPollTimer = isFileSource ? null : setInterval(() => {
     processPendingSegments().catch(() => {});
   }, SEGMENT_POLL_MS);
 
@@ -529,7 +563,7 @@ async function start(message) {
     streamId,
     requestId,
     inputUrl,
-    sourceType: sourceType === "file" ? "file" : "stream",
+    sourceType: isFileSource ? "file" : "stream",
     outDir,
     videoPlaylistPath,
     carrierPlaylistPath,
@@ -568,8 +602,11 @@ async function start(message) {
   });
 
   log.info("start", { requestId, streamId, sourceType: runtime.sourceType, writeSqlite: runtime.writeSqlite });
-  await processPendingSegments();
+  // Startup means the worker has initialized its store, ingest stream, and
+  // poller. A fast file HLS job can publish a large segment backlog before
+  // this point; do not make the parent wait for that unbounded catch-up pass.
   send({ type: "started", streamId });
+  if (!isFileSource) void processPendingSegments();
 }
 
 /** Stops playlist polling and releases active worker resources. */
@@ -592,6 +629,14 @@ async function finalize(finalizeId) {
   while (current.processing) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+  const initialPlaylist = parseVideoPlaylist(current.videoPlaylistPath);
+  if (!initialPlaylist) throw new Error("video HLS playlist is unavailable for VTT finalization");
+  current.finalization = {
+    finalizeId,
+    startedAtMs: Date.now(),
+    totalSegments: initialPlaylist.entries.length
+  };
+  reportFinalizationProgress(current, initialPlaylist.entries);
   await processPendingSegments();
   const videoPlaylist = parseVideoPlaylist(current.videoPlaylistPath);
   if (!videoPlaylist) throw new Error("video HLS playlist is unavailable for VTT finalization");
@@ -602,6 +647,7 @@ async function finalize(finalizeId) {
     entries: videoPlaylist.entries,
     endList: true
   });
+  reportFinalizationProgress(current, videoPlaylist.entries);
   send({ type: "finalized", streamId: current.streamId, finalizeId });
 }
 

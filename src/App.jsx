@@ -18,11 +18,9 @@ function hlsQualityOptionsFor(renditions) {
     { value: 'auto', label: 'Auto (adaptive)' },
     ...[...renditions].sort((a, b) => a.bandwidth - b.bandwidth).map((rendition) => ({
       value: rendition.id,
-      label: rendition.playlist === 'v2/index.m3u8'
-        ? 'Low (90p)'
-        : rendition.playlist === 'v0/index.m3u8'
-          ? 'Medium (360p)'
-          : `High (${rendition.id}${rendition.sourceCopy ? ', source copy' : ''})`
+      label: rendition.playlist === 'v0/index.m3u8'
+        ? 'Low (360p)'
+        : `High (${rendition.id}${rendition.sourceCopy ? ', source copy' : ''})`
   }))
   ];
 }
@@ -2389,6 +2387,25 @@ function App() {
     return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
   };
 
+  const finalizationProgress = (source) => {
+    const percent = Number(source?.finalizationProgressPercent);
+    return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+  };
+
+  const finalizationStatus = (source) => {
+    const processed = Number(source?.finalizationProcessedSegments);
+    const total = Number(source?.finalizationTotalSegments);
+    const etaSeconds = Number(source?.finalizationEtaSeconds);
+    const parts = [];
+    if (Number.isFinite(processed) && Number.isFinite(total) && total >= 0) {
+      parts.push(`${Math.min(processed, total)} / ${total} segments`);
+    }
+    if (Number.isFinite(etaSeconds) && etaSeconds > 0) {
+      parts.push(`ETA ${formatConversionTime(etaSeconds)}`);
+    }
+    return parts.join(' · ');
+  };
+
   const klvProbeStatus = (source) => {
     const probe = source?.klvProbe;
     if (!probe) return { color: 'gray', label: 'KLV analysis unavailable' };
@@ -3535,6 +3552,15 @@ function App() {
                     </Text>
                   </Group>
                   <Progress value={conversionProgress(streamRuntime) || 0} animated={streamRuntime?.state === 'running'} />
+                  {streamRuntime?.state === 'finalizing' ? (
+                    <>
+                      <Group justify="space-between">
+                        <Text size="xs">Finalizing KLV/VTT: {finalizationProgress(streamRuntime) != null ? `${finalizationProgress(streamRuntime).toFixed(1)}%` : 'Starting...'}</Text>
+                        <Text size="xs" c="dimmed">{finalizationStatus(streamRuntime) || 'Preparing final segment data...'}</Text>
+                      </Group>
+                      <Progress value={finalizationProgress(streamRuntime) || 0} color="yellow" animated />
+                    </>
+                  ) : null}
                 </Stack>
               ) : null}
               {streamRuntime?.lastError ? (
@@ -3579,6 +3605,15 @@ function App() {
                               {Number.isFinite(Number(s.etaSeconds)) ? ` · ETA ${formatConversionTime(s.etaSeconds)}` : ''}
                             </Text>
                             <Progress value={conversionProgress(s) || 0} animated={s.state === 'running'} size="sm" />
+                            {s.state === 'finalizing' ? (
+                              <>
+                                <Text size="xs" c="dimmed">
+                                  finalizing KLV/VTT: {finalizationProgress(s) != null ? `${finalizationProgress(s).toFixed(1)}%` : 'starting'}
+                                  {finalizationStatus(s) ? ` · ${finalizationStatus(s)}` : ''}
+                                </Text>
+                                <Progress value={finalizationProgress(s) || 0} color="yellow" animated size="sm" />
+                              </>
+                            ) : null}
                           </>
                         ) : null}
                       </Stack>

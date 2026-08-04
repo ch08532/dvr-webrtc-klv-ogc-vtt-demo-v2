@@ -430,6 +430,7 @@ function normalizeProbePayload(ffprobeJson, inputUrl) {
     codec: firstVideo.codec_name || null,
     codecLongName: firstVideo.codec_long_name || null,
     profile: firstVideo.profile || null,
+    bitRate: Number.isFinite(Number(firstVideo.bit_rate)) && Number(firstVideo.bit_rate) > 0 ? Number(firstVideo.bit_rate) : null,
     width: Number.isFinite(Number(firstVideo.width)) ? Number(firstVideo.width) : null,
     height: Number.isFinite(Number(firstVideo.height)) ? Number(firstVideo.height) : null,
     sampleAspectRatio: firstVideo.sample_aspect_ratio || null,
@@ -479,7 +480,7 @@ async function probeInputWithFfprobe(inputUrl, {
       "-print_format", "json",
       "-show_format",
       "-show_streams",
-      "-show_entries", "format=format_name,format_long_name,duration:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,sample_aspect_ratio,display_aspect_ratio,avg_frame_rate,r_frame_rate,profile:stream_tags",
+      "-show_entries", "format=format_name,format_long_name,duration:stream=index,codec_type,codec_name,codec_long_name,codec_tag_string,codec_tag,width,height,sample_aspect_ratio,display_aspect_ratio,avg_frame_rate,r_frame_rate,profile,bit_rate:stream_tags",
       "-analyzeduration", String(analyzeDurationUs),
       "-probesize", String(probeSizeBytes),
       ...(readInterval ? ["-read_intervals", readInterval] : []),
@@ -801,6 +802,10 @@ function getSourceRuntime(streamId) {
       progressPercent: tracked?.progressPercent ?? null,
       encodeSpeed: tracked?.encodeSpeed ?? null,
       etaSeconds: tracked?.etaSeconds ?? null,
+      finalizationProgressPercent: tracked?.finalizationProgressPercent ?? null,
+      finalizationProcessedSegments: tracked?.finalizationProcessedSegments ?? null,
+      finalizationTotalSegments: tracked?.finalizationTotalSegments ?? null,
+      finalizationEtaSeconds: tracked?.finalizationEtaSeconds ?? null,
       encoder: tracked?.encoder ?? null,
       usingGpu: tracked?.usingGpu ?? null,
       lastError: tracked?.lastError || null,
@@ -848,6 +853,10 @@ function getSourceRuntime(streamId) {
     progressPercent: tracked?.progressPercent ?? null,
     encodeSpeed: tracked?.encodeSpeed ?? null,
     etaSeconds: tracked?.etaSeconds ?? null,
+    finalizationProgressPercent: tracked?.finalizationProgressPercent ?? null,
+    finalizationProcessedSegments: tracked?.finalizationProcessedSegments ?? null,
+    finalizationTotalSegments: tracked?.finalizationTotalSegments ?? null,
+    finalizationEtaSeconds: tracked?.finalizationEtaSeconds ?? null,
     encoder: source.hls?.encoder ?? tracked?.encoder ?? null,
     usingGpu: source.hls?.usingGpu ?? tracked?.usingGpu ?? null,
     hlsRunning,
@@ -989,6 +998,34 @@ app.get("/docs", (_req, res) => {
 // private: they are accessed only by the file-source, clip, and snapshot APIs.
 app.use("/hls/:streamId/source", (_req, res) => {
   res.status(404).type("text/plain").send("source asset is not publicly served");
+});
+// FFmpeg atomically replaces live HLS playlists by renaming index.m3u8.tmp.
+// On Windows, a streamed static-file response can keep index.m3u8 open long
+// enough to block that rename. Playlists are small, so read them fully and
+// close the filesystem handle before writing the HTTP response. Media segments
+// remain served by express.static below and are never buffered in memory.
+app.get("/hls/*", async (req, res, next) => {
+  const relativePath = String(req.params[0] || "");
+  if (!/\.m3u8$/i.test(relativePath)) return next();
+
+  const playlistPath = path.resolve(RECORD_ROOT, relativePath);
+  const relativeToRoot = path.relative(RECORD_ROOT, playlistPath);
+  if (!relativeToRoot || relativeToRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRoot)) {
+    return res.status(403).type("text/plain").send("invalid HLS playlist path");
+  }
+
+  try {
+    const playlist = await fs.promises.readFile(playlistPath);
+    res
+      .type("application/vnd.apple.mpegurl; charset=utf-8")
+      .set("Access-Control-Allow-Origin", "*")
+      .set("Cache-Control", "no-cache")
+      .send(playlist);
+  } catch (error) {
+    if (error?.code === "ENOENT") return next();
+    log.warn("hls_playlist_read_error", { path: relativePath, error: serializeError(error) });
+    return res.status(500).type("text/plain").send("unable to read HLS playlist");
+  }
 });
 app.use("/hls", express.static(RECORD_ROOT, {
   setHeaders(res) {
@@ -1692,16 +1729,17 @@ app.post("/sources", async (req, res) => {
     } catch (error) {
       log.warn("source_probe_error", { streamId, sourceType, error: serializeError(error) });
     }
-    // A UDP stream can start before its next video header/keyframe reaches the
-    // short general probe. Retry only when dimensions are missing so ABR uses
-    // the true source-native top rung instead of the 1920x1080 fallback.
-    if (sourceType === "stream" && !hasVideoDimensions(sourceProbe)) {
+    // A short TS probe can see the video stream before its next decodable
+    // header. Retry with a fuller ffprobe pass whenever dimensions are absent.
+    // File probes omit `-read_intervals` so ffprobe can reach the first video
+    // headers even when a TS begins mid-GOP; live probes stay time-bounded.
+    if (!hasVideoDimensions(sourceProbe)) {
       try {
         const dimensionProbe = await probeInputWithFfprobe(resolvedInputUrl, {
           timeoutMs: LIVE_DIMENSION_PROBE_TIMEOUT_MS,
           analyzeDurationUs: 10_000_000,
           probeSizeBytes: 32_000_000,
-          readInterval: "%+10"
+          readInterval: sourceType === "file" ? null : "%+10"
         });
         if (hasVideoDimensions(dimensionProbe)) {
           sourceProbe = mergeLiveProbe(sourceProbe, dimensionProbe);
@@ -1719,6 +1757,9 @@ app.post("/sources", async (req, res) => {
     const hlsEncoderMode = hlsResolution.encoderMode;
     const hlsEffectiveMode = hlsResolution.effectiveMode;
     const hlsFallbackReason = hlsResolution.fallbackReason;
+    if (hlsEncoderMode !== "copy-h264" && !hasVideoDimensions(sourceProbe)) {
+      throw new Error("unable to determine source video dimensions with ffprobe; ABR/transcode HLS will not start without a native High resolution");
+    }
     const webRtcEncoderMode = sourceType === "file"
       ? null
       : resolveWebRtcEncodeMode(webRtcMode, sourceProbe);
@@ -1764,6 +1805,10 @@ app.post("/sources", async (req, res) => {
       progressPercent: sourceType === "file" ? 0 : null,
       encodeSpeed: null,
       etaSeconds: null,
+      finalizationProgressPercent: null,
+      finalizationProcessedSegments: null,
+      finalizationTotalSegments: null,
+      finalizationEtaSeconds: null,
       stage: "initializing",
       lastError: null
     });
@@ -1898,6 +1943,16 @@ app.post("/sources", async (req, res) => {
           klvTimeSource: timeSource
         });
       },
+      onFinalizationProgress: ({ processedSegments, totalSegments, progressPercent, etaSeconds }) => {
+        const tracked = sourceStates.get(streamId);
+        if (!tracked || tracked.state !== "finalizing") return;
+        setSourceState(streamId, {
+          finalizationProcessedSegments: Math.max(0, Number(processedSegments) || 0),
+          finalizationTotalSegments: Math.max(0, Number(totalSegments) || 0),
+          finalizationProgressPercent: Math.max(0, Math.min(100, Number(progressPercent) || 0)),
+          finalizationEtaSeconds: Math.max(0, Number(etaSeconds) || 0)
+        });
+      },
       onError: (error) => {
         if (!sources.has(streamId)) return;
         setSourceState(streamId, {
@@ -1956,7 +2011,16 @@ app.post("/sources", async (req, res) => {
     const finalizeFileSource = async () => {
       const source = sources.get(streamId);
       if (!source || source.sourceType !== "file") return;
-      setSourceState(streamId, { state: "finalizing", running: false, ingestRunning: false, stage: "finalizing_vtt" });
+      setSourceState(streamId, {
+        state: "finalizing",
+        running: false,
+        ingestRunning: false,
+        stage: "finalizing_vtt",
+        finalizationProgressPercent: 0,
+        finalizationProcessedSegments: 0,
+        finalizationTotalSegments: null,
+        finalizationEtaSeconds: null
+      });
       try {
         const finalizeTimeoutMs = estimateKlvFinalizeTimeoutMs(
           sourceStates.get(streamId)?.durationSeconds,
@@ -1973,6 +2037,8 @@ app.post("/sources", async (req, res) => {
           stage: null,
           progressPercent: 100,
           etaSeconds: 0,
+          finalizationProgressPercent: 100,
+          finalizationEtaSeconds: 0,
           lastError: null
         });
         try {
