@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createServiceLogger, serializeError } from "./service_logger.js";
 import { buildVideoArgs } from "./ffmpeg_video.js";
-import { HLS_RENDITIONS, resolveHlsRenditions } from "./hls_ladder.js";
+import { HLS_RENDITIONS, NATIVE_ABR_RENDITION_INDEX, resolveHlsRenditions } from "./hls_ladder.js";
 
 const log = createServiceLogger("hls_recorder");
 const TRANSIENT_INPUT_WARNING_RE = /Invalid frame dimensions 0x0\./i;
@@ -65,7 +65,11 @@ function parseProgressSpeed(value) {
   return Number.isFinite(speed) && speed > 0 ? speed : null;
 }
 
-/** Returns a filter-safe source sample-aspect ratio, defaulting to square pixels. */
+/**
+ * Converts ffprobe's SAR text to an FFmpeg filter expression. The strict
+ * parser prevents untrusted probe output from being interpolated into the
+ * filter graph; missing or invalid SAR means square pixels.
+ */
 function normalizeSampleAspectRatio(value) {
   const match = String(value || "").match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
   if (!match) return "1/1";
@@ -75,7 +79,15 @@ function normalizeSampleAspectRatio(value) {
   return `${numerator}/${denominator}`;
 }
 
-/** Creates the scaling filter graph for encoded ABR rendition branches. */
+/**
+ * Creates the encoded ABR filter graph while preserving display aspect ratio.
+ *
+ * The native rung keeps its source-coded dimensions and source SAR. Fixed
+ * lower rungs first convert non-square source pixels to their display geometry
+ * (`width = height × DAR`), then scale to 16:9 square-pixel outputs. Do not
+ * apply the source SAR to the lower rungs: their 640×360 and 160×90 frames
+ * already encode the target 16:9 display shape.
+ */
 function buildLadderFilter(renditions, copyRenditionIndex = null, nativeRenditionSampleAspectRatio = "1/1") {
   const encodedRenditionIndexes = renditions
     .map((_, index) => index)
@@ -91,13 +103,13 @@ function buildLadderFilter(renditions, copyRenditionIndex = null, nativeRenditio
     // The native top rung remains in its source-coded dimensions. When it is
     // encoded rather than source-copied, retain its source SAR so browsers
     // present the same display aspect as the live WebRTC path.
-    const outputSampleAspectRatio = renditionIndex === 1
+    const outputSampleAspectRatio = renditionIndex === NATIVE_ABR_RENDITION_INDEX
       ? nativeRenditionSampleAspectRatio
       : "1/1";
     // The fixed lower rungs are 16:9, square-pixel frames. Normalize a
     // non-square source to its display geometry before fitting it to those
     // dimensions so it is not pillarboxed as its coded 4:3 frame shape.
-    const lowerRungNormalization = renditionIndex === 1
+    const lowerRungNormalization = renditionIndex === NATIVE_ABR_RENDITION_INDEX
       ? ""
       : "scale=trunc(ih*dar/2)*2:ih,setsar=1,";
     filters.push(
@@ -146,7 +158,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const isPassthrough = chosen === "copy-h264";
   const isSingleTranscode = chosen === "xcode-single";
   const segmentSeconds = normalizeSegmentSeconds(hlsSegmentSeconds);
-  const nativeTopRenditionIndex = 1;
+  const nativeTopRenditionIndex = NATIVE_ABR_RENDITION_INDEX;
   const ladder = resolveHlsRenditions(sourceVideo);
   const renditions = ladder.renditions;
   const copyNativeTopRung = chosen === "xcode-any" && ladder.copyNativeTopRung;
@@ -302,6 +314,8 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
           nativeRenditionSampleAspectRatio
         ), ...carrierOutput, ...abrOutput])
   ];
+  // Runtime state, UI diagnostics, and the startup log share this immutable
+  // plan so operators can tell which ABR rungs are encoded or source-copied.
   const renditionPlan = chosen === "xcode-any"
     ? renditions.map((rendition, index) => ({
       ...rendition,
@@ -328,7 +342,6 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     streamCopy: isPassthrough,
     encoder: videoProfile.encoder,
     usingGpu: videoProfile.usingGpu,
-    renditions: renditionPlan,
     copyNativeTopRung,
     renditions: renditionPlan,
     metadataPlaylist,

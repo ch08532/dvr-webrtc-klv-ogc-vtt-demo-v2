@@ -31,7 +31,7 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 ### Processing modes
 - **HLS passthrough** is the default: confirmed H.264 video is copied without video encoding; audio is omitted from browser playback. A separate copy-only carrier playlist retains the original video, audio, and KLV for extraction and clips.
 - **HLS compatibility fallback** activates when passthrough input is not H.264 (for example MPEG-2 video): it produces browser-compatible H.264 playback renditions while retaining the original video, audio, and KLV carrier without re-encoding it.
-- **HLS ABR** creates three renditions: Low (90p), Medium (360p), and High (the source's native resolution). A compatible H.264 source is copied into High; other source codecs are encoded to their native-resolution High rung.
+- **HLS ABR** creates three renditions: Low (90p), Medium (360p), and High (the source's native resolution). Only an H.264 Baseline source is copied into High; other source codecs or H.264 profiles are encoded to their native-resolution High rung so adaptive switches remain codec-compatible.
 - **Live WebRTC auto-copy** copies H.264 into RTP when the input probe confirms H.264; it falls back to transcoding for other codecs. File sources are HLS-only.
 
 ## Install / run

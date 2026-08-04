@@ -93,9 +93,21 @@ The initial probe selects the safest HLS path:
 
 - **Passthrough:** an H.264 source is copied into browser HLS without video re-encoding.
 - **Compatibility fallback:** a non-H.264 source receives one H.264 playback rendition.
-- **ABR:** produces low (90p), medium (360p), and a source-native top rendition. A compatible H.264 native rung may be copied; other rungs are encoded. If a live source's short probe has not yet seen a video header, the server performs one longer resolution-focused probe before using the 1920×1080 fallback ladder.
+- **ABR:** produces low (90p), medium (360p), and a source-native top rendition. Only an H.264 Baseline native rung may be copied; other source codecs or H.264 profiles are encoded so adaptive switches remain codec-compatible. If a live source's short probe has not yet seen a video header, the server performs one longer resolution-focused probe before using the 1920×1080 fallback ladder.
 
 Browser HLS is deliberately video-only. Source audio does not control HLS compatibility. GPU encoding is enabled by default for transcode paths when the selected FFmpeg encoder is available; setting `FFMPEG_USE_GPU=0` forces the CPU fallback.
+
+### 5.1.1 Display aspect-ratio contract
+
+The probe records coded width/height, sample aspect ratio (SAR), and display aspect ratio (DAR). These are distinct: for example, `1440×1080` with `SAR 4:3` has a `DAR 16:9`.
+
+| Playback path | Aspect-ratio behavior |
+| --- | --- |
+| WebRTC | Does not alter the RTP video bitstream. The browser viewport uses the probed DAR (or coded dimensions × SAR) so square-pixel browser decoding still presents the source's intended shape. |
+| ABR native rung | Keeps source-coded dimensions. A source copy carries its original SAR; an encoded native rung explicitly writes the source SAR. |
+| ABR 360p and 90p rungs | Convert non-square source pixels to display geometry before scaling, then write 16:9 square-pixel output (`640×360` and `160×90`, SAR `1:1`). Applying the source SAR again would make these rungs too wide. |
+
+`NATIVE_ABR_RENDITION_INDEX` identifies the native rung in both the ladder definition and FFmpeg filter graph. Keep the ladder ordering and that constant synchronized when changing ABR variants. The DVR diagnostics and HLS startup log publish each rung's processing plan (`source-copy` or `encoded`) so operators can verify the active behavior.
 
 ### 5.2 Two HLS outputs per source
 

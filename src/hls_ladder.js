@@ -1,5 +1,9 @@
 /** Defines the HLS rendition ladder and creates matching master playlists. */
 
+// This order is part of the HLS recorder contract: the native/source rung is
+// v1, while v0 and v2 are fixed, square-pixel playback renditions.
+export const NATIVE_ABR_RENDITION_INDEX = 1;
+
 export const HLS_RENDITIONS = [
   {
     id: "360p",
@@ -39,15 +43,21 @@ export const HLS_RENDITIONS = [
   }
 ];
 
-/** Builds the native-resolution ABR rung and marks whether it can be copied. */
+/**
+ * Builds the native-resolution ABR rung and marks whether it can be copied.
+ *
+ * `width` and `height` intentionally remain the source's coded dimensions.
+ * Its source SAR is preserved by source copy or by the encoder filter in
+ * hls_recorder.js, allowing a non-square-pixel source to retain its DAR.
+ */
 function topRenditionForSource(sourceVideo) {
   const width = Number(sourceVideo?.width);
   const height = Number(sourceVideo?.height);
   const isH264 = String(sourceVideo?.codec || "").toLowerCase() === "h264";
   const profile = String(sourceVideo?.profile || "").toLowerCase();
-  // The ABR encoder produces Constrained Baseline H.264. Copying a Main/High
-  // profile source into the same ladder makes browser rendition switches
-  // codec-incompatible, even though each individual rendition is playable.
+  // The ABR encoder produces Constrained Baseline H.264. Copy only an H.264
+  // Baseline source: copying Main/High into the same ladder would make
+  // rendition switches codec-incompatible, even if each rung plays alone.
   const isAbrCopyCompatible = isH264 && profile.includes("baseline");
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return null;
 
@@ -81,7 +91,7 @@ export function resolveHlsRenditions(sourceVideo) {
 
   return {
     renditions: HLS_RENDITIONS.map((rendition, index) => (
-      index === 1 ? sourceTop : rendition
+      index === NATIVE_ABR_RENDITION_INDEX ? sourceTop : rendition
     )),
     copyNativeTopRung: sourceTop.sourceCopy
   };
