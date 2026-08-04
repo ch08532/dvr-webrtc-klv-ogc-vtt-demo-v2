@@ -3295,14 +3295,14 @@ function App() {
     ))
     : null;
   const activeHlsRenditionLabel = activeHlsRendition
-    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.processing === 'source-copy' ? 'source copy' : 'encoded'}`
+    ? `${activeHlsRendition.id} | ${activeHlsRendition.width}×${activeHlsRendition.height} | ${activeHlsRendition.processing === 'source-copy' ? 'source copy' : `encoded ${activeHlsRendition.videoBitrate || ''}`.trim()}`
     : dvrDiag.currentPlaylistUri || dvrDiag.currentPlaylistResolvedUri
       ? activeHlsMode === 'single-transcode'
         ? 'single transcoded rendition'
         : 'source (single rendition)'
       : 'n/a';
   const hlsRenditionPlanLabel = activeHlsMode === 'abr'
-    ? activeHlsRenditions.map((rendition) => `${rendition.id}: ${rendition.processing === 'source-copy' ? 'source copy' : 'encoded'}`).join(' · ')
+    ? activeHlsRenditions.map((rendition) => `${rendition.id}: ${rendition.processing === 'source-copy' ? 'source copy' : `encoded ${rendition.videoBitrate || ''}`.trim()}`).join(' · ')
     : null;
   return (
     <MantineProvider theme={theme}>
