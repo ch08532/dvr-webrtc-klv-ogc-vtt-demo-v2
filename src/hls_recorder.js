@@ -239,6 +239,12 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const inputTimestampArgs = isFileSource
     ? []
     : ["-use_wallclock_as_timestamps", "1"];
+  // File-backed TS recordings can contain isolated malformed PES/transport
+  // packets, especially at a recorder's tail. Keep valid video, audio, and
+  // KLV flowing while FFmpeg discards only packets it cannot demux safely.
+  const inputRecoveryArgs = isFileSource
+    ? ["-fflags", "+genpts+discardcorrupt", "-err_detect", "ignore_err"]
+    : ["-fflags", "+genpts"];
 
   // Keep the full history in the playlist.
   const listSize = 0;
@@ -261,7 +267,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
 
     // Live UDP sources need arrival-time timestamps; file sources retain media PTS.
     ...inputTimestampArgs,
-    "-fflags", "+genpts",
+    ...inputRecoveryArgs,
     "-avoid_negative_ts", "make_zero",
 
     // Tune probing (TS/KLV)
