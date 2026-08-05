@@ -119,6 +119,41 @@ function normalizeTargetPosition(position) {
   return { lat, lon };
 }
 
+/**
+ * Validates one compact platform-history point derived from a completed HLS
+ * segment. `sequence` is the browser HLS ordering key; `tMs` is retained
+ * separately for mission-time windowing and client-side playback trimming.
+ */
+function normalizePlatformTrackPoint(point) {
+  const sequence = Math.trunc(Number(point?.sequence));
+  const tMs = Math.round(Number(point?.tMs));
+  const lat = Number(point?.lat);
+  const lon = Number(point?.lon);
+  if (!Number.isSafeInteger(sequence) || sequence < 0 || !Number.isSafeInteger(tMs)
+    || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    return null;
+  }
+  return { sequence, tMs, lat, lon };
+}
+
+/** Keeps first/last points while reducing a long route to a deterministic maximum. */
+function reduceTrackPoints(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  if (maxPoints <= 2) return [points[0], points[points.length - 1]];
+  const lastIndex = points.length - 1;
+  const reduced = [points[0]];
+  let previousIndex = 0;
+  for (let index = 1; index < maxPoints - 1; index += 1) {
+    const candidate = Math.round((index * lastIndex) / (maxPoints - 1));
+    if (candidate > previousIndex && candidate < lastIndex) {
+      reduced.push(points[candidate]);
+      previousIndex = candidate;
+    }
+  }
+  reduced.push(points[lastIndex]);
+  return reduced;
+}
+
 /** Owns the telemetry schema, writes, and query operations. */
 export class SqliteKlvStore {
   /** Prepares the store; call init before issuing database operations. */
@@ -142,6 +177,20 @@ export class SqliteKlvStore {
       );
     `);
     await run(this.db, `CREATE INDEX IF NOT EXISTS idx_klv_stream_time ON klv_events(stream_id, t_ms);`);
+    // This small index is intentionally separate from full-rate `klv_events`:
+    // it holds only the final valid platform location from each completed
+    // browser HLS segment for map history requests.
+    await run(this.db, `
+      CREATE TABLE IF NOT EXISTS platform_track_points (
+        stream_id TEXT NOT NULL,
+        video_sequence INTEGER NOT NULL,
+        t_ms INTEGER NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        PRIMARY KEY(stream_id, video_sequence)
+      );
+    `);
+    await run(this.db, `CREATE INDEX IF NOT EXISTS idx_platform_track_stream_time ON platform_track_points(stream_id, t_ms);`);
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS target_log_entries (
         id TEXT PRIMARY KEY,
@@ -240,6 +289,96 @@ export class SqliteKlvStore {
         throw error;
       }
     });
+  }
+
+  /**
+   * Stores the last valid platform position for each processed browser HLS
+   * segment. The stream/sequence key makes repeated playlist scans idempotent.
+   */
+  async upsertPlatformTrackSamples(streamId, samples) {
+    const rows = (Array.isArray(samples) ? samples : [])
+      .map(normalizePlatformTrackPoint)
+      .filter(Boolean);
+    if (!rows.length) return 0;
+
+    // Five bound variables per row; remain well below SQLite's common 999 limit.
+    const rowsPerStatement = 150;
+    return retryBusyWrite("upsert_platform_track_samples", async () => {
+      let transactionOpen = false;
+      try {
+        await run(this.db, "BEGIN IMMEDIATE");
+        transactionOpen = true;
+        for (let offset = 0; offset < rows.length; offset += rowsPerStatement) {
+          const chunk = rows.slice(offset, offset + rowsPerStatement);
+          const placeholders = chunk.map(() => "(?,?,?,?,?)").join(",");
+          await run(this.db, `
+            INSERT INTO platform_track_points(stream_id, video_sequence, t_ms, lat, lon)
+            VALUES ${placeholders}
+            ON CONFLICT(stream_id, video_sequence) DO UPDATE SET
+              t_ms=excluded.t_ms,
+              lat=excluded.lat,
+              lon=excluded.lon
+          `, chunk.flatMap((sample) => [streamId, sample.sequence, sample.tMs, sample.lat, sample.lon]));
+        }
+        await run(this.db, "COMMIT");
+        transactionOpen = false;
+        return rows.length;
+      } catch (error) {
+        if (transactionOpen) {
+          try { await run(this.db, "ROLLBACK"); } catch {}
+        }
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Returns a deduplicated, bounded platform path without loading full KLV
+   * JSON. Results stay in HLS sequence order even when source mission times
+   * repeat; callers receive the parallel timestamps to apply a time window.
+   */
+  async listPlatformTrackPoints(streamId, { fromMs = null, toMs = null, maxPoints = 5000 } = {}) {
+    const conditions = ["stream_id=?"];
+    const values = [streamId];
+    if (Number.isFinite(fromMs)) {
+      conditions.push("t_ms>=?");
+      values.push(Math.round(fromMs));
+    }
+    if (Number.isFinite(toMs)) {
+      conditions.push("t_ms<=?");
+      values.push(Math.round(toMs));
+    }
+    const rows = await all(this.db, `
+      SELECT video_sequence, t_ms, lat, lon
+      FROM platform_track_points
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY video_sequence ASC
+    `, values);
+    const sourcePointCount = rows.length;
+    const deduplicated = [];
+    for (const row of rows) {
+      const point = {
+        sequence: Number(row.video_sequence),
+        tMs: Number(row.t_ms),
+        lat: Number(row.lat),
+        lon: Number(row.lon)
+      };
+      const previous = deduplicated[deduplicated.length - 1];
+      // A stationary platform needs only its newest position until it moves.
+      if (previous && previous.lat === point.lat && previous.lon === point.lon) {
+        deduplicated[deduplicated.length - 1] = point;
+      } else {
+        deduplicated.push(point);
+      }
+    }
+    const safeMaxPoints = Math.max(2, Math.floor(Number(maxPoints) || 5000));
+    const points = reduceTrackPoints(deduplicated, safeMaxPoints);
+    return {
+      points,
+      sourcePointCount,
+      deduplicatedPointCount: deduplicated.length,
+      reduced: points.length < deduplicated.length
+    };
   }
 
   /** Returns decoded telemetry for one source over an inclusive time window. */
@@ -341,6 +480,7 @@ export class SqliteKlvStore {
       await run(this.db, "BEGIN IMMEDIATE");
       try {
         const events = await run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]);
+        await run(this.db, `DELETE FROM platform_track_points WHERE stream_id=?`, [streamId]);
         await run(this.db, `DELETE FROM stream_mission_timeline WHERE stream_id=?`, [streamId]);
         await run(this.db, "COMMIT");
         return events;
@@ -538,6 +678,7 @@ export class SqliteKlvStore {
       await run(this.db, "BEGIN IMMEDIATE");
       try {
         const telemetry = await run(this.db, `DELETE FROM klv_events`);
+        await run(this.db, `DELETE FROM platform_track_points`);
         await run(this.db, `DELETE FROM stream_mission_timeline`);
         const entries = await run(this.db, `DELETE FROM target_log_entries`);
         const fields = await run(this.db, `DELETE FROM target_log_fields`);

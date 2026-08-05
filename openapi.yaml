@@ -286,6 +286,23 @@ paths:
       responses:
         '200': { description: KLV event collection }
         '400': { $ref: '#/components/responses/Error' }
+  /streams/{streamId}/klv/platform-history.geojson:
+    get:
+      tags: [Telemetry]
+      summary: Get compact sampled platform history as GeoJSON
+      description: Returns a single GeoJSON LineString sampled from the last valid platform position in each completed browser HLS segment. Coordinates remain in HLS sequence order; `properties.timesMs` is index-aligned with those coordinates for mission-time filtering. Consecutive duplicate positions are removed and very long paths are bounded while preserving first and last points. This compact map index does not replace full-rate KLV event storage.
+      parameters:
+        - { $ref: '#/components/parameters/StreamId' }
+        - { name: fromMs, in: query, required: false, schema: { type: number }, description: Optional inclusive mission-time start in Unix milliseconds. }
+        - { name: toMs, in: query, required: false, schema: { type: number }, description: Optional inclusive mission-time end in Unix milliseconds. }
+        - { name: maxPoints, in: query, required: false, schema: { type: integer, minimum: 2, maximum: 10000 }, description: Maximum returned path coordinates, subject to the server limit. }
+      responses:
+        '200':
+          description: GeoJSON Feature with a LineString geometry when at least two platform points are available
+          content:
+            application/geo+json:
+              schema: { type: object }
+        '400': { $ref: '#/components/responses/Error' }
   /streams/{streamId}/klv/export.csv:
     get:
       tags: [Telemetry]

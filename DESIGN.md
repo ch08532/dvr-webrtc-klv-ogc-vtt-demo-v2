@@ -158,7 +158,8 @@ For finite files, waiting for every segment serially made finalization expensive
 2. Starts up to `KLV_SEGMENT_DECODE_WORKERS` asynchronous segment decodes (default `4`, clamped to `1`–`8`).
 3. Re-applies decoded results in playlist order to establish timing bases.
 4. Inserts each batch's decoded events using one SQLite transaction, chunking large SQL statements below SQLite's bind-variable limit.
-5. Publishes VTT files in playlist order and advances the processed segment marker.
+5. Selects the final valid platform position from each completed browser HLS segment and writes it to the compact platform-history index.
+6. Publishes VTT files in playlist order and advances the processed segment marker.
 
 This improves storage and I/O throughput without allowing concurrent work to change VTT cue order or timeline alignment. The default batch size is `workers × 4`, controlled by `KLV_SEGMENT_DECODE_BATCH_SIZE` (clamped to `workers`–`64`).
 
@@ -172,6 +173,14 @@ The direct telemetry endpoint is:
 GET /streams/:streamId/klv?fromMs=<epoch-ms>&toMs=<epoch-ms>
 ```
 
+### 6.5 Compact platform-history index
+
+Platform history is intentionally not generated from the full `klv_events` collection on every map refresh. After a browser HLS segment has been fully paired with its carrier segment and decoded, the KLV worker selects that segment's **last valid** `sensorLat`/`sensorLon` position. It stores one row in `platform_track_points`, keyed by stream ID and browser HLS media sequence. The sequence is the drawing order; the stored KLV mission/ingest timestamp is a separate value used for time filtering.
+
+`GET /streams/:streamId/klv/platform-history.geojson` returns one GeoJSON Feature. Its `LineString` coordinates are in browser HLS sequence order, and `properties.timesMs` is index-aligned with the coordinate array. The store removes consecutive stationary duplicates, then deterministically reduces a long path while preserving its first and last points. The server caps the response at `PLATFORM_HISTORY_MAX_POINTS` (default `5000`) and never reads or sends every decoded KLV JSON record for this map feature.
+
+The API remains cache-disabled because a live path changes as completed segments arrive. The compact history index is cleared with the stream's telemetry on source reset/purge. It does not de-duplicate or split replayed mission-timestamp cycles: a looping input is represented in HLS sequence order, so consumers that require separate replay passes need an explicit higher-level policy.
+
 ## 7. Playback and telemetry UI
 
 ### 7.1 DVR
@@ -179,6 +188,8 @@ GET /streams/:streamId/klv?fromMs=<epoch-ms>&toMs=<epoch-ms>
 The DVR tab uses Video.js/HLS. A file-backed playlist is explicitly positioned at its beginning after metadata loads so it does not inherit a live-DVR end position. A stream-backed HLS playlist is explicitly positioned at the Video.js live-tracker time (or the seekable-range end when unavailable) so HLS playback starts at its newest available point despite retaining DVR history. File sources show absolute `player time: current / total`; stream HLS shows `Playback delay: <time> behind HLS edge · DVR window: <duration>` from the seekable range. This avoids conflating HLS latency with the separate low-latency WebRTC **Live** path. Playback diagnostics report **coded** dimensions (source/active HLS rendition pixels) and **display** dimensions (browser dimensions after sample-aspect-ratio handling). The selected rendition, segment, and subtitle segment are also visible.
 
 The Data tab renders fields from the active WebVTT cue, including `missionId` when present. The Map tab shows `timestampIso` beneath the map and preserves the latest valid cue during `finalizing` and `ready` file states.
+
+The **Platform history** control is a separate compact GeoJSON layer. For a file source, the client loads its bounded route and displays only coordinates at or before the active WebVTT cue's mission timestamp. For time-shifted HLS and live WebRTC, it requests the most recent 15 mission minutes and refreshes every five seconds while the relevant map is active. The map appends the active platform coordinate in memory to bridge the normal one-segment delay before the next persisted history sample; this does not add a row to SQLite or alter the GeoJSON response.
 
 ### 7.2 Live WebRTC
 
@@ -191,6 +202,7 @@ The OpenLayers map renders source KLV geometry, with a bounded `computed-flat` f
 - Sensor/platform marker and heading.
 - Frame-center marker and line from sensor to frame center.
 - An amber footprint from complete source frame corners (full corners or meaningful decoded offsets), or from a `computed-flat` estimate based on sensor pose, FOV, range, and a flat-ground approximation.
+- An optional dashed platform-history line behind the current platform marker, sourced from the compact segment index rather than full-rate KLV.
 
 No terrain model is downloaded. There is no terrain correction, terrain target, or terrain-derived footprint. The computed-flat fallback is an approximation and may be less accurate over uneven terrain. **Center map** recenters on the latest valid frame-center position.
 
@@ -226,6 +238,7 @@ The UI uses these primary HTTP routes:
 | `GET /sources`, `GET /sources/:streamId/state` | Enumerates sources and returns lifecycle/progress/runtime state. |
 | `DELETE /sources/:streamId` | Stops a source and its child media workers. |
 | `/hls/:streamId/...` | Serves generated HLS playback files, VTT sidecars, and source posters. |
+| `GET /streams/:streamId/klv/platform-history.geojson` | Returns the bounded, segment-sampled platform-history GeoJSON Feature used by the map overlay. |
 | `GET /metrics/runtime`, `GET /healthz` | Host, GPU, worker, source, and service health information. |
 | `/webrtc/*` | mediasoup signaling for live browser consumption. |
 | `/ogc/*` | OGC Moving Features demo subset. |
@@ -263,5 +276,6 @@ Key environment variables include:
 | `SOURCE_POSTER_WIDTH`, `SOURCE_POSTER_TIMEOUT_MS` | Active-source poster capture behavior. |
 | `KLV_SEGMENT_DECODE_WORKERS`, `KLV_SEGMENT_DECODE_BATCH_SIZE` | Bounded file KLV decode concurrency and batch size. |
 | `KLV_FINALIZE_MIN_TIMEOUT_MS`, `KLV_FINALIZE_MS_PER_SEGMENT`, `KLV_FINALIZE_MAX_TIMEOUT_MS` | Adaptive file KLV finalization timeout bounds. |
+| `PLATFORM_HISTORY_MAX_POINTS` | Maximum GeoJSON coordinates returned by the compact platform-history endpoint (default `5000`, capped at `10000`). |
 
 This code is a PoC rather than a hardened media service. In particular, deployments should add authentication/authorization, HTTPS and secure WebRTC network configuration, source admission controls, disk quotas and cleanup for uploads/clips, operational monitoring, durable job recovery, and environment-specific media validation before exposing it beyond a trusted environment.

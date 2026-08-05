@@ -37,6 +37,11 @@ const platformHeadingLineStyle = [
   new Style({ stroke: new Stroke({ color: '#228be6', width: 3 }) })
 ];
 
+const platformHistoryStyle = [
+  new Style({ stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.78)', width: 6 }) }),
+  new Style({ stroke: new Stroke({ color: 'rgba(34, 139, 230, 0.88)', width: 3, lineDash: [9, 6] }) })
+];
+
 const frameCenterStyle = new Style({
   image: new CircleStyle({
     radius: 7,
@@ -115,6 +120,15 @@ function MapControlIcon({ name }) {
       </svg>
     );
   }
+  if (name === 'history') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 17c3-8 5 2 8-5s5 3 8-5" {...common} />
+        <circle cx="4" cy="17" r="1.5" {...common} />
+        <circle cx="20" cy="7" r="1.5" {...common} />
+      </svg>
+    );
+  }
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 9V5h4M16 5h4v4M20 15v4h-4M8 19H4v-4" {...common} />
@@ -126,6 +140,11 @@ function MapControlIcon({ name }) {
 export default function KlvMap({
   telemetry,
   active,
+  platformHistory = null,
+  platformHistoryUntilMs = null,
+  showPlatformHistory = false,
+  onPlatformHistoryToggle = null,
+  platformHistoryLoading = false,
   onPositionSelect = null,
   onPointerCoordinate = null,
   targetLogEntries = [],
@@ -135,6 +154,7 @@ export default function KlvMap({
   const targetRef = useRef(null);
   const mapRef = useRef(null);
   const sourceRef = useRef(null);
+  const platformHistoryRef = useRef(null);
   const platformRef = useRef(null);
   const platformHeadingLineRef = useRef(null);
   const platformPositionRef = useRef(null);
@@ -150,6 +170,7 @@ export default function KlvMap({
   const onPointerCoordinateRef = useRef(onPointerCoordinate);
   const onTargetLogSelectRef = useRef(onTargetLogSelect);
   const [hasCoordinates, setHasCoordinates] = useState(false);
+  const [hasPlatformHistory, setHasPlatformHistory] = useState(false);
   const [hasTargetLogPositions, setHasTargetLogPositions] = useState(false);
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
   const [followFrameCenter, setFollowFrameCenter] = useState(false);
@@ -187,6 +208,7 @@ export default function KlvMap({
     if (!map) return;
     const fit = () => {
       const features = [
+        platformHistoryRef.current,
         platformRef.current,
         frameCenterRef.current,
         lineRef.current,
@@ -262,18 +284,20 @@ export default function KlvMap({
 
   useEffect(() => {
     const source = new VectorSource();
+    const platformHistory = new Feature();
     const platform = new Feature();
     const platformHeadingLine = new Feature();
     const frameCenter = new Feature();
     const line = new Feature();
     const frameGeometry = new Feature();
 
+    platformHistory.setStyle(platformHistoryStyle);
     platform.setStyle(platformStyle(0));
     platformHeadingLine.setStyle(platformHeadingLineStyle);
     frameCenter.setStyle(frameCenterStyle);
     line.setStyle(lineStyle);
     frameGeometry.setStyle(frameGeometryStyle);
-    source.addFeatures([frameGeometry, line, platformHeadingLine, platform, frameCenter]);
+    source.addFeatures([platformHistory, frameGeometry, line, platformHeadingLine, platform, frameCenter]);
 
     const map = new Map({
       target: targetRef.current,
@@ -289,6 +313,7 @@ export default function KlvMap({
 
     mapRef.current = map;
     sourceRef.current = source;
+    platformHistoryRef.current = platformHistory;
     platformRef.current = platform;
     platformHeadingLineRef.current = platformHeadingLine;
     frameCenterRef.current = frameCenter;
@@ -342,10 +367,52 @@ export default function KlvMap({
       map.setTarget(undefined);
       mapRef.current = null;
       sourceRef.current = null;
+      platformHistoryRef.current = null;
       targetLogFeaturesRef.current = [];
       platformHeadingLineRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const historyFeature = platformHistoryRef.current;
+    if (!historyFeature) return;
+    // The GeoJSON endpoint guarantees `timesMs` is index-aligned with its
+    // coordinates. File playback uses that contract to hide future route
+    // samples while the active WebVTT cue is earlier in the mission.
+    const coordinates = Array.isArray(platformHistory?.geometry?.coordinates)
+      ? platformHistory.geometry.coordinates
+      : [];
+    const timesMs = Array.isArray(platformHistory?.properties?.timesMs)
+      ? platformHistory.properties.timesMs
+      : [];
+    const untilMs = Number(platformHistoryUntilMs);
+    const lineCoordinates = coordinates
+      .filter((coordinate, index) => {
+        if (!Array.isArray(coordinate) || !isCoordinate(coordinate[1], coordinate[0])) return false;
+        const pointTimeMs = Number(timesMs[index]);
+        return !Number.isFinite(untilMs) || (Number.isFinite(pointTimeMs) && pointTimeMs <= untilMs);
+      })
+      .map((coordinate) => [Number(coordinate[0]), Number(coordinate[1])]);
+
+    // Track samples arrive only after a segment is complete. Bridge the
+    // resulting one-segment gap with the active cue's platform coordinate so
+    // the visible trail terminates at the moving platform marker.
+    const currentPlatformCoordinate = isCoordinate(telemetry?.sensorLat, telemetry?.sensorLon)
+      ? [Number(telemetry.sensorLon), Number(telemetry.sensorLat)]
+      : null;
+    const lastHistoryCoordinate = lineCoordinates[lineCoordinates.length - 1];
+    if (currentPlatformCoordinate && (!lastHistoryCoordinate
+      || lastHistoryCoordinate[0] !== currentPlatformCoordinate[0]
+      || lastHistoryCoordinate[1] !== currentPlatformCoordinate[1])) {
+      lineCoordinates.push(currentPlatformCoordinate);
+    }
+
+    const projected = lineCoordinates
+      .map((coordinate) => fromLonLat(coordinate));
+    const visible = showPlatformHistory && projected.length >= 2;
+    historyFeature.setGeometry(visible ? new LineString(projected) : null);
+    setHasPlatformHistory(visible);
+  }, [platformHistory, platformHistoryUntilMs, showPlatformHistory, telemetry]);
 
   useEffect(() => {
     const source = sourceRef.current;
@@ -378,6 +445,13 @@ export default function KlvMap({
       centerOnInitialGeometry();
     }
   }, [active, hasTargetLogPositions]);
+
+  useEffect(() => {
+    if (active && hasPlatformHistory && !hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      centerOnInitialGeometry();
+    }
+  }, [active, hasPlatformHistory]);
 
   useEffect(() => {
     if (!mapRef.current || !sourceRef.current) return;
@@ -444,7 +518,7 @@ export default function KlvMap({
           type="button"
           className="klv-map-control-button"
           onClick={centerOnAllFeatures}
-          disabled={!hasCoordinates && !hasTargetLogPositions}
+          disabled={!hasCoordinates && !hasTargetLogPositions && !hasPlatformHistory}
           aria-label="Center map on telemetry and targets"
           title="Center map on telemetry and targets"
           data-tooltip="Center map"
@@ -480,8 +554,21 @@ export default function KlvMap({
         >
           <MapControlIcon name="follow" />
         </button>
+        <button
+          type="button"
+          className={`klv-map-control-button${showPlatformHistory ? ' is-active' : ''}`}
+          onClick={() => onPlatformHistoryToggle?.(!showPlatformHistory)}
+          disabled={!onPlatformHistoryToggle || !active}
+          aria-pressed={showPlatformHistory}
+          aria-busy={platformHistoryLoading}
+          aria-label={showPlatformHistory ? 'Hide platform history' : 'Show platform history'}
+          title={showPlatformHistory ? 'Hide platform history' : 'Show platform history'}
+          data-tooltip={showPlatformHistory ? 'Hide platform history' : 'Show platform history'}
+        >
+          <MapControlIcon name="history" />
+        </button>
       </div>
-      {!hasCoordinates ? <div className="klv-map-empty">Waiting for KLV coordinates…</div> : null}
+      {!hasCoordinates && !hasPlatformHistory ? <div className="klv-map-empty">Waiting for KLV coordinates…</div> : null}
     </div>
   );
 }

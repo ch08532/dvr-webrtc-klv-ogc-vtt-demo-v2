@@ -369,6 +369,31 @@ function prepareSegmentEntry(current, decodedSegment) {
   return { videoEntry, vttFile, vttPath, videoSegmentOffsetSec, carrierOffsetSec, records };
 }
 
+/**
+ * Selects exactly one compact history sample from a completed browser HLS
+ * segment. This deliberately runs after carrier-segment KLV extraction, not
+ * when FFmpeg creates a media file: KLV may arrive late in the segment.
+ *
+ * `sequence` preserves browser HLS playback order, while `tMs` is the decoded
+ * mission/ingest time used for GeoJSON time-window filtering. This is a map
+ * index only; full-rate decoded KLV remains in `klv_events`.
+ */
+function platformTrackSampleForPreparedSegment(prepared) {
+  const sequence = Number(prepared?.videoEntry?.sequence);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+  for (let index = prepared.records.length - 1; index >= 0; index -= 1) {
+    const record = prepared.records[index];
+    const lat = Number(record?.decoded?.sensorLat);
+    const lon = Number(record?.decoded?.sensorLon);
+    const tMs = Number(record?.klvUnixMs);
+    if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+      && Number.isSafeInteger(tMs) && tMs >= 0) {
+      return { sequence, tMs, lat, lon };
+    }
+  }
+  return null;
+}
+
 /** Writes VTT for an already decoded and storage-committed segment. */
 function writePreparedSegmentVtt(current, prepared) {
   writeSegmentVtt({
@@ -480,16 +505,24 @@ async function processPendingSegments() {
       // profiling without affecting KLV decode or subtitle generation.
       const preparedBatch = decodedBatch.map((item) => prepareSegmentEntry(current, item));
       const decodedForStorage = preparedBatch.flatMap((item) => item.records.map((record) => record.decoded));
+      // Keep one final platform point per completed browser segment. Store it
+      // only after the full decoded batch succeeds, before its VTT sidecars
+      // are published for browser playback.
+      const platformTrackSamples = preparedBatch
+        .map(platformTrackSampleForPreparedSegment)
+        .filter(Boolean);
       const sourceTimestampRecords = preparedBatch
         .flatMap((item) => item.records)
         .filter((record) => record.timeSource === "source_timestamp" && Number.isFinite(record.klvUnixMs));
       if (current.writeSqlite) {
         await current.store.addMany(current.streamId, decodedForStorage);
+        await current.store.upsertPlatformTrackSamples(current.streamId, platformTrackSamples);
       } else {
         log.debug("sqlite_write_skipped", {
           requestId: current.requestId,
           streamId: current.streamId,
-          decodedCount: decodedForStorage.length
+          decodedCount: decodedForStorage.length,
+          platformTrackSampleCount: platformTrackSamples.length
         });
       }
       if (sourceTimestampRecords.length && Number.isFinite(current.sourceTimelineBaseMs) && Number.isFinite(current.sourceTimelineStartSec)) {

@@ -78,6 +78,7 @@ const CLIP_THUMBNAIL_TIMEOUT_MS = Math.max(5000, Number(process.env.CLIP_THUMBNA
 const KLV_FINALIZE_MIN_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_MIN_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE_MS_PER_SEGMENT || 500));
 const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
+const PLATFORM_HISTORY_MAX_POINTS = Math.max(2, Math.min(10_000, Number(process.env.PLATFORM_HISTORY_MAX_POINTS || 5000)));
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
@@ -2624,6 +2625,58 @@ app.get("/streams/:streamId/klv/export.kml", async (req, res) => {
       .send(buildKlvKml(streamId, events));
   } catch (error) {
     log.warn("klv_kml_export_error", { streamId: req.params.streamId, error: serializeError(error) });
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+/**
+ * Returns one lightweight GeoJSON platform path built from completed
+ * HLS-segment samples. `properties.timesMs[index]` belongs to
+ * `geometry.coordinates[index]`, allowing the browser to trim a file route
+ * to its active WebVTT mission time without requesting full KLV JSON.
+ */
+app.get("/streams/:streamId/klv/platform-history.geojson", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const parseOptionalTime = (value, name) => {
+      if (value == null || String(value).trim() === "") return null;
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) throw new Error(`${name} must be milliseconds since epoch`);
+      return Math.round(parsed);
+    };
+    const fromMs = parseOptionalTime(req.query.fromMs, "fromMs");
+    const toMs = parseOptionalTime(req.query.toMs, "toMs");
+    if (fromMs != null && toMs != null && fromMs > toMs) {
+      throw new Error("fromMs must be less than or equal to toMs");
+    }
+    const rawMaxPoints = req.query.maxPoints == null ? PLATFORM_HISTORY_MAX_POINTS : Number(req.query.maxPoints);
+    if (!Number.isFinite(rawMaxPoints) || rawMaxPoints < 2) {
+      throw new Error("maxPoints must be at least 2");
+    }
+    const maxPoints = Math.min(PLATFORM_HISTORY_MAX_POINTS, Math.floor(rawMaxPoints));
+    const history = await store.listPlatformTrackPoints(streamId, { fromMs, toMs, maxPoints });
+    const points = history.points;
+    const geometry = points.length >= 2
+      ? { type: "LineString", coordinates: points.map((point) => [point.lon, point.lat]) }
+      : null;
+    res.set("Cache-Control", "no-store");
+    res.type("application/geo+json").json({
+      type: "Feature",
+      properties: {
+        streamId,
+        sampleSource: "last-platform-position-per-completed-hls-segment",
+        fromMs,
+        toMs,
+        pointCount: points.length,
+        sourcePointCount: history.sourcePointCount,
+        deduplicatedPointCount: history.deduplicatedPointCount,
+        reduced: history.reduced,
+        timesMs: points.map((point) => point.tMs)
+      },
+      geometry
+    });
+  } catch (error) {
+    log.warn("platform_history_geojson_error", { streamId: req.params.streamId, error: serializeError(error) });
     res.status(400).json({ ok: false, error: String(error?.message || error) });
   }
 });

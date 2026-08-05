@@ -35,6 +35,9 @@ const INITIAL_PLAYBACK_VIEW = { zoom: 1, panX: 0.5, panY: 0.5 };
 const IMAGE_ADJUSTMENT_MIN = 50;
 const IMAGE_ADJUSTMENT_MAX = 150;
 const DEFAULT_IMAGE_ADJUSTMENT = 100;
+const PLATFORM_HISTORY_MAX_POINTS = 5000;
+const LIVE_PLATFORM_HISTORY_WINDOW_MS = 15 * 60 * 1000;
+const PLATFORM_HISTORY_REFRESH_MS = 5000;
 
 function clampPlaybackZoom(value) {
   const rounded = Math.round(Number(value) * 100) / 100;
@@ -287,6 +290,12 @@ function App() {
   });
   const [status, setStatus] = useState('Ready. Start a source to begin playback. Telemetry is from segmented WebVTT.');
   const [overlayData, setOverlayData] = useState(null);
+  const [dvrPlatformHistory, setDvrPlatformHistory] = useState(null);
+  const [livePlatformHistory, setLivePlatformHistory] = useState(null);
+  const [dvrPlatformHistoryEnabled, setDvrPlatformHistoryEnabled] = useState(false);
+  const [livePlatformHistoryEnabled, setLivePlatformHistoryEnabled] = useState(false);
+  const [dvrPlatformHistoryLoading, setDvrPlatformHistoryLoading] = useState(false);
+  const [livePlatformHistoryLoading, setLivePlatformHistoryLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
   const [liveTelemetryTab, setLiveTelemetryTab] = useState('map');
@@ -405,6 +414,8 @@ function App() {
   const streamIdRef = useRef(streamId);
   const streamRuntimeRef = useRef(streamRuntime);
   const serverOnlineRef = useRef(serverOnline);
+  const dvrPlatformHistoryUntilMsRef = useRef(null);
+  const livePlatformHistoryUntilMsRef = useRef(null);
   const offlinePollTimerRef = useRef(null);
   const offlinePollTokenRef = useRef(0);
 
@@ -454,6 +465,12 @@ function App() {
     setServerOnline(false);
     setStatus(`Server offline. Retrying... (${String(error?.message || error || 'network error')})`);
     setOverlayData(null);
+    setDvrPlatformHistory(null);
+    setLivePlatformHistory(null);
+    setDvrPlatformHistoryEnabled(false);
+    setLivePlatformHistoryEnabled(false);
+    setDvrPlatformHistoryLoading(false);
+    setLivePlatformHistoryLoading(false);
     setSourcesList([]);
     setAutoAttachOnDvr(false);
     setInputProbe((prev) => ({ ...prev, phase: 'idle', error: null }));
@@ -1242,6 +1259,11 @@ function App() {
     if (!canStartSource) return;
     startRequestInFlightRef.current = true;
     setStartRequestInFlight(true);
+    setOverlayData(null);
+    setDvrPlatformHistory(null);
+    setLivePlatformHistory(null);
+    setDvrPlatformHistoryEnabled(false);
+    setLivePlatformHistoryEnabled(false);
     setFileStartProgress(null);
     setHlsMediaLoaded(false);
     hlsQualityRef.current = 'auto';
@@ -1340,6 +1362,12 @@ function App() {
     if (!canStopSource) return;
     setStopRequestInFlight(true);
     setOverlayData(null);
+    setDvrPlatformHistory(null);
+    setLivePlatformHistory(null);
+    setDvrPlatformHistoryEnabled(false);
+    setLivePlatformHistoryEnabled(false);
+    setDvrPlatformHistoryLoading(false);
+    setLivePlatformHistoryLoading(false);
     clipRangeStreamRef.current = null;
     setClipStartSeconds(0);
     setClipEndSeconds(0);
@@ -1581,6 +1609,32 @@ function App() {
     }
     const isoMs = Date.parse(String(telemetry?.timestampIso || ''));
     return Number.isFinite(isoMs) && isoMs >= 0 ? isoMs : null;
+  };
+
+  const dvrPlatformHistoryUntilMs = overlayData?.mode === 'dvr-vtt'
+    ? klvMissionTimeMs(overlayData)
+    : null;
+  const livePlatformHistoryUntilMs = overlayData?.mode === 'live-ws'
+    ? klvMissionTimeMs(overlayData)
+    : null;
+  const canLoadDvrPlatformHistory = serverOnline && hasDvrKlvTelemetry(streamRuntime);
+  const canLoadLivePlatformHistory = serverOnline && !currentSourceIsFile && hasActiveKlvFlow(streamRuntime);
+  const dvrPlatformHistoryTimeAvailable = Number.isFinite(dvrPlatformHistoryUntilMs);
+  const livePlatformHistoryTimeAvailable = Number.isFinite(livePlatformHistoryUntilMs);
+
+  /**
+   * Fetches the compact segment-sampled route, never the full decoded KLV
+   * collection. `fromMs`/`toMs` are mission timestamps from the active cue.
+   */
+  const fetchPlatformHistory = async ({ fromMs = null, toMs = null } = {}) => {
+    const query = new URLSearchParams({ maxPoints: String(PLATFORM_HISTORY_MAX_POINTS) });
+    if (Number.isFinite(fromMs)) query.set('fromMs', String(Math.round(fromMs)));
+    if (Number.isFinite(toMs)) query.set('toMs', String(Math.round(toMs)));
+    const result = await api(`/streams/${encodeURIComponent(streamId)}/klv/platform-history.geojson?${query.toString()}`);
+    if (result?.type !== 'Feature') {
+      throw new Error(result?.error || 'Platform history response was not GeoJSON');
+    }
+    return result;
   };
 
   const openNewTargetLogEntry = (mapPosition = null) => {
@@ -3144,16 +3198,105 @@ function App() {
     setOverlayData(null);
     if (activeTab !== 'live-webrtc') {
       disconnectWs();
+      setLivePlatformHistory(null);
+      setLivePlatformHistoryLoading(false);
     }
   }, [activeTab]);
 
   useEffect(() => {
     streamIdRef.current = streamId;
+    setDvrPlatformHistory(null);
+    setLivePlatformHistory(null);
+    setDvrPlatformHistoryEnabled(false);
+    setLivePlatformHistoryEnabled(false);
+    setDvrPlatformHistoryLoading(false);
+    setLivePlatformHistoryLoading(false);
   }, [streamId]);
 
   useEffect(() => {
     serverOnlineRef.current = serverOnline;
   }, [serverOnline]);
+
+  useEffect(() => {
+    dvrPlatformHistoryUntilMsRef.current = dvrPlatformHistoryUntilMs;
+  }, [dvrPlatformHistoryUntilMs]);
+
+  useEffect(() => {
+    livePlatformHistoryUntilMsRef.current = livePlatformHistoryUntilMs;
+  }, [livePlatformHistoryUntilMs]);
+
+  useEffect(() => {
+    // File playback can cache its full compact route and trim it locally to
+    // the cue. Time-shifted live HLS instead requests the current rolling
+    // window, just like the WebRTC view, so old DVR history is never loaded.
+    const needsRollingWindow = !currentSourceIsFile;
+    if (!dvrPlatformHistoryEnabled || activeTab !== 'dvr' || !canLoadDvrPlatformHistory
+      || (needsRollingWindow && !dvrPlatformHistoryTimeAvailable)) {
+      if (!dvrPlatformHistoryEnabled) setDvrPlatformHistory(null);
+      setDvrPlatformHistoryLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      const toMs = dvrPlatformHistoryUntilMsRef.current;
+      if (needsRollingWindow && !Number.isFinite(toMs)) return;
+      setDvrPlatformHistoryLoading(true);
+      try {
+        const history = needsRollingWindow
+          ? await fetchPlatformHistory({ fromMs: toMs - LIVE_PLATFORM_HISTORY_WINDOW_MS, toMs })
+          : await fetchPlatformHistory();
+        if (!cancelled) setDvrPlatformHistory(history);
+      } catch {
+        if (!cancelled) setDvrPlatformHistory(null);
+      } finally {
+        if (!cancelled) setDvrPlatformHistoryLoading(false);
+      }
+    };
+    void refresh();
+    // A file can be viewed during processing. Refresh it until its finite HLS
+    // playlist and KLV sidecars finish; live HLS always refreshes its window.
+    const isStillProcessing = ['starting', 'running', 'finalizing'].includes(streamRuntime?.state);
+    const timer = (needsRollingWindow || isStillProcessing)
+      ? setInterval(() => { void refresh(); }, PLATFORM_HISTORY_REFRESH_MS)
+      : null;
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [dvrPlatformHistoryEnabled, activeTab, canLoadDvrPlatformHistory, currentSourceIsFile, dvrPlatformHistoryTimeAvailable, streamId, streamRuntime?.state]);
+
+  useEffect(() => {
+    if (!livePlatformHistoryEnabled || activeTab !== 'live-webrtc' || !canLoadLivePlatformHistory || !livePlatformHistoryTimeAvailable) {
+      if (!livePlatformHistoryEnabled) setLivePlatformHistory(null);
+      setLivePlatformHistoryLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      const toMs = livePlatformHistoryUntilMsRef.current;
+      if (!Number.isFinite(toMs)) return;
+      setLivePlatformHistoryLoading(true);
+      try {
+        const history = await fetchPlatformHistory({
+          fromMs: toMs - LIVE_PLATFORM_HISTORY_WINDOW_MS,
+          toMs
+        });
+        if (!cancelled) setLivePlatformHistory(history);
+      } catch {
+        if (!cancelled) setLivePlatformHistory(null);
+      } finally {
+        if (!cancelled) setLivePlatformHistoryLoading(false);
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, PLATFORM_HISTORY_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [livePlatformHistoryEnabled, activeTab, canLoadLivePlatformHistory, livePlatformHistoryTimeAvailable, streamId]);
 
   useEffect(() => {
     if (sourceType !== 'local-file' || !serverOnline) return;
@@ -3964,6 +4107,11 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
+                            platformHistory={Number.isFinite(dvrPlatformHistoryUntilMs) ? dvrPlatformHistory : null}
+                            platformHistoryUntilMs={dvrPlatformHistoryUntilMs}
+                            showPlatformHistory={dvrPlatformHistoryEnabled}
+                            onPlatformHistoryToggle={setDvrPlatformHistoryEnabled}
+                            platformHistoryLoading={dvrPlatformHistoryLoading}
                             onPositionSelect={openNewTargetLogEntry}
                             onPointerCoordinate={updateDvrMapPointerPosition}
                             targetLogEntries={targetLogEntries}
@@ -4083,6 +4231,11 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
+                            platformHistory={Number.isFinite(livePlatformHistoryUntilMs) ? livePlatformHistory : null}
+                            platformHistoryUntilMs={livePlatformHistoryUntilMs}
+                            showPlatformHistory={livePlatformHistoryEnabled}
+                            onPlatformHistoryToggle={setLivePlatformHistoryEnabled}
+                            platformHistoryLoading={livePlatformHistoryLoading}
                             onPositionSelect={openNewTargetLogEntry}
                             onPointerCoordinate={updateLiveMapPointerPosition}
                             targetLogEntries={targetLogEntries}
