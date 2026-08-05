@@ -2412,9 +2412,20 @@ function App() {
   };
 
   const formatPlayerTime = (seconds) => {
-    const n = Number(seconds);
-    if (!Number.isFinite(n)) return 'n/a';
-    return `${n.toFixed(2)}s`;
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value < 0) return 'n/a';
+
+    // Keep sub-minute clip boundaries precise, but use compact clock notation
+    // once the value is long enough for seconds alone to be hard to scan.
+    if (value < 60) return `${value.toFixed(2)}s`;
+
+    const wholeSeconds = Math.floor(value);
+    const hours = Math.floor(wholeSeconds / 3600);
+    const minutes = Math.floor((wholeSeconds % 3600) / 60);
+    const remainingSeconds = wholeSeconds % 60;
+    return hours
+      ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+      : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
   };
 
   const formatMissionTime = (milliseconds) => {
