@@ -99,7 +99,8 @@ const ffmpegArgs = [
 console.log(`FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
 
 const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
-  stdio: ['pipe', 'inherit', 'inherit']
+  // Preserve FFmpeg's interactive overwrite prompt on the invoking terminal.
+  stdio: ['inherit', 'inherit', 'inherit']
 });
 
 ffmpeg.on('close', (code) => {
