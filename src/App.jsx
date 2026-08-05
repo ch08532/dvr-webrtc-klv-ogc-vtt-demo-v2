@@ -2418,6 +2418,40 @@ function App() {
     return { color: 'gray', label: 'No KLV found' };
   };
 
+  const transportIntegrityStatus = (source) => {
+    const integrity = source?.integrity;
+    if (!integrity) return null;
+    if (integrity.status === 'pending' || integrity.status === 'scanning') {
+      return {
+        color: 'yellow',
+        label: 'Scanning TS integrity',
+        detail: 'Full-file scan running in the background; media packaging continues.'
+      };
+    }
+    if (integrity.status === 'clean') {
+      return {
+        color: 'green',
+        label: 'TS integrity: clean',
+        detail: 'FFprobe scanned the full transport stream without corruption warnings.'
+      };
+    }
+    if (integrity.status === 'corrupt') {
+      const findingText = Array.isArray(integrity.findings)
+        ? integrity.findings.map((finding) => finding?.message).filter(Boolean).join(' ')
+        : '';
+      return {
+        color: 'red',
+        label: 'TS corruption detected',
+        detail: `${findingText ? `${findingText} ` : ''}Valid media will be salvaged; final KLV may be incomplete.`
+      };
+    }
+    return {
+      color: 'yellow',
+      label: 'TS integrity unavailable',
+      detail: integrity.error || 'The full-file integrity scan could not complete.'
+    };
+  };
+
   const getCurrentHlsPlaylistInfo = (player = null) => {
     const subtitleUriForSegmentUri = (segmentUri) => {
       const raw = String(segmentUri || '').trim();
@@ -3545,6 +3579,17 @@ function App() {
                     })()}
                     <Text size="xs" c="dimmed">Based on the uploaded file&apos;s stream probe.</Text>
                   </Group>
+                  {(() => {
+                    const integrityStatus = transportIntegrityStatus(streamRuntime);
+                    return integrityStatus ? (
+                      <Group gap="xs" align="flex-start">
+                        <Badge color={integrityStatus.color} variant="light">{integrityStatus.label}</Badge>
+                        <Text size="xs" c={integrityStatus.color === 'red' ? 'red' : 'dimmed'} style={{ flex: 1 }}>
+                          {integrityStatus.detail}
+                        </Text>
+                      </Group>
+                    ) : null;
+                  })()}
                   <Group justify="space-between">
                     <Text size="xs">Conversion ({streamRuntime?.state || 'preparing'}): {conversionProgress(streamRuntime) != null ? `${conversionProgress(streamRuntime).toFixed(1)}%` : 'Preparing...'}</Text>
                     <Text size="xs" c="dimmed">
@@ -3600,6 +3645,15 @@ function App() {
                             {(() => {
                               const klvStatus = klvProbeStatus(s);
                               return <Badge color={klvStatus.color} variant="light" w="fit-content">{klvStatus.label}</Badge>;
+                            })()}
+                            {(() => {
+                              const integrityStatus = transportIntegrityStatus(s);
+                              return integrityStatus ? (
+                                <Stack gap={2}>
+                                  <Badge color={integrityStatus.color} variant="light" w="fit-content">{integrityStatus.label}</Badge>
+                                  <Text size="xs" c={integrityStatus.color === 'red' ? 'red' : 'dimmed'}>{integrityStatus.detail}</Text>
+                                </Stack>
+                              ) : null;
                             })()}
                             <Text size="xs" c="dimmed">
                               conversion: {conversionProgress(s) != null ? `${conversionProgress(s).toFixed(1)}%` : 'preparing'} · {formatConversionTime(s.processedSeconds)} / {formatConversionTime(s.durationSeconds)}

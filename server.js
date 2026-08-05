@@ -34,6 +34,8 @@ const WEBRTC_ANNOUNCED_IP = process.env.WEBRTC_ANNOUNCED_IP || "127.0.0.1";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
 const INPUT_PROBE_TIMEOUT_MS = Math.max(1000, Number(process.env.INPUT_PROBE_TIMEOUT_MS || 7000));
 const LIVE_DIMENSION_PROBE_TIMEOUT_MS = Math.max(INPUT_PROBE_TIMEOUT_MS, Number(process.env.LIVE_DIMENSION_PROBE_TIMEOUT_MS || 15000));
+const FILE_INTEGRITY_SCAN_TIMEOUT_MS = Math.max(10_000, Number(process.env.FILE_INTEGRITY_SCAN_TIMEOUT_MS || (10 * 60 * 1000)));
+const FILE_INTEGRITY_SCAN_STDERR_LIMIT = 64 * 1024;
 const SHUTDOWN_FORCE_EXIT_MS = Math.max(1000, Number(process.env.SHUTDOWN_FORCE_EXIT_MS || 10000));
 // Set only by scripts/service-manager.mjs.  Keeping this unset preserves the
 // normal direct-start behaviour while preventing unauthenticated HTTP shutdowns.
@@ -67,9 +69,12 @@ const CLIP_MAX_DURATION_SECONDS = Number(process.env.MAX_CLIP_DURATION_SECONDS |
 const SOURCE_POSTER_WIDTH = Math.max(96, Math.min(320, Number(process.env.SOURCE_POSTER_WIDTH || 160)));
 const SOURCE_POSTER_TIMEOUT_MS = Math.max(3000, Number(process.env.SOURCE_POSTER_TIMEOUT_MS || 15000));
 const AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS = Math.max(3000, Number(process.env.AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS || 30000));
-const CLIP_THUMBNAIL_COUNT = 12;
+// A TS seek may require substantial demux work when no index is available.
+// Keep the established 12-frame filmstrip by default, while allowing an
+// operator to reduce it for constrained environments.
+const CLIP_THUMBNAIL_COUNT = Math.max(4, Math.min(12, Number(process.env.CLIP_THUMBNAIL_COUNT || 12)));
 const CLIP_THUMBNAIL_WIDTH = 160;
-const CLIP_THUMBNAIL_TIMEOUT_MS = Math.max(3000, Number(process.env.CLIP_THUMBNAIL_TIMEOUT_MS || 30000));
+const CLIP_THUMBNAIL_TIMEOUT_MS = Math.max(5000, Number(process.env.CLIP_THUMBNAIL_TIMEOUT_MS || 45000));
 const KLV_FINALIZE_MIN_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_MIN_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE_MS_PER_SEGMENT || 500));
 const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
@@ -142,6 +147,29 @@ log.info("startup_database_purge_complete", startupDatabasePurge);
  */
 const sources = new Map();
 const sourceStates = new Map();
+
+const TRANSPORT_INTEGRITY_FINDINGS = [
+  {
+    code: "transport_sync_lost",
+    pattern: /max resync size reached, could not find sync byte/i,
+    message: "Transport-stream sync was lost."
+  },
+  {
+    code: "pes_size_mismatch",
+    pattern: /PES packet size mismatch/i,
+    message: "A transport PES packet has an invalid size."
+  },
+  {
+    code: "corrupt_packet",
+    pattern: /(?:packet corrupt|corrupt input packet)/i,
+    message: "One or more corrupt transport packets were found."
+  },
+  {
+    code: "continuity_error",
+    pattern: /continuity check failed/i,
+    message: "A transport-stream continuity error was found."
+  }
+];
 
 /** Tests whether a spawned child process is still active. */
 function isProcessRunning(proc) {
@@ -533,6 +561,92 @@ async function probeInputWithFfprobe(inputUrl, {
   });
 }
 
+/** Returns true when a file can be scanned as an MPEG transport stream. */
+function isTransportStreamFile(inputUrl) {
+  return /\.(?:ts|m2ts)$/i.test(String(inputUrl || ""));
+}
+
+/** Converts FFprobe transport warnings into concise, stable UI findings. */
+function summarizeTransportIntegrityFindings(stderr) {
+  const text = String(stderr || "");
+  return TRANSPORT_INTEGRITY_FINDINGS
+    .filter((finding) => finding.pattern.test(text))
+    .map(({ code, message }) => ({ code, message }));
+}
+
+/**
+ * Reads every transport packet without decoding or writing media. FFprobe may
+ * exit successfully after recovering from damaged TS packets, so stderr is
+ * deliberately classified alongside the process exit status.
+ */
+function scanTransportStreamIntegrity(inputUrl) {
+  return new Promise((resolve) => {
+    const startedAtMs = Date.now();
+    const args = [
+      "-hide_banner",
+      "-v", "warning",
+      "-count_packets",
+      "-show_entries", "stream=index,codec_type,codec_name,nb_read_packets",
+      "-of", "json",
+      inputUrl
+    ];
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        scanner: "ffprobe-count-packets",
+        scannedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAtMs,
+        ...result
+      });
+    };
+
+    const proc = spawn(FFPROBE_BIN, args, { stdio: ["ignore", "ignore", "pipe"] });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill("SIGKILL"); } catch {}
+    }, FILE_INTEGRITY_SCAN_TIMEOUT_MS);
+
+    proc.stderr.on("data", (chunk) => {
+      if (stderr.length >= FILE_INTEGRITY_SCAN_STDERR_LIMIT) return;
+      stderr += chunk.toString().slice(0, FILE_INTEGRITY_SCAN_STDERR_LIMIT - stderr.length);
+    });
+    proc.on("error", (error) => {
+      finish({
+        status: "unavailable",
+        findings: [],
+        error: String(error?.message || error)
+      });
+    });
+    proc.on("close", (code, signal) => {
+      if (timedOut) {
+        finish({
+          status: "unavailable",
+          findings: [],
+          error: `scan timed out after ${FILE_INTEGRITY_SCAN_TIMEOUT_MS}ms`
+        });
+        return;
+      }
+
+      const findings = summarizeTransportIntegrityFindings(stderr);
+      if (code !== 0) {
+        finish({
+          status: "unavailable",
+          findings,
+          error: stderr.trim() || `ffprobe exited (code=${String(code)}, signal=${String(signal)})`
+        });
+        return;
+      }
+      finish({ status: findings.length ? "corrupt" : "clean", findings, error: null });
+    });
+  });
+}
+
 /** Returns whether a probe has a usable source frame size for HLS ladder selection. */
 function hasVideoDimensions(probe) {
   return Number.isInteger(probe?.video?.width)
@@ -730,6 +844,48 @@ function setSourceState(streamId, patch) {
   return next;
 }
 
+/** Runs a full TS integrity scan without delaying media packaging. */
+function queueTransportIntegrityScan({ streamId, inputUrl, requestId }) {
+  setSourceState(streamId, {
+    integrity: {
+      status: "scanning",
+      scanner: "ffprobe-count-packets",
+      findings: [],
+      error: null,
+      startedAt: new Date().toISOString()
+    }
+  });
+
+  void scanTransportStreamIntegrity(inputUrl)
+    .then((integrity) => {
+      const tracked = sourceStates.get(streamId);
+      // A newer start may have replaced this source while its scan was running.
+      if (!tracked || tracked.inputUrl !== inputUrl) return;
+      setSourceState(streamId, { integrity });
+      log[integrity.status === "corrupt" ? "warn" : "info"]("file_integrity_scan_complete", {
+        requestId,
+        streamId,
+        status: integrity.status,
+        findings: integrity.findings.map((finding) => finding.code),
+        durationMs: integrity.durationMs,
+        error: integrity.error
+      });
+    })
+    .catch((error) => {
+      const tracked = sourceStates.get(streamId);
+      if (!tracked || tracked.inputUrl !== inputUrl) return;
+      const integrity = {
+        status: "unavailable",
+        scanner: "ffprobe-count-packets",
+        findings: [],
+        error: String(error?.message || error),
+        scannedAt: new Date().toISOString()
+      };
+      setSourceState(streamId, { integrity });
+      log.warn("file_integrity_scan_error", { requestId, streamId, error: serializeError(error) });
+    });
+}
+
 /** Returns the current public state object for a source. */
 function currentSourceState(streamId) {
   const tracked = sourceStates.get(streamId);
@@ -796,6 +952,7 @@ function getSourceRuntime(streamId) {
       copyNativeTopRung: tracked?.copyNativeTopRung === true,
       klvProbe: tracked?.klvProbe || null,
       sourceVideo: tracked?.sourceVideo || null,
+      integrity: tracked?.integrity || null,
       stage: tracked?.stage || null,
       durationSeconds: tracked?.durationSeconds ?? null,
       processedSeconds: tracked?.processedSeconds ?? null,
@@ -847,6 +1004,7 @@ function getSourceRuntime(streamId) {
     copyNativeTopRung: source.copyNativeTopRung === true,
     klvProbe: source.klvProbe || tracked?.klvProbe || null,
     sourceVideo: source.sourceVideo || tracked?.sourceVideo || null,
+    integrity: tracked?.integrity || null,
     stage: tracked?.stage || null,
     durationSeconds: tracked?.durationSeconds ?? null,
     processedSeconds: tracked?.processedSeconds ?? null,
@@ -1436,8 +1594,16 @@ async function getClipThumbnailFrames(streamId, source, durationSeconds) {
         "-loglevel", "error",
         "-y",
         // Each input seeks independently, so the overview stays fast for a
-        // multi-hour TS rather than decoding the entire carrier.
-        ...times.flatMap((timeSeconds) => ["-ss", String(timeSeconds), "-i", sourceInputPath]),
+        // multi-hour TS rather than decoding the entire carrier. Seek accuracy
+        // is retained so H.264 parameter sets are decoded before each still;
+        // malformed TS packets are discarded just as they are during file-source
+        // HLS packaging.
+        ...times.flatMap((timeSeconds) => [
+          "-ss", String(timeSeconds),
+          "-fflags", "+genpts+discardcorrupt",
+          "-err_detect", "ignore_err",
+          "-i", sourceInputPath
+        ]),
         "-filter_complex", `${filterInputs};${hstackInputs}hstack=inputs=${CLIP_THUMBNAIL_COUNT}[filmstrip]`,
         "-map", "[filmstrip]",
         "-frames:v", "1",
@@ -1800,6 +1966,9 @@ app.post("/sources", async (req, res) => {
       webRtcEncoderMode,
       klvProbe: sourceProbe?.klv || null,
       sourceVideo: sourceProbe?.video || null,
+      integrity: sourceType === "file" && isTransportStreamFile(resolvedInputUrl)
+        ? { status: "pending", scanner: "ffprobe-count-packets", findings: [], error: null }
+        : null,
       durationSeconds: fileDurationSeconds,
       processedSeconds: sourceType === "file" ? 0 : null,
       progressPercent: sourceType === "file" ? 0 : null,
@@ -2096,6 +2265,10 @@ app.post("/sources", async (req, res) => {
       ingestRunning: sourceType !== "file",
       lastError: null
     });
+
+    if (sourceType === "file" && isTransportStreamFile(resolvedInputUrl)) {
+      queueTransportIntegrityScan({ streamId, inputUrl: resolvedInputUrl, requestId: req.requestId });
+    }
 
     if (sourceType === "file" && hls.proc?.exitCode === 0) {
       void finalizeFileSource();
