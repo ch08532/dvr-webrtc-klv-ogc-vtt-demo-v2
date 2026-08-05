@@ -35,6 +35,7 @@ const INITIAL_PLAYBACK_VIEW = { zoom: 1, panX: 0.5, panY: 0.5 };
 const IMAGE_ADJUSTMENT_MIN = 50;
 const IMAGE_ADJUSTMENT_MAX = 150;
 const DEFAULT_IMAGE_ADJUSTMENT = 100;
+const MIN_CLIP_DURATION_SECONDS = 0.25;
 const PLATFORM_HISTORY_MAX_POINTS = 5000;
 const LIVE_PLATFORM_HISTORY_WINDOW_MS = 15 * 60 * 1000;
 const PLATFORM_HISTORY_REFRESH_MS = 5000;
@@ -401,6 +402,7 @@ function App() {
   const hlsPlaybackRateRef = useRef(1);
   const appliedHlsQualityRef = useRef({ player: null, quality: null, representations: null });
   const clipRangeStreamRef = useRef(null);
+  const clipAvailableEndRef = useRef(null);
   const clipDragBoundaryRef = useRef(null);
   const clipTrimShellRef = useRef(null);
   const webrtcRetryTimerRef = useRef(null);
@@ -583,6 +585,21 @@ function App() {
   const clipTimelineEndSeconds = Number.isFinite(sourceDurationSeconds) && sourceDurationSeconds > 0
     ? sourceDurationSeconds
     : null;
+  // While packaging, use the server's completed browser-HLS boundary rather
+  // than FFmpeg progress. The full source duration remains the visual timeline
+  // so the unavailable future filmstrip can be clearly dimmed.
+  const reportedClipAvailableEndSeconds = Number(streamRuntime?.availableClipEndSeconds);
+  const clipAvailableEndSeconds = currentSourceIsFile && Number.isFinite(clipTimelineEndSeconds)
+    ? streamRuntime?.state === 'ready'
+      ? clipTimelineEndSeconds
+      : Number.isFinite(reportedClipAvailableEndSeconds)
+        ? Math.max(0, Math.min(clipTimelineEndSeconds, reportedClipAvailableEndSeconds))
+        : 0
+    : null;
+  const clipAvailabilityPercent = Number.isFinite(clipTimelineEndSeconds) && clipTimelineEndSeconds > 0
+    && Number.isFinite(clipAvailableEndSeconds)
+    ? Math.max(0, Math.min(100, (clipAvailableEndSeconds / clipTimelineEndSeconds) * 100))
+    : 0;
   const clipDurationSeconds = Math.max(0, clipEndSeconds - clipStartSeconds);
   const liveDvrWindowSeconds = !currentSourceIsFile
     && Number.isFinite(dvrDiag.seekStartSec)
@@ -625,7 +642,8 @@ function App() {
     currentSourceIsFile
     && hlsMediaLoaded
     && Number.isFinite(clipTimelineEndSeconds)
-    && clipTimelineEndSeconds >= 0.25
+    && Number.isFinite(clipAvailableEndSeconds)
+    && clipAvailableEndSeconds >= MIN_CLIP_DURATION_SECONDS
   );
   const clipExportReady = clipWidgetReady && streamRuntime?.state === 'ready';
   const liveVideoStreaming = liveStatus === 'Playing';
@@ -2301,10 +2319,10 @@ function App() {
   };
 
   const updateClipBoundary = (boundary, rawValue) => {
-    const timelineEnd = clipTimelineEndSeconds;
+    const timelineEnd = clipAvailableEndSeconds;
     const value = Number(rawValue);
     if (!Number.isFinite(timelineEnd) || timelineEnd <= 0 || !Number.isFinite(value)) return;
-    const minDuration = 0.25;
+    const minDuration = MIN_CLIP_DURATION_SECONDS;
     if (boundary === 'start') {
       const next = Math.max(0, Math.min(value, clipEndSeconds - minDuration));
       setClipStartSeconds(next);
@@ -3317,19 +3335,45 @@ function App() {
   }, [streamRuntime, activeTab]);
 
   useEffect(() => {
-    // A server restart or a new run can reuse stream1. Initialize as soon as
-    // the file duration is known so trimming can begin during HLS packaging;
-    // clip creation itself still waits until the source is ready.
-    if (!currentSourceIsFile || !Number.isFinite(clipTimelineEndSeconds) || clipTimelineEndSeconds <= 0) {
+    // A new file begins with no completed segment. Initialize only after the
+    // backend has verified a playable HLS boundary, never at full source time.
+    if (!currentSourceIsFile || !Number.isFinite(clipTimelineEndSeconds) || !Number.isFinite(clipAvailableEndSeconds)
+      || clipAvailableEndSeconds < MIN_CLIP_DURATION_SECONDS) {
       clipRangeStreamRef.current = null;
+      clipAvailableEndRef.current = null;
       return;
     }
     if (clipRangeStreamRef.current === streamId) return;
     clipRangeStreamRef.current = streamId;
     setClipStartSeconds(0);
-    setClipEndSeconds(clipTimelineEndSeconds);
+    setClipEndSeconds(clipAvailableEndSeconds);
     setClipResult(null);
-  }, [currentSourceIsFile, streamId, clipTimelineEndSeconds]);
+  }, [currentSourceIsFile, streamId, clipTimelineEndSeconds, clipAvailableEndSeconds]);
+
+  useEffect(() => {
+    // Segment availability normally advances, but clamping also keeps handles
+    // safe if a source is reset or a transient playlist read reports less data.
+    if (!Number.isFinite(clipAvailableEndSeconds) || clipAvailableEndSeconds < MIN_CLIP_DURATION_SECONDS) return;
+    const previousAvailableEnd = clipAvailableEndRef.current;
+    if (!Number.isFinite(previousAvailableEnd)) {
+      // The range-initialization effect in this render owns the first end
+      // value. Record its availability without racing that state update.
+      clipAvailableEndRef.current = clipAvailableEndSeconds;
+      return;
+    }
+    const endFollowsAvailableEdge = Number.isFinite(previousAvailableEnd)
+      && Math.abs(clipEndSeconds - previousAvailableEnd) < 0.01;
+    clipAvailableEndRef.current = clipAvailableEndSeconds;
+    const maximumStart = Math.max(0, clipAvailableEndSeconds - MIN_CLIP_DURATION_SECONDS);
+    setClipStartSeconds((previous) => Math.min(Math.max(0, previous), maximumStart));
+    setClipEndSeconds((previous) => Math.min(
+      clipAvailableEndSeconds,
+      Math.max(
+        clipStartSeconds + MIN_CLIP_DURATION_SECONDS,
+        endFollowsAvailableEdge ? clipAvailableEndSeconds : previous
+      )
+    ));
+  }, [clipAvailableEndSeconds, clipStartSeconds, clipEndSeconds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3969,10 +4013,15 @@ function App() {
                            <Group justify="space-between" align="center" mb={4}>
                              <div>
                                <Text size="sm" fw={700}>Create video clip</Text>
-                              <Text size="xs" c="dimmed">Drag either edge to preview a point in the video. Exports stream-copy the uploaded source and may begin at a preceding keyframe.</Text>
+                              <Text size="xs" c="dimmed">Drag either edge to preview a playable point. Exports stream-copy the uploaded source and may begin at a preceding keyframe.</Text>
                              </div>
                              <Group gap="xs">
                                {clipThumbnailLoading ? <Badge color="blue" variant="light">Building thumbnails…</Badge> : null}
+                               {streamRuntime?.state !== 'ready' ? (
+                                 <Badge color={clipWidgetReady ? 'yellow' : 'gray'} variant="light">
+                                   {clipWidgetReady ? `Playable through ${formatPlayerTime(clipAvailableEndSeconds)}` : 'Waiting for first segment…'}
+                                 </Badge>
+                               ) : null}
                                <Badge color={streamRuntime?.klvProbe?.available ? 'teal' : 'gray'} variant="light">
                                  {streamRuntime?.klvProbe?.available ? 'KLV preserved' : 'No KLV detected'}
                                </Badge>
@@ -3986,16 +4035,23 @@ function App() {
                              onPointerUp={endClipPointerDrag}
                              onPointerCancel={endClipPointerDrag}
                             >
-                              <div className={`clip-filmstrip${clipThumbnailFrames.length ? ' has-thumbnails' : ''}`} aria-hidden="true">
+                             <div className={`clip-filmstrip${clipThumbnailFrames.length ? ' has-thumbnails' : ''}`} aria-hidden="true">
                                {clipThumbnailFrames.length
                                  ? clipThumbnailFrames.map((thumbnail, index) => <img key={thumbnail.url || index} src={thumbnail.url} alt="" />)
                                  : Array.from({ length: 12 }, (_, index) => <span key={index} />)}
                              </div>
+                             {clipAvailabilityPercent < 100 ? (
+                               <div
+                                 className="clip-unavailable-tail"
+                                 style={{ left: `${clipAvailabilityPercent}%` }}
+                                 aria-hidden="true"
+                               />
+                             ) : null}
                              {clipWidgetReady ? (
                                <>
                                  {targetLogEntries.filter((entry) => {
                                    const seconds = targetLogVideoTimeSeconds(entry);
-                                   return Number.isFinite(seconds) && seconds >= 0 && seconds <= clipTimelineEndSeconds;
+                                   return Number.isFinite(seconds) && seconds >= 0 && seconds <= clipAvailableEndSeconds;
                                  }).map((entry, index) => {
                                    const left = (targetLogVideoTimeSeconds(entry) / clipTimelineEndSeconds) * 100;
                                    const positionText = entry.position
@@ -4040,6 +4096,7 @@ function App() {
                              <span><b>Start</b> {formatPlayerTime(clipStartSeconds)}</span>
                              <span><b>Length</b> {formatPlayerTime(clipDurationSeconds)}</span>
                              <span><b>End</b> {formatPlayerTime(clipEndSeconds)}</span>
+                             {streamRuntime?.state !== 'ready' ? <span><b>Playable</b> {formatPlayerTime(clipAvailableEndSeconds)}</span> : null}
                            </Group>
                            <Group mt="xs" gap="xs" wrap="wrap">
                              <Button size="xs" variant="default" onClick={() => setClipBoundaryAtPlayhead('start')} disabled={!clipWidgetReady || clipInFlight}>Set start at playhead</Button>
@@ -4049,7 +4106,7 @@ function App() {
                              </Button>
                            </Group>
                            {!clipExportReady ? (
-                             <Text size="xs" c="yellow" mt="xs">You can set clip boundaries now. Download becomes available when file packaging completes.</Text>
+                             <Text size="xs" c="yellow" mt="xs">Future source time is grayed out. Clip handles cannot move past the last completed HLS segment; download becomes available when file packaging completes.</Text>
                            ) : null}
                            <Text size="xs" c="dimmed" mt="xs">
                              Downloads directly from the uploaded source as MPEG-TS with copied video, audio, and KLV. Starts may move to a preceding keyframe; live streams cannot be clipped.

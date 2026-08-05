@@ -39,6 +39,7 @@ The browser does not render KLV directly from the media container. Instead, it r
 | --- | --- |
 | `server.js` | Express/HTTP entry point; source lifecycle; uploads; HLS, KLV, and SFU orchestration; clips; posters; WebSocket; health/runtime endpoints; graceful shutdown. |
 | `src/hls_recorder.js` | Starts FFmpeg for browser HLS output and the private KLV carrier HLS output. Reports file packaging progress. |
+| `src/hls_playlist_availability.js` | Reads completed browser-HLS playlist entries and media files to calculate the safe clip-preview boundary during file packaging. |
 | `src/klv/klv_stream_worker.js` | Dedicated child process that monitors carrier segments, parses KLV, stores telemetry, and creates ordered WebVTT sidecars. |
 | `src/klv/klv_ts_parser.js`, `ts_psi.js`, `st0601.js` | MPEG-TS program/data discovery, KLV extraction, and supported ST 0601 local-set decoding. |
 | `src/storage/sqlite_klv_store.js` | SQLite schema, WAL-mode writes, direct queries, and batched transactions. |
@@ -67,8 +68,9 @@ The top-level Node service owns the source map and public runtime state. The KLV
 2. The UI reports **Preparing file** while the server probes video, duration, and KLV streams.
 3. The server creates full-history VOD HLS, a KLV carrier playlist, WebVTT sidecars, and a poster image. File sources are HLS-only; they do not get a live WebRTC producer.
 4. FFmpeg progress updates source media time processed, percent, speed, and ETA.
-5. When FFmpeg reaches EOF, state changes to `finalizing`; the KLV worker drains remaining carrier segments and writes the final subtitle playlist.
-6. Once finalization succeeds, state is `ready`. Generated HLS/VTT artifacts remain playable even though the media worker processes have exited.
+5. During packaging, `availableClipEndSeconds` is derived from every browser HLS playback playlist: only `#EXTINF` entries whose media file exists and is non-empty count toward the playable end. For ABR, the earliest rendition boundary is used so no selected quality can seek past its published segment. This is intentionally distinct from FFmpeg's input-processing progress, which can lead the last published segment.
+6. When FFmpeg reaches EOF, state changes to `finalizing`; the KLV worker drains remaining carrier segments and writes the final subtitle playlist.
+7. Once finalization succeeds, state is `ready`. Generated HLS/VTT artifacts remain playable even though the media worker processes have exited.
 
 ### 4.3 State model
 
@@ -208,7 +210,7 @@ No terrain model is downloaded. There is no terrain correction, terrain target, 
 
 ## 8. File clips and KLV preservation
 
-The clip widget is available only for file sources because the server needs an authoritative, seekable original asset. It uses the packaged HLS duration for UI preview and exports from the existing private source-copy carrier playlist, never from browser playback renditions. This avoids a second full-file packaging pass or a delayed first export.
+The clip widget is available only for file sources because the server needs an authoritative, seekable original asset. It uses the packaged HLS duration for UI preview and exports from the existing private source-copy carrier playlist, never from browser playback renditions. This avoids a second full-file packaging pass or a delayed first export. While the source is packaging, the widget still displays the full authoritative duration and filmstrip, but it accepts trim positions only through `availableClipEndSeconds`, which is calculated from completed browser HLS segments on disk. The future filmstrip is dimmed, so a user cannot select or seek to a segment that has not been published. The end handle follows that growing boundary until a user deliberately moves it earlier; then their chosen end is preserved. Once the state becomes `ready`, the selectable boundary becomes the complete source duration.
 
 1. The user drags start/end grips or sets boundaries at the HLS playhead.
 2. The client previews the boundary by seeking HLS.

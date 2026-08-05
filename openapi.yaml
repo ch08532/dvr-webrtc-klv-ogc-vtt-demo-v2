@@ -528,6 +528,8 @@ components:
         sourceType: { type: string, enum: [stream, file] }
         running: { type: boolean }
         durationSeconds: { type: number, nullable: true }
+        availableClipEndSeconds: { type: number, nullable: true, description: For a file source still packaging, the exclusive end of fully published browser HLS segments. It equals the full duration once ready. }
+        availableClipSegmentCount: { type: integer, nullable: true, description: Number of fully published browser HLS segments used for the current clip boundary. }
         progressPercent: { type: number, nullable: true }
         processedSeconds: { type: number, nullable: true }
         lastError: { type: string, nullable: true }

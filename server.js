@@ -12,6 +12,7 @@ import { WebSocketServer } from "ws";
 
 import { startHlsRecorder, stopHlsRecorder } from "./src/hls_recorder.js";
 import { createHlsMasterPlaylist, createPassthroughHlsMasterPlaylist } from "./src/hls_ladder.js";
+import { readCompletedHlsPlaylistAvailability } from "./src/hls_playlist_availability.js";
 import { finalizeKlvStreamWorker, startKlvStreamWorker, stopKlvStreamWorker } from "./src/klv_stream_worker_client.js";
 import { startSfuWorkerClient } from "./src/sfu_worker_client.js";
 import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
@@ -916,6 +917,39 @@ async function purgeSourceArtifacts(streamId) {
   return { outDir, sdpFile, deletedEvents };
 }
 
+/**
+ * Returns the exact file-backed clip boundary that browser HLS can currently
+ * serve. Do not substitute FFmpeg's processed time: it can lead the last
+ * playlist entry while a segment is still being written.
+ */
+function getFileClipAvailability(streamId, source, tracked) {
+  if (source?.sourceType !== "file") {
+    return { availableClipEndSeconds: null, availableClipSegmentCount: null };
+  }
+  const durationSeconds = Number(tracked?.durationSeconds);
+  if (tracked?.state === "ready" && Number.isFinite(durationSeconds) && durationSeconds > 0) {
+    return { availableClipEndSeconds: durationSeconds, availableClipSegmentCount: null };
+  }
+  // An ABR viewer may be on any browser rendition. Use the earliest completed
+  // end across them so a High playlist cannot lag behind a clip marker that
+  // was calculated from Low. The private carrier playlist is not included.
+  const playlistNames = [...new Set((source.hlsRenditions || source.hls?.renditions || [])
+    .map((rendition) => String(rendition?.playlist || "").trim())
+    .filter(Boolean))];
+  if (!playlistNames.length) playlistNames.push("v0/index.m3u8");
+  const availabilities = playlistNames.map((playlistName) => readCompletedHlsPlaylistAvailability({
+    outDir: resolveStreamRecordingDir(streamId),
+    playlistName
+  }));
+  const availability = availabilities.reduce((earliest, candidate) => (
+    candidate.endSeconds < earliest.endSeconds ? candidate : earliest
+  ));
+  return {
+    availableClipEndSeconds: availability.endSeconds,
+    availableClipSegmentCount: availability.segmentCount
+  };
+}
+
 /** Clears one stream completely before a new Start Source workflow begins. */
 async function resetSourceArtifacts(streamId) {
   const outDir = resolveStreamRecordingDir(streamId);
@@ -956,6 +990,8 @@ function getSourceRuntime(streamId) {
       integrity: tracked?.integrity || null,
       stage: tracked?.stage || null,
       durationSeconds: tracked?.durationSeconds ?? null,
+      availableClipEndSeconds: tracked?.availableClipEndSeconds ?? null,
+      availableClipSegmentCount: tracked?.availableClipSegmentCount ?? null,
       processedSeconds: tracked?.processedSeconds ?? null,
       progressPercent: tracked?.progressPercent ?? null,
       encodeSpeed: tracked?.encodeSpeed ?? null,
@@ -988,6 +1024,7 @@ function getSourceRuntime(streamId) {
   } else if (state !== "starting" && state !== "stopping") {
     state = "error";
   }
+  const clipAvailability = getFileClipAvailability(streamId, source, tracked);
 
   return {
     streamId,
@@ -1008,6 +1045,7 @@ function getSourceRuntime(streamId) {
     integrity: tracked?.integrity || null,
     stage: tracked?.stage || null,
     durationSeconds: tracked?.durationSeconds ?? null,
+    ...clipAvailability,
     processedSeconds: tracked?.processedSeconds ?? null,
     progressPercent: tracked?.progressPercent ?? null,
     encodeSpeed: tracked?.encodeSpeed ?? null,
@@ -1971,6 +2009,8 @@ app.post("/sources", async (req, res) => {
         ? { status: "pending", scanner: "ffprobe-count-packets", findings: [], error: null }
         : null,
       durationSeconds: fileDurationSeconds,
+      availableClipEndSeconds: sourceType === "file" ? 0 : null,
+      availableClipSegmentCount: sourceType === "file" ? 0 : null,
       processedSeconds: sourceType === "file" ? 0 : null,
       progressPercent: sourceType === "file" ? 0 : null,
       encodeSpeed: null,
