@@ -8,8 +8,12 @@ lagHistogram.enable();
 let eluPrev = performance.eventLoopUtilization();
 let previousCpuTicks = null;
 const IO_NETWORK_REFRESH_MS = 1_500;
+const PROCESS_CPU_CACHE_MS = 1_000;
 let ioNetworkLastAttemptMs = 0;
 let ioNetworkRefreshPending = false;
+let processCpuCache = { expiresAt: 0, values: new Map() };
+let processCpuRefresh = null;
+const previousProcessCpuSamples = new Map();
 let ioNetworkMetrics = {
   disk: { readBytesPerSec: null, writeBytesPerSec: null, available: false },
   network: { receiveBytesPerSec: null, transmitBytesPerSec: null, available: false },
@@ -23,6 +27,16 @@ const WINDOWS_IO_NETWORK_SCRIPT = [
   "$sent = [double](($interfaces | Measure-Object -Property BytesSentPersec -Sum).Sum);",
   "[pscustomobject]@{ diskReadBytesPerSec = [double]$disk.DiskReadBytesPerSec; diskWriteBytesPerSec = [double]$disk.DiskWriteBytesPerSec; networkReceiveBytesPerSec = $received; networkTransmitBytesPerSec = $sent } | ConvertTo-Json -Compress"
 ].join(" ");
+
+/** Returns cumulative CPU time for the requested Windows process IDs. */
+function windowsProcessCpuScript(pids) {
+  const idList = pids.join(",");
+  return [
+    `$pids = @(${idList});`,
+    "Get-Process -Id $pids -ErrorAction SilentlyContinue |",
+    "Select-Object Id,CPU | ConvertTo-Json -Compress"
+  ].join(" ");
+}
 
 /** Converts a Node high-resolution timer tuple to milliseconds. */
 function nsToMs(value) {
@@ -104,6 +118,51 @@ function scheduleIoNetworkMetricsRefresh() {
   ioNetworkLastAttemptMs = now;
   ioNetworkRefreshPending = true;
   void refreshIoNetworkMetrics().finally(() => { ioNetworkRefreshPending = false; });
+}
+
+/**
+ * Returns Task-Manager-style CPU utilization for selected processes. Windows
+ * exposes cumulative process CPU seconds through Get-Process, so two samples
+ * are compared and normalized by elapsed wall time and logical CPU count.
+ */
+export async function getProcessCpuPercents(pids) {
+  const uniquePids = [...new Set((Array.isArray(pids) ? pids : [])
+    .map((pid) => Number(pid))
+    .filter((pid) => Number.isInteger(pid) && pid > 0))];
+  if (!uniquePids.length) return new Map();
+  if (process.platform !== "win32") return new Map(uniquePids.map((pid) => [pid, null]));
+
+  const now = Date.now();
+  if (now >= processCpuCache.expiresAt && !processCpuRefresh) {
+    processCpuRefresh = runPowerShell(windowsProcessCpuScript(uniquePids))
+      .then((output) => {
+        const parsed = JSON.parse(String(output || "[]"));
+        const rows = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+        const sampledAtMs = Date.now();
+        const logicalProcessors = Math.max(1, os.cpus().length);
+        const values = new Map(rows.map((row) => {
+          const pid = Number(row?.Id);
+          const cpuSeconds = Number(row?.CPU);
+          const previous = previousProcessCpuSamples.get(pid);
+          const elapsedSeconds = previous ? (sampledAtMs - previous.sampledAtMs) / 1000 : 0;
+          const cpuSecondsDelta = previous ? cpuSeconds - previous.cpuSeconds : 0;
+          const cpuPercent = Number.isFinite(cpuSeconds) && elapsedSeconds > 0 && cpuSecondsDelta >= 0
+            ? Number(Math.max(0, Math.min(100, (cpuSecondsDelta / elapsedSeconds / logicalProcessors) * 100)).toFixed(1))
+            : null;
+          if (Number.isInteger(pid) && Number.isFinite(cpuSeconds)) {
+            previousProcessCpuSamples.set(pid, { cpuSeconds, sampledAtMs });
+          }
+          return [pid, cpuPercent];
+        }));
+        processCpuCache = { expiresAt: Date.now() + PROCESS_CPU_CACHE_MS, values };
+      })
+      .catch(() => {
+        processCpuCache = { expiresAt: Date.now() + PROCESS_CPU_CACHE_MS, values: new Map() };
+      })
+      .finally(() => { processCpuRefresh = null; });
+  }
+  if (processCpuRefresh) await processCpuRefresh;
+  return new Map(uniquePids.map((pid) => [pid, processCpuCache.values.get(pid) ?? null]));
 }
 
 /** Returns a point-in-time metrics object for the UI and diagnostics. */

@@ -16,7 +16,7 @@ import { finalizeKlvStreamWorker, startKlvStreamWorker, stopKlvStreamWorker } fr
 import { startSfuWorkerClient } from "./src/sfu_worker_client.js";
 import { SqliteKlvStore } from "./src/storage/sqlite_klv_store.js";
 import { registerOgcMovingFeaturesRoutes } from "./src/ogc_moving_features.js";
-import { getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
+import { getProcessCpuPercents, getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
 import { getGpuMetrics } from "./src/gpu_metrics.js";
 import { checkMediaTools } from "./src/media_tool_preflight.js";
 import {
@@ -2778,9 +2778,27 @@ app.get("/metrics/runtime", async (req, res) => {
     running: isProcessRunning(s.klvWorker?.proc),
     exitCode: s.klvWorker?.proc?.exitCode ?? null
   }));
+  const mediaProcesses = [
+    { role: "Server", pid: process.pid },
+    ...[...sources.values()].flatMap((source) => [
+      isProcessRunning(source.hls?.proc)
+        ? { role: "FFmpeg HLS", streamId: source.streamId, pid: source.hls.proc.pid }
+        : null,
+      isProcessRunning(source.klvWorker?.proc)
+        ? { role: "KLV worker", streamId: source.streamId, pid: source.klvWorker.proc.pid }
+        : null
+    ]).filter(Boolean),
+    Number.isInteger(Number(sfuHealth?.pid)) ? { role: "SFU worker", pid: Number(sfuHealth.pid) } : null,
+    Number.isInteger(Number(sfuHealth?.webrtc?.workerPid)) ? { role: "mediasoup worker", pid: Number(sfuHealth.webrtc.workerPid) } : null
+  ].filter(Boolean);
+  const processCpuPercents = await getProcessCpuPercents(mediaProcesses.map((entry) => entry.pid));
 
   res.json({
     ...runtime,
+    processes: mediaProcesses.map((entry) => ({
+      ...entry,
+      cpuPercent: processCpuPercents.get(entry.pid) ?? null
+    })),
     server: {
       httpPort,
       wsPath: WS_PATH,

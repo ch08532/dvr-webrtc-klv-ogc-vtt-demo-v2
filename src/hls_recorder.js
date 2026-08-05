@@ -161,8 +161,16 @@ function buildLadderFilter(
     // from source DAR, rather than first expanding a 1440×1080/4:3-SAR source
     // to 1920×1080 and then scaling it again.
     const lowerRungFit = fitSquarePixelRendition(rendition, sourceDisplayAspectRatio);
+    const needsPadding = lowerRungFit.width !== rendition.width || lowerRungFit.height !== rendition.height;
+    const lowerRungFilters = [
+      `scale=${lowerRungFit.width}:${lowerRungFit.height}`,
+      "setsar=1"
+    ];
+    if (needsPadding) {
+      lowerRungFilters.push(`pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black`);
+    }
     filters.push(
-      `[input${inputIndex}]scale=${lowerRungFit.width}:${lowerRungFit.height},setsar=1,pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black[video${renditionIndex}]`
+      `[input${inputIndex}]${lowerRungFilters.join(",")}[video${renditionIndex}]`
     );
   });
   return filters.join(";");

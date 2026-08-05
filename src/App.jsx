@@ -346,6 +346,7 @@ function App() {
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
   const [hostMetrics, setHostMetrics] = useState(null);
+  const [processMetrics, setProcessMetrics] = useState([]);
   const [mediaTools, setMediaTools] = useState(null);
   const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
   const updateDvrMapPointerPosition = (position) => {
@@ -1398,6 +1399,7 @@ function App() {
   const refreshHostMetrics = async () => {
     const result = await api('/metrics/runtime');
     if (result?.host) setHostMetrics(result.host);
+    if (Array.isArray(result?.processes)) setProcessMetrics(result.processes);
     if (result?.mediaTools) setMediaTools(result.mediaTools);
   };
 
@@ -4145,6 +4147,14 @@ function App() {
                       )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
                     </Stack>
                   </Group>
+                  <Stack gap={2} mt="sm">
+                    <Text size="sm" fw={500}>Process CPU</Text>
+                    {processMetrics.length ? processMetrics.map((processInfo) => (
+                      <Text key={`${processInfo.role}-${processInfo.streamId || ''}-${processInfo.pid}`} size="sm">
+                        {processInfo.role}{processInfo.streamId ? ` (${processInfo.streamId})` : ''} · PID {processInfo.pid}: {processInfo.cpuPercent != null ? `${processInfo.cpuPercent}%` : 'n/a'}
+                      </Text>
+                    )) : <Text size="sm" c="dimmed">Process CPU metrics are unavailable.</Text>}
+                  </Stack>
                 </Tabs.Panel>
               </Tabs>
             </Paper>
