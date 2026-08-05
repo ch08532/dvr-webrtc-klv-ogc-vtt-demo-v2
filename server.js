@@ -2432,52 +2432,6 @@ function klvCsvRow(streamId, event, timeline) {
   ].map(csvCell).join(",");
 }
 
-const KML_METADATA_FIELDS = [
-  ["mission_time_unix_ms", "Mission time (Unix ms)", (event) => event.tMs],
-  ["mission_id", "Mission ID", (event) => event.data?.missionId],
-  ["platform_tail_number", "Platform tail number", (event) => event.data?.platformTailNumber],
-  ["platform_designation", "Platform designation", (event) => event.data?.platformDesignation],
-  ["platform_call_sign", "Platform call sign", (event) => event.data?.platformCallSign],
-  ["image_source_sensor", "Image source sensor", (event) => event.data?.imageSourceSensor],
-  ["image_coordinate_system", "Image coordinate system", (event) => event.data?.imageCoordinateSystem],
-  ["platform_true_airspeed_mps", "Platform true airspeed (m/s)", (event) => event.data?.platformTrueAirspeedMps],
-  ["platform_indicated_airspeed_mps", "Platform indicated airspeed (m/s)", (event) => event.data?.platformIndicatedAirspeedMps],
-  ["platform_ground_speed_mps", "Platform ground speed (m/s)", (event) => event.data?.platformGroundSpeedMps],
-  ["sensor_alt_msl_m", "Sensor altitude MSL (m)", (event) => event.data?.sensorAltMslM],
-  ["platform_heading_deg", "Platform heading (deg)", (event) => event.data?.platformHeadingDeg],
-  ["platform_pitch_deg", "Platform pitch (deg)", (event) => event.data?.platformPitchDeg],
-  ["platform_roll_deg", "Platform roll (deg)", (event) => event.data?.platformRollDeg],
-  ["sensor_relative_azimuth_deg", "Sensor relative azimuth (deg)", (event) => event.data?.sensorRelAzDeg],
-  ["sensor_relative_elevation_deg", "Sensor relative elevation (deg)", (event) => event.data?.sensorRelElDeg],
-  ["sensor_relative_roll_deg", "Sensor relative roll (deg)", (event) => event.data?.sensorRelRollDeg],
-  ["sensor_horizontal_fov_deg", "Sensor horizontal FOV (deg)", (event) => event.data?.sensorHfovDeg],
-  ["sensor_vertical_fov_deg", "Sensor vertical FOV (deg)", (event) => event.data?.sensorVfovDeg],
-  ["slant_range_m", "Slant range (m)", (event) => event.data?.slantRangeM],
-  ["target_width_m", "Target width (m)", (event) => event.data?.targetWidthM],
-  ["target_latitude", "Target latitude (deg)", (event) => event.data?.targetLat],
-  ["target_longitude", "Target longitude (deg)", (event) => event.data?.targetLon],
-  ["target_elevation_msl_m", "Target elevation MSL (m)", (event) => event.data?.targetElevationMslM],
-  ["target_track_gate_width_px", "Target track-gate width (px)", (event) => event.data?.targetTrackGateWidthPx],
-  ["target_track_gate_height_px", "Target track-gate height (px)", (event) => event.data?.targetTrackGateHeightPx],
-  ["target_location_ce90_m", "Target-location CE90 (m)", (event) => event.data?.targetLocationCe90M],
-  ["target_location_le90_m", "Target-location LE90 (m)", (event) => event.data?.targetLocationLe90M],
-  ["icing_detected_code", "Icing detected code", (event) => event.data?.icingDetectedCode],
-  ["wind_direction_deg", "Wind direction (deg)", (event) => event.data?.windDirectionDeg],
-  ["wind_speed_mps", "Wind speed (m/s)", (event) => event.data?.windSpeedMps],
-  ["static_pressure_mbar", "Static pressure (mbar)", (event) => event.data?.staticPressureMbar],
-  ["differential_pressure_mbar", "Differential pressure (mbar)", (event) => event.data?.differentialPressureMbar],
-  ["density_altitude_m", "Density altitude (m)", (event) => event.data?.densityAltitudeM],
-  ["outside_air_temperature_c", "Outside-air temperature (C)", (event) => event.data?.outsideAirTemperatureC],
-  ["airfield_barometric_pressure_mbar", "Airfield barometric pressure (mbar)", (event) => event.data?.airfieldBarometricPressureMbar],
-  ["airfield_elevation_m", "Airfield elevation (m)", (event) => event.data?.airfieldElevationM],
-  ["relative_humidity_percent", "Relative humidity (%)", (event) => event.data?.relativeHumidityPercent],
-  ["platform_angle_of_attack_deg", "Platform angle of attack (deg)", (event) => event.data?.platformAngleOfAttackDeg],
-  ["platform_vertical_speed_mps", "Platform vertical speed (m/s)", (event) => event.data?.platformVerticalSpeedMps],
-  ["platform_sideslip_angle_deg", "Platform sideslip angle (deg)", (event) => event.data?.platformSideslipAngleDeg],
-  ["platform_fuel_remaining_kg", "Platform fuel remaining (kg)", (event) => event.data?.platformFuelRemainingKg],
-  ["frame_corner_source", "Frame corner source", (event) => event.data?.frameCornerSource]
-];
-
 function xmlEscape(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -2486,6 +2440,26 @@ function xmlEscape(value) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 }
+
+// Keep the analytical fields that describe the sensor pointing solution on the
+// SPI track, without duplicating them on platform and target location tracks.
+const KML_TRACK_METADATA_FIELDS = [
+  ["mission_time_utc", "Mission time (UTC)", (event) => kmlTime(event)],
+  ["sensor_relative_azimuth_deg", "Sensor relative azimuth (deg)", (event) => event.sensorRelAzDeg],
+  ["sensor_relative_elevation_deg", "Sensor relative elevation (deg)", (event) => event.sensorRelElDeg],
+  ["sensor_relative_roll_deg", "Sensor relative roll (deg)", (event) => event.sensorRelRollDeg],
+  ["sensor_horizontal_fov_deg", "Sensor horizontal FOV (deg)", (event) => event.sensorHfovDeg],
+  ["sensor_vertical_fov_deg", "Sensor vertical FOV (deg)", (event) => event.sensorVfovDeg],
+  ["slant_range_m", "Slant range (m)", (event) => event.slantRangeM],
+  ["target_width_m", "Target width (m)", (event) => event.targetWidthM],
+  ["target_latitude", "Target latitude (deg)", (event) => event.targetLat],
+  ["target_longitude", "Target longitude (deg)", (event) => event.targetLon],
+  ["target_elevation_msl_m", "Target elevation MSL (m)", (event) => event.targetElevationMslM],
+  ["target_track_gate_width_px", "Target track-gate width (px)", (event) => event.targetTrackGateWidthPx],
+  ["target_track_gate_height_px", "Target track-gate height (px)", (event) => event.targetTrackGateHeightPx],
+  ["target_location_ce90_m", "Target-location CE90 (m)", (event) => event.targetLocationCe90M],
+  ["target_location_le90_m", "Target-location LE90 (m)", (event) => event.targetLocationLe90M]
+];
 
 function validKmlPosition(lat, lon) {
   const hasLatitude = lat !== null && lat !== undefined && String(lat).trim() !== "";
@@ -2499,23 +2473,28 @@ function validKmlPosition(lat, lon) {
 }
 
 function kmlTime(event) {
-  const preferred = String(event.data?.timestampIso || "").trim();
+  const preferred = String(event.timestampIso || "").trim();
   const preferredMs = Date.parse(preferred);
   if (preferred && Number.isFinite(preferredMs)) return new Date(preferredMs).toISOString();
   return csvMissionTimeIso(event.tMs);
 }
 
-function kmlTrack({ name, description, styleUrl, events, latKey, lonKey, altitudeKey }) {
-  const points = events.filter((event) => validKmlPosition(event.data?.[latKey], event.data?.[lonKey]) && kmlTime(event));
+function kmlTrack({ name, description, styleUrl, events, latKey, lonKey, altitudeKey, metadataFields = [], metadataSchemaId = null }) {
+  const points = events.filter((event) => validKmlPosition(event[latKey], event[lonKey]) && kmlTime(event));
   if (!points.length) return "";
-  const simpleArrays = KML_METADATA_FIELDS.map(([fieldName, , valueFor]) => (
-    `          <gx:SimpleArrayData name="${fieldName}">${points.map((event) => `<gx:value>${xmlEscape(valueFor(event))}</gx:value>`).join("")}</gx:SimpleArrayData>`
-  )).join("\n");
   const whens = points.map((event) => `        <when>${xmlEscape(kmlTime(event))}</when>`).join("\n");
   const coordinates = points.map((event) => {
-    const altitude = Number(event.data?.[altitudeKey]);
-    return `        <gx:coord>${Number(event.data[lonKey])} ${Number(event.data[latKey])} ${Number.isFinite(altitude) ? altitude : 0}</gx:coord>`;
+    const altitude = Number(event[altitudeKey]);
+    return `        <gx:coord>${Number(event[lonKey])} ${Number(event[latKey])} ${Number.isFinite(altitude) ? altitude : 0}</gx:coord>`;
   }).join("\n");
+  const extendedData = metadataFields.length && metadataSchemaId
+    ? `
+        <ExtendedData>
+          <SchemaData schemaUrl="#${xmlEscape(metadataSchemaId)}">
+${metadataFields.map(([fieldName, , valueFor]) => `            <gx:SimpleArrayData name="${fieldName}">${points.map((event) => `<gx:value>${xmlEscape(valueFor(event))}</gx:value>`).join("")}</gx:SimpleArrayData>`).join("\n")}
+          </SchemaData>
+        </ExtendedData>`
+    : "";
   return `    <Placemark>
       <name>${xmlEscape(name)}</name>
       <description>${xmlEscape(description)}</description>
@@ -2524,45 +2503,13 @@ function kmlTrack({ name, description, styleUrl, events, latKey, lonKey, altitud
         <altitudeMode>absolute</altitudeMode>
 ${whens}
 ${coordinates}
-        <ExtendedData>
-          <SchemaData schemaUrl="#klvTelemetrySchema">
-${simpleArrays}
-          </SchemaData>
-        </ExtendedData>
+${extendedData}
       </gx:Track>
     </Placemark>`;
 }
 
-function kmlFovFootprints(events) {
-  const footprints = events.filter((event) => (
-    kmlTime(event) && [1, 2, 3, 4].every((index) => validKmlPosition(
-      event.data?.[`frameCorner${index}Lat`],
-      event.data?.[`frameCorner${index}Lon`]
-    ))
-  ));
-  if (!footprints.length) return "";
-  return footprints.map((event) => {
-    const coordinates = [1, 2, 3, 4, 1].map((index) => (
-      `${Number(event.data[`frameCorner${index}Lon`])},${Number(event.data[`frameCorner${index}Lat`])},0`
-    )).join(" ");
-    return `    <Placemark>
-      <name>FOV footprint</name>
-      <TimeStamp><when>${xmlEscape(kmlTime(event))}</when></TimeStamp>
-      <ExtendedData>
-        <Data name="frame_corner_source"><value>${xmlEscape(event.data?.frameCornerSource)}</value></Data>
-        <Data name="mission_id"><value>${xmlEscape(event.data?.missionId)}</value></Data>
-      </ExtendedData>
-      <styleUrl>#fovFootprintStyle</styleUrl>
-      <Polygon>
-        <altitudeMode>clampToGround</altitudeMode>
-        <outerBoundaryIs><LinearRing><coordinates>${coordinates}</coordinates></LinearRing></outerBoundaryIs>
-      </Polygon>
-    </Placemark>`;
-  }).join("\n");
-}
-
 function buildKlvKml(streamId, events) {
-  const schema = KML_METADATA_FIELDS.map(([fieldName, displayName]) => (
+  const trackMetadataSchema = KML_TRACK_METADATA_FIELDS.map(([fieldName, displayName]) => (
     `      <gx:SimpleArrayField name="${fieldName}" type="string"><displayName>${xmlEscape(displayName)}</displayName></gx:SimpleArrayField>`
   )).join("\n");
   const platformTrack = kmlTrack({
@@ -2572,7 +2519,9 @@ function buildKlvKml(streamId, events) {
     events,
     latKey: "sensorLat",
     lonKey: "sensorLon",
-    altitudeKey: "sensorAltMslM"
+    altitudeKey: "sensorAltMslM",
+    metadataFields: KML_TRACK_METADATA_FIELDS,
+    metadataSchemaId: "klvTrackMetadataSchema"
   });
   const spiTrack = kmlTrack({
     name: "Sensor - Frame Center",
@@ -2581,7 +2530,9 @@ function buildKlvKml(streamId, events) {
     events,
     latKey: "frameCenterLat",
     lonKey: "frameCenterLon",
-    altitudeKey: "frameCenterElevationMslM"
+    altitudeKey: "frameCenterElevationMslM",
+    metadataFields: KML_TRACK_METADATA_FIELDS,
+    metadataSchemaId: "klvTrackMetadataSchema"
   });
   const targetTrack = kmlTrack({
     name: "Target location",
@@ -2592,19 +2543,17 @@ function buildKlvKml(streamId, events) {
     lonKey: "targetLon",
     altitudeKey: "targetElevationMslM"
   });
-  const fovFootprints = kmlFovFootprints(events);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
   <Document>
     <name>${xmlEscape(`${streamId} KLV telemetry`)}</name>
-    <description>Time-series platform and SPI telemetry exported from the stream&apos;s SQLite KLV dataset.</description>
-    <Schema id="klvTelemetrySchema" name="KLV Telemetry">
-${schema}
+    <description>Timestamped platform, SPI/frame-center, and target location telemetry exported from the stream&apos;s SQLite KLV dataset.</description>
+    <Schema id="klvTrackMetadataSchema" name="KLV track metadata">
+${trackMetadataSchema}
     </Schema>
     <Style id="platformTrackStyle"><IconStyle><scale>1.1</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle><LineStyle><color>ffff0000</color><width>3</width></LineStyle></Style>
     <Style id="spiTrackStyle"><IconStyle><scale>1.05</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/target.png</href></Icon></IconStyle><LineStyle><color>ff00a5ff</color><width>3</width></LineStyle></Style>
     <Style id="targetTrackStyle"><IconStyle><scale>1.1</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/target.png</href></Icon></IconStyle><LineStyle><color>ff00ff00</color><width>3</width></LineStyle></Style>
-    <Style id="fovFootprintStyle"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4d00a5ff</color></PolyStyle></Style>
     <Folder>
       <name>Platform location</name>
 ${platformTrack || "      <description>No platform positions were present in the stored KLV telemetry.</description>"}
@@ -2616,10 +2565,6 @@ ${spiTrack || "      <description>No SPI/frame-center positions were present in 
     <Folder>
       <name>Target location</name>
 ${targetTrack || "      <description>No target positions were present in the stored KLV telemetry.</description>"}
-    </Folder>
-    <Folder>
-      <name>FOV footprints</name>
-${fovFootprints || "      <description>No valid frame-corner geometry was present in the stored KLV telemetry.</description>"}
     </Folder>
   </Document>
 </kml>`;
@@ -2659,7 +2604,7 @@ app.get("/streams/:streamId/klv/export.kml", async (req, res) => {
   try {
     const streamId = validateTargetLogStreamId(req.params.streamId);
     const [events, missionData] = await Promise.all([
-      store.listForExport(streamId),
+      store.listForKmlExport(streamId),
       store.getMissionDataSummary(streamId)
     ]);
     const safeStreamId = streamId.replace(/[^a-z0-9_-]+/gi, "_");
@@ -2671,7 +2616,7 @@ app.get("/streams/:streamId/klv/export.kml", async (req, res) => {
       lastMissionTimeMs: missionData.lastMissionTimeMs,
       targetLogEntryCount: missionData.targetLogEntryCount,
       activeTargetLogFieldCount: missionData.activeTargetLogFieldCount,
-      exportedEventCount: events.length
+      positionCandidateEventCount: events.length
     });
     res.status(200)
       .type("application/vnd.google-earth.kml+xml; charset=utf-8")

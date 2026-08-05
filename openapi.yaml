@@ -302,8 +302,8 @@ paths:
   /streams/{streamId}/klv/export.kml:
     get:
       tags: [Telemetry]
-      summary: Download platform and SPI KLV time series as KML
-      description: Creates Google Earth gx:Track time series from stored SQLite KLV telemetry. Platform positions use sensor latitude/longitude/altitude; Sensor - Frame Center positions use frame-center latitude/longitude/elevation. Timestamped ground-clamped FOV footprints are included when decoded frame corners are available. Selected per-sample KLV metadata is included as compact ExtendedData arrays.
+      summary: Download platform, SPI, and target KLV time series as KML
+      description: Creates compact Google Earth gx:Track time series from stored SQLite KLV telemetry. Platform positions use sensor latitude/longitude/altitude; Sensor - Frame Center positions use frame-center latitude/longitude/elevation; and Target positions use target latitude/longitude/elevation. FOV footprints are omitted. The Platform and SPI tracks contain sample-aligned ExtendedData arrays for UTC mission time, gimbal orientation/FOV, slant range, target size/location, tracking-gate size, and target CE90/LE90. The gx:Track representation is intended for Google Earth rather than per-sample Google Maps popups.
       parameters: [ { $ref: '#/components/parameters/StreamId' } ]
       responses:
         '200':

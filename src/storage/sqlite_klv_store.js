@@ -260,6 +260,71 @@ export class SqliteKlvStore {
     return rows.map((row) => ({ tMs: Number(row.t_ms), data: JSON.parse(row.json) }));
   }
 
+  /**
+   * Returns only the timestamped positions required for the compact KML export.
+   * Keeping this projection in SQLite avoids loading and parsing every full KLV
+   * JSON document when the export only needs platform, SPI, and target tracks.
+   */
+  async listForKmlExport(streamId) {
+    const rows = await all(this.db, `
+      SELECT
+        t_ms,
+        json_extract(json, '$.timestampIso') AS timestamp_iso,
+        json_extract(json, '$.sensorLat') AS sensor_lat,
+        json_extract(json, '$.sensorLon') AS sensor_lon,
+        json_extract(json, '$.sensorAltMslM') AS sensor_alt_msl_m,
+        json_extract(json, '$.frameCenterLat') AS frame_center_lat,
+        json_extract(json, '$.frameCenterLon') AS frame_center_lon,
+        json_extract(json, '$.frameCenterElevationMslM') AS frame_center_elevation_msl_m,
+        json_extract(json, '$.sensorRelAzDeg') AS sensor_rel_az_deg,
+        json_extract(json, '$.sensorRelElDeg') AS sensor_rel_el_deg,
+        json_extract(json, '$.sensorRelRollDeg') AS sensor_rel_roll_deg,
+        json_extract(json, '$.sensorHfovDeg') AS sensor_hfov_deg,
+        json_extract(json, '$.sensorVfovDeg') AS sensor_vfov_deg,
+        json_extract(json, '$.slantRangeM') AS slant_range_m,
+        json_extract(json, '$.targetWidthM') AS target_width_m,
+        json_extract(json, '$.targetLat') AS target_lat,
+        json_extract(json, '$.targetLon') AS target_lon,
+        json_extract(json, '$.targetElevationMslM') AS target_elevation_msl_m,
+        json_extract(json, '$.targetTrackGateWidthPx') AS target_track_gate_width_px,
+        json_extract(json, '$.targetTrackGateHeightPx') AS target_track_gate_height_px,
+        json_extract(json, '$.targetLocationCe90M') AS target_location_ce90_m,
+        json_extract(json, '$.targetLocationLe90M') AS target_location_le90_m
+      FROM klv_events
+      WHERE stream_id=?
+        AND (
+          (json_extract(json, '$.sensorLat') IS NOT NULL AND json_extract(json, '$.sensorLon') IS NOT NULL)
+          OR (json_extract(json, '$.frameCenterLat') IS NOT NULL AND json_extract(json, '$.frameCenterLon') IS NOT NULL)
+          OR (json_extract(json, '$.targetLat') IS NOT NULL AND json_extract(json, '$.targetLon') IS NOT NULL)
+        )
+      ORDER BY t_ms ASC
+    `, [streamId]);
+    return rows.map((row) => ({
+      tMs: Number(row.t_ms),
+      timestampIso: row.timestamp_iso,
+      sensorLat: row.sensor_lat,
+      sensorLon: row.sensor_lon,
+      sensorAltMslM: row.sensor_alt_msl_m,
+      frameCenterLat: row.frame_center_lat,
+      frameCenterLon: row.frame_center_lon,
+      frameCenterElevationMslM: row.frame_center_elevation_msl_m,
+      sensorRelAzDeg: row.sensor_rel_az_deg,
+      sensorRelElDeg: row.sensor_rel_el_deg,
+      sensorRelRollDeg: row.sensor_rel_roll_deg,
+      sensorHfovDeg: row.sensor_hfov_deg,
+      sensorVfovDeg: row.sensor_vfov_deg,
+      slantRangeM: row.slant_range_m,
+      targetWidthM: row.target_width_m,
+      targetLat: row.target_lat,
+      targetLon: row.target_lon,
+      targetElevationMslM: row.target_elevation_msl_m,
+      targetTrackGateWidthPx: row.target_track_gate_width_px,
+      targetTrackGateHeightPx: row.target_track_gate_height_px,
+      targetLocationCe90M: row.target_location_ce90_m,
+      targetLocationLe90M: row.target_location_le90_m
+    }));
+  }
+
   /** Returns the most recently stored telemetry event for a source. */
   async latest(streamId) {
     const row = await get(this.db,
