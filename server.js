@@ -76,6 +76,7 @@ const AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS = Math.max(3000, Number(process.env.AUTH
 const CLIP_THUMBNAIL_COUNT = Math.max(4, Math.min(12, Number(process.env.CLIP_THUMBNAIL_COUNT || 12)));
 const CLIP_THUMBNAIL_WIDTH = 160;
 const CLIP_THUMBNAIL_TIMEOUT_MS = Math.max(5000, Number(process.env.CLIP_THUMBNAIL_TIMEOUT_MS || 45000));
+const CLIP_THUMBNAIL_GPU_ENABLED = process.env.CLIP_THUMBNAIL_GPU_ENABLED !== "false";
 const KLV_FINALIZE_MIN_TIMEOUT_MS = Math.max(30000, Number(process.env.KLV_FINALIZE_MIN_TIMEOUT_MS || 30000));
 const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE_MS_PER_SEGMENT || 500));
 const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
@@ -217,6 +218,19 @@ const GENERIC_FILE_INTEGRITY_FINDINGS = [
   }
 ];
 
+const GPU_THUMBNAIL_DECODERS = new Map([
+  ["av1", "av1_cuvid"],
+  ["h264", "h264_cuvid"],
+  ["hevc", "hevc_cuvid"],
+  ["mjpeg", "mjpeg_cuvid"],
+  ["mpeg1video", "mpeg1_cuvid"],
+  ["mpeg2video", "mpeg2_cuvid"],
+  ["mpeg4", "mpeg4_cuvid"],
+  ["vc1", "vc1_cuvid"],
+  ["vp8", "vp8_cuvid"],
+  ["vp9", "vp9_cuvid"]
+]);
+
 /** Tests whether a spawned child process is still active. */
 function isProcessRunning(proc) {
   return !!proc && proc.exitCode == null && !proc.killed;
@@ -232,6 +246,12 @@ function normalizeSegmentSeconds(value, fallback = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
+}
+
+/** Returns an NVIDIA decoder for thumbnail extraction, or null for the CPU path. */
+function resolveThumbnailGpuDecoder(codec) {
+  if (!CLIP_THUMBNAIL_GPU_ENABLED || !mediaTools.gpu?.available) return null;
+  return GPU_THUMBNAIL_DECODERS.get(String(codec || "").toLowerCase()) || null;
 }
 
 /** Gives large file sources enough time to flush their remaining KLV/VTT segments. */
@@ -1663,6 +1683,31 @@ app.get("/sources/:streamId/state", (req, res) => {
   res.json(getSourceRuntime(req.params.streamId));
 });
 
+/** Builds one CPU or GPU-assisted FFmpeg filmstrip capture command. */
+async function captureClipFilmstrip({ inputPath, times, filterInputs, hstackInputs, thumbnailPath, gpuDecoder = null }) {
+  const useGpu = !!gpuDecoder;
+  await runFfmpeg([
+    "-hide_banner",
+    "-loglevel", "error",
+    "-y",
+    // Each input seeks independently, so the overview stays fast for a
+    // multi-hour recording rather than decoding the entire carrier. Seek
+    // accuracy is retained so parameter sets are decoded before each still.
+    ...times.flatMap((timeSeconds) => [
+      "-ss", String(timeSeconds),
+      ...(useGpu ? ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-c:v", gpuDecoder] : []),
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+      "-i", inputPath
+    ]),
+    "-filter_complex", `${filterInputs};${hstackInputs}hstack=inputs=${CLIP_THUMBNAIL_COUNT}[filmstrip]`,
+    "-map", "[filmstrip]",
+    "-frames:v", "1",
+    "-q:v", "4",
+    thumbnailPath
+  ], { label: useGpu ? "GPU clip filmstrip capture" : "CPU clip filmstrip capture", timeoutMs: CLIP_THUMBNAIL_TIMEOUT_MS });
+}
+
 /** Builds and caches a real filmstrip of representative authoritative frames. */
 async function getClipThumbnailFrames(streamId, source, durationSeconds) {
   const sourceDir = resolveSourceAssetDir(streamId);
@@ -1690,34 +1735,51 @@ async function getClipThumbnailFrames(streamId, source, durationSeconds) {
       const times = Array.from({ length: CLIP_THUMBNAIL_COUNT }, (_, index) =>
         Number((durationSeconds * ((index + 0.5) / CLIP_THUMBNAIL_COUNT)).toFixed(3))
       );
-      const filterInputs = times.map((_, index) =>
+      const gpuDecoder = resolveThumbnailGpuDecoder(source.sourceVideo?.codec);
+      const cpuFilterInputs = times.map((_, index) =>
         `[${index}:v:0]scale=${CLIP_THUMBNAIL_WIDTH}:trunc(${CLIP_THUMBNAIL_WIDTH}/dar/2)*2,setsar=1/1[thumb${index}]`
       ).join(";");
+      const gpuFilterInputs = times.map((_, index) =>
+        `[${index}:v:0]scale_cuda=${CLIP_THUMBNAIL_WIDTH}:trunc(${CLIP_THUMBNAIL_WIDTH}/dar/2)*2:format=nv12,hwdownload,format=nv12,setsar=1/1[thumb${index}]`
+      ).join(";");
       const hstackInputs = times.map((_, index) => `[thumb${index}]`).join("");
-      await runFfmpeg([
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        // Each input seeks independently, so the overview stays fast for a
-        // multi-hour TS rather than decoding the entire carrier. Seek accuracy
-        // is retained so H.264 parameter sets are decoded before each still;
-        // malformed TS packets are discarded just as they are during file-source
-        // HLS packaging.
-        ...times.flatMap((timeSeconds) => [
-          "-ss", String(timeSeconds),
-          "-fflags", "+genpts+discardcorrupt",
-          "-err_detect", "ignore_err",
-          "-i", sourceInputPath
-        ]),
-        "-filter_complex", `${filterInputs};${hstackInputs}hstack=inputs=${CLIP_THUMBNAIL_COUNT}[filmstrip]`,
-        "-map", "[filmstrip]",
-        "-frames:v", "1",
-        "-q:v", "4",
-        thumbnailPath
-      ], { label: "clip filmstrip capture", timeoutMs: CLIP_THUMBNAIL_TIMEOUT_MS });
+      let acceleration = "cpu";
+      if (gpuDecoder) {
+        try {
+          await captureClipFilmstrip({
+            inputPath: sourceInputPath,
+            times,
+            filterInputs: gpuFilterInputs,
+            hstackInputs,
+            thumbnailPath,
+            gpuDecoder
+          });
+          acceleration = "gpu";
+        } catch (error) {
+          // Hardware decode can be unavailable for a particular source even
+          // when NVENC is healthy. Preserve thumbnail availability by retrying
+          // the identical filmstrip on the CPU.
+          log.warn("clip_thumbnails_gpu_fallback", {
+            streamId,
+            assetKey,
+            codec: source.sourceVideo?.codec || null,
+            decoder: gpuDecoder,
+            error: serializeError(error)
+          });
+        }
+      }
+      if (acceleration !== "gpu") {
+        await captureClipFilmstrip({
+          inputPath: sourceInputPath,
+          times,
+          filterInputs: cpuFilterInputs,
+          hstackInputs,
+          thumbnailPath
+        });
+      }
       const generated = await fs.promises.stat(thumbnailPath).catch(() => null);
       if (!generated?.isFile() || generated.size <= 0) throw new Error("clip filmstrip generation produced no image");
-      log.info("clip_thumbnails_ready", { streamId, assetKey, count: CLIP_THUMBNAIL_COUNT });
+      log.info("clip_thumbnails_ready", { streamId, assetKey, count: CLIP_THUMBNAIL_COUNT, acceleration });
       return [{ url: thumbnailUrl }];
     } catch (error) {
       await fs.promises.rm(thumbnailDir, { recursive: true, force: true }).catch(() => {});
