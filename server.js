@@ -986,6 +986,8 @@ function getSourceRuntime(streamId) {
       hlsRenditions: tracked?.hlsRenditions || null,
       copyNativeTopRung: tracked?.copyNativeTopRung === true,
       klvProbe: tracked?.klvProbe || null,
+      klvProcessingRequired: tracked?.klvProcessingRequired !== false,
+      klvTelemetryEventCount: tracked?.klvTelemetryEventCount ?? null,
       sourceVideo: tracked?.sourceVideo || null,
       integrity: tracked?.integrity || null,
       stage: tracked?.stage || null,
@@ -1017,7 +1019,7 @@ function getSourceRuntime(streamId) {
     // A completed file source retains its HLS/VTT artifacts but no child processes.
   } else if (state === "starting" || state === "stopping" || state === "finalizing") {
     // honor explicit transition state
-  } else if (hlsRunning && klvRunning && (source.sourceType === "file" || ingestRunning)) {
+  } else if (hlsRunning && (source.klvProcessingRequired === false || klvRunning) && (source.sourceType === "file" || ingestRunning)) {
     state = "running";
   } else if (hlsRunning) {
     state = "degraded";
@@ -1041,6 +1043,8 @@ function getSourceRuntime(streamId) {
     hlsRenditions: source.hlsRenditions || tracked?.hlsRenditions || null,
     copyNativeTopRung: source.copyNativeTopRung === true,
     klvProbe: source.klvProbe || tracked?.klvProbe || null,
+    klvProcessingRequired: source.klvProcessingRequired !== false,
+    klvTelemetryEventCount: tracked?.klvTelemetryEventCount ?? null,
     sourceVideo: source.sourceVideo || tracked?.sourceVideo || null,
     integrity: tracked?.integrity || null,
     stage: tracked?.stage || null,
@@ -1973,6 +1977,9 @@ app.post("/sources", async (req, res) => {
       hlsSegmentSeconds,
       normalizeSegmentSeconds(vttSegmentSeconds, 1)
     );
+    // A confirmed no-KLV file has no telemetry sidecar to decode or finalize.
+    // An absent/failed probe remains conservative and takes the normal KLV path.
+    const klvProcessingRequired = sourceType !== "file" || sourceProbe?.klv?.available !== false;
 
     if (sources.has(streamId)) {
       return res.status(409).json({
@@ -2004,6 +2011,8 @@ app.post("/sources", async (req, res) => {
       hlsEncoderMode,
       webRtcEncoderMode,
       klvProbe: sourceProbe?.klv || null,
+      klvProcessingRequired,
+      klvTelemetryEventCount: klvProcessingRequired ? null : 0,
       sourceVideo: sourceProbe?.video || null,
       integrity: sourceType === "file" && isTransportStreamFile(resolvedInputUrl)
         ? { status: "pending", scanner: "ffprobe-count-packets", findings: [], error: null }
@@ -2126,14 +2135,18 @@ app.post("/sources", async (req, res) => {
 
     // Write the master playlist before the recorder begins publishing media playlists.
     const masterPath = path.join(outDir, "master.m3u8");
-    await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
+    if (klvProcessingRequired) {
+      await bootstrapSubtitleArtifacts(outDir, effectiveSegmentSeconds);
+    }
     await fs.promises.writeFile(
       masterPath,
-      hls.isAbr ? createHlsMasterPlaylist(hls.renditions) : createPassthroughHlsMasterPlaylist()
+      hls.isAbr
+        ? createHlsMasterPlaylist(hls.renditions, { includeSubtitles: klvProcessingRequired })
+        : createPassthroughHlsMasterPlaylist({ includeSubtitles: klvProcessingRequired })
     );
 
     // 2) KLV ingest + DB/VTT sidecar in dedicated worker process
-    klvWorker = await startKlvStreamWorker({
+    if (klvProcessingRequired) klvWorker = await startKlvStreamWorker({
       streamId,
       inputUrl: resolvedInputUrl,
       sourceType,
@@ -2172,7 +2185,10 @@ app.post("/sources", async (req, res) => {
         });
       }
     });
-    setSourceState(streamId, { state: "starting", stage: "klv_started" });
+    setSourceState(streamId, {
+      state: "starting",
+      stage: klvProcessingRequired ? "klv_started" : "klv_skipped_no_data"
+    });
 
     // 3) WebRTC is a live-stream path. File sources are packaged for HLS/VTT playback only.
     if (sourceType !== "file") {
@@ -2210,6 +2226,7 @@ app.post("/sources", async (req, res) => {
       hlsRenditions: hls.renditions,
       copyNativeTopRung: hls.copyNativeTopRung,
       klvProbe: sourceProbe?.klv || null,
+      klvProcessingRequired,
       sourceVideo: sourceProbe?.video || null,
       hls, klvWorker,
       clips: new Map(),
@@ -2221,6 +2238,26 @@ app.post("/sources", async (req, res) => {
     const finalizeFileSource = async () => {
       const source = sources.get(streamId);
       if (!source || source.sourceType !== "file") return;
+      if (source.fileCompletionStarted) return;
+      source.fileCompletionStarted = true;
+      if (!source.klvProcessingRequired) {
+        setSourceState(streamId, {
+          state: "ready",
+          running: false,
+          ingestRunning: false,
+          stage: null,
+          progressPercent: 100,
+          etaSeconds: 0,
+          finalizationProgressPercent: null,
+          finalizationProcessedSegments: null,
+          finalizationTotalSegments: null,
+          finalizationEtaSeconds: null,
+          klvTelemetryEventCount: 0,
+          lastError: null
+        });
+        log.info("file_source_ready_no_klv", { streamId });
+        return;
+      }
       setSourceState(streamId, {
         state: "finalizing",
         running: false,
@@ -2240,19 +2277,9 @@ app.post("/sources", async (req, res) => {
         await finalizeKlvStreamWorker(source.klvWorker, { timeoutMs: finalizeTimeoutMs });
         await stopKlvStreamWorker(source.klvWorker);
         source.klvWorker = null;
-        setSourceState(streamId, {
-          state: "ready",
-          running: false,
-          ingestRunning: false,
-          stage: null,
-          progressPercent: 100,
-          etaSeconds: 0,
-          finalizationProgressPercent: 100,
-          finalizationEtaSeconds: 0,
-          lastError: null
-        });
+        let missionData = null;
         try {
-          const missionData = await store.getMissionDataSummary(streamId);
+          missionData = await store.getMissionDataSummary(streamId);
           log.info("file_source_ready_sqlite_mission_data", {
             streamId,
             // KML exports are built only from these persisted KLV rows.
@@ -2269,6 +2296,18 @@ app.post("/sources", async (req, res) => {
             error: serializeError(error)
           });
         }
+        setSourceState(streamId, {
+          state: "ready",
+          running: false,
+          ingestRunning: false,
+          stage: null,
+          progressPercent: 100,
+          etaSeconds: 0,
+          finalizationProgressPercent: 100,
+          finalizationEtaSeconds: 0,
+          klvTelemetryEventCount: missionData?.klvEventCount ?? null,
+          lastError: null
+        });
         log.info("file_source_ready", { streamId });
       } catch (error) {
         setSourceState(streamId, {
@@ -2297,7 +2336,7 @@ app.post("/sources", async (req, res) => {
       });
     };
     hls.proc?.once("exit", (code, signal) => onWorkerExit("hls_recorder", code, signal));
-    klvWorker.proc?.once("exit", (code, signal) => onWorkerExit("klv_worker", code, signal));
+    klvWorker?.proc?.once("exit", (code, signal) => onWorkerExit("klv_worker", code, signal));
 
     setSourceState(streamId, {
       state: "running",
@@ -2619,6 +2658,9 @@ app.get("/streams/:streamId/klv/export.csv", async (req, res) => {
       store.getMissionTimeline(streamId),
       store.getMissionDataSummary(streamId)
     ]);
+    if (missionData.klvEventCount <= 0) {
+      return res.status(409).json({ ok: false, error: "No KLV telemetry available for this source" });
+    }
     log.info("klv_export_sqlite_mission_data", {
       streamId,
       exportFormat: "csv",
@@ -2648,6 +2690,9 @@ app.get("/streams/:streamId/klv/export.kml", async (req, res) => {
       store.listForKmlExport(streamId),
       store.getMissionDataSummary(streamId)
     ]);
+    if (missionData.klvEventCount <= 0) {
+      return res.status(409).json({ ok: false, error: "No KLV telemetry available for this source" });
+    }
     const safeStreamId = streamId.replace(/[^a-z0-9_-]+/gi, "_");
     log.info("klv_export_sqlite_mission_data", {
       streamId,

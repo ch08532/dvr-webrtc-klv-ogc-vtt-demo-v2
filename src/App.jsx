@@ -654,12 +654,23 @@ function App() {
     streamRuntime?.running === true
     || ['running', 'degraded', 'finalizing', 'ready'].includes(streamRuntime?.state)
   );
+  const rawKlvTelemetryEventCount = streamRuntime?.klvTelemetryEventCount;
+  const klvTelemetryEventCount = Number(rawKlvTelemetryEventCount);
+  const fileKlvTelemetryCountKnown = rawKlvTelemetryEventCount != null
+    && Number.isFinite(klvTelemetryEventCount)
+    && klvTelemetryEventCount >= 0;
   const klvExportAvailable = serverOnline && (currentSourceIsFile
-    ? streamRuntime?.state === 'ready'
+    ? streamRuntime?.state === 'ready' && fileKlvTelemetryCountKnown && klvTelemetryEventCount > 0
     : streamRuntime?.state === 'running');
-  const klvExportUnavailableMessage = currentSourceIsFile
-    ? 'KLV export is available after post-mission processing completes'
-    : 'KLV export is available while the live stream is running';
+  const klvExportUnavailableMessage = !serverOnline
+    ? 'Server is offline'
+    : currentSourceIsFile && streamRuntime?.state !== 'ready'
+      ? 'KLV export is available after post-mission processing completes'
+      : currentSourceIsFile && fileKlvTelemetryCountKnown && klvTelemetryEventCount === 0
+        ? 'No KLV telemetry available for this video'
+        : currentSourceIsFile
+          ? 'Checking KLV telemetry availability'
+          : 'KLV export is available while the live stream is running';
   const canAddTargetMark = targetLogSourceActive && !targetLogInFlight;
   const canManageTargetLogFields = targetLogSourceActive && !targetLogInFlight;
   const showTargetMarkAction = activeTab !== 'live-webrtc' || liveVideoStreaming;

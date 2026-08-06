@@ -147,8 +147,8 @@ export function resolveHlsRenditions(sourceVideo) {
   };
 }
 
-/** Serializes an ABR HLS master playlist with the KLV WebVTT subtitle group. */
-export function createHlsMasterPlaylist(renditions) {
+/** Serializes an ABR HLS master playlist, optionally with the KLV WebVTT subtitle group. */
+export function createHlsMasterPlaylist(renditions, { includeSubtitles = true } = {}) {
   if (!Array.isArray(renditions) || renditions.length !== 2) {
     throw new Error("ABR master playlist requires the Low and ffprobe-derived High renditions");
   }
@@ -156,7 +156,7 @@ export function createHlsMasterPlaylist(renditions) {
   const variants = [...renditions]
     .sort((a, b) => a.bandwidth - b.bandwidth)
     .flatMap((rendition) => [
-    `#EXT-X-STREAM-INF:BANDWIDTH=${rendition.bandwidth},AVERAGE-BANDWIDTH=${rendition.averageBandwidth}${rendition.codecs ? `,CODECS="${rendition.codecs}"` : ""},RESOLUTION=${rendition.width}x${rendition.height},SUBTITLES="subs",CLOSED-CAPTIONS=NONE`,
+    `#EXT-X-STREAM-INF:BANDWIDTH=${rendition.bandwidth},AVERAGE-BANDWIDTH=${rendition.averageBandwidth}${rendition.codecs ? `,CODECS="${rendition.codecs}"` : ""},RESOLUTION=${rendition.width}x${rendition.height}${includeSubtitles ? ',SUBTITLES="subs"' : ''},CLOSED-CAPTIONS=NONE`,
     rendition.playlist
     ]);
 
@@ -164,19 +164,19 @@ export function createHlsMasterPlaylist(renditions) {
     "#EXTM3U",
     "#EXT-X-VERSION:6",
     "#EXT-X-INDEPENDENT-SEGMENTS",
-    subtitleGroup,
+    ...(includeSubtitles ? [subtitleGroup] : []),
     ...variants,
     ""
   ].join("\n");
 }
 
 /** Serializes the one-rendition master playlist used by HLS passthrough. */
-export function createPassthroughHlsMasterPlaylist() {
+export function createPassthroughHlsMasterPlaylist({ includeSubtitles = true } = {}) {
   return [
     "#EXTM3U",
     "#EXT-X-VERSION:6",
-    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="KLV",AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subtitles.m3u8"',
-    '#EXT-X-STREAM-INF:BANDWIDTH=10000000,SUBTITLES="subs",CLOSED-CAPTIONS=NONE',
+    ...(includeSubtitles ? ['#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="KLV",AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subtitles.m3u8"'] : []),
+    `#EXT-X-STREAM-INF:BANDWIDTH=10000000${includeSubtitles ? ',SUBTITLES="subs"' : ''},CLOSED-CAPTIONS=NONE`,
     "v0/index.m3u8",
     ""
   ].join("\n");
