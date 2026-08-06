@@ -2524,7 +2524,10 @@ app.post("/sources", async (req, res) => {
     if (requestedStreamId) {
       sources.delete(requestedStreamId);
       setSourceState(requestedStreamId, {
-        state: "error",
+        // A create failure occurs before a source runtime is published. All
+        // child processes above have already been stopped, so leave the UI in
+        // its retryable stopped state while preserving the diagnostic.
+        state: "stopped",
         running: false,
         ingestRunning: false,
         stage: null,

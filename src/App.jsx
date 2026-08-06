@@ -1377,7 +1377,9 @@ function App() {
       setStreamRuntime((prev) => ({
         ...prev,
         streamId,
-        state: serverOnlineRef.current ? 'error' : 'offline',
+        // A rejected create request has no published source runtime to stop.
+        // Keep the diagnostic but return the controls to their retryable state.
+        state: serverOnlineRef.current ? 'stopped' : 'offline',
         running: false,
         lastError: String(error?.message || error)
       }));
