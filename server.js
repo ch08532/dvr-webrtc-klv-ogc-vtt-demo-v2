@@ -173,6 +173,50 @@ const TRANSPORT_INTEGRITY_FINDINGS = [
   }
 ];
 
+const ISO_BASE_MEDIA_INTEGRITY_FINDINGS = [
+  {
+    code: "missing_moov_atom",
+    pattern: /moov atom not found/i,
+    message: "The MP4/MOV metadata atom is missing or truncated."
+  },
+  {
+    code: "invalid_sample_table",
+    pattern: /(?:invalid sample description|invalid stsc|invalid stco|invalid stsz)/i,
+    message: "The MP4/MOV sample table is invalid."
+  },
+  {
+    code: "truncated_media_data",
+    pattern: /(?:partial file|truncated|unexpected eof)/i,
+    message: "The MP4/MOV file ends before all media data is available."
+  }
+];
+
+const MATROSKA_INTEGRITY_FINDINGS = [
+  {
+    code: "invalid_ebml_header",
+    pattern: /(?:ebml header parsing failed|invalid ebml number)/i,
+    message: "The MKV EBML header is invalid."
+  },
+  {
+    code: "invalid_cluster",
+    pattern: /(?:invalid cluster|invalid element size)/i,
+    message: "An MKV cluster or element is invalid."
+  },
+  {
+    code: "truncated_media_data",
+    pattern: /(?:partial file|truncated|unexpected eof)/i,
+    message: "The MKV file ends before all media data is available."
+  }
+];
+
+const GENERIC_FILE_INTEGRITY_FINDINGS = [
+  {
+    code: "invalid_media_data",
+    pattern: /invalid data found when processing input/i,
+    message: "The container contains invalid media data."
+  }
+];
+
 /** Tests whether a spawned child process is still active. */
 function isProcessRunning(proc) {
   return !!proc && proc.exitCode == null && !proc.killed;
@@ -563,25 +607,36 @@ async function probeInputWithFfprobe(inputUrl, {
   });
 }
 
-/** Returns true when a file can be scanned as an MPEG transport stream. */
-function isTransportStreamFile(inputUrl) {
-  return /\.(?:ts|m2ts)$/i.test(String(inputUrl || ""));
+/** Selects full-file warning classifiers from ffprobe's detected container. */
+function resolveFileIntegrityProfile(inputUrl, containerName) {
+  const formatName = String(containerName || "").toLowerCase();
+  const extension = path.extname(String(inputUrl || "")).toLowerCase();
+  if (formatName.includes("mpegts") || [".ts", ".m2ts"].includes(extension)) {
+    return { id: "mpegts", label: "MPEG-TS", findings: [...TRANSPORT_INTEGRITY_FINDINGS, ...GENERIC_FILE_INTEGRITY_FINDINGS] };
+  }
+  if (formatName.includes("mov") || formatName.includes("mp4") || [".mp4", ".mov"].includes(extension)) {
+    return { id: "mp4-mov", label: "MP4/MOV", findings: [...ISO_BASE_MEDIA_INTEGRITY_FINDINGS, ...GENERIC_FILE_INTEGRITY_FINDINGS] };
+  }
+  if (formatName.includes("matroska") || formatName.includes("webm") || [".mkv", ".webm"].includes(extension)) {
+    return { id: "matroska", label: "MKV", findings: [...MATROSKA_INTEGRITY_FINDINGS, ...GENERIC_FILE_INTEGRITY_FINDINGS] };
+  }
+  return { id: "generic", label: "File", findings: GENERIC_FILE_INTEGRITY_FINDINGS };
 }
 
-/** Converts FFprobe transport warnings into concise, stable UI findings. */
-function summarizeTransportIntegrityFindings(stderr) {
+/** Converts full-file FFprobe warnings into concise, stable UI findings. */
+function summarizeFileIntegrityFindings(stderr, profile) {
   const text = String(stderr || "");
-  return TRANSPORT_INTEGRITY_FINDINGS
+  return profile.findings
     .filter((finding) => finding.pattern.test(text))
     .map(({ code, message }) => ({ code, message }));
 }
 
 /**
- * Reads every transport packet without decoding or writing media. FFprobe may
- * exit successfully after recovering from damaged TS packets, so stderr is
+ * Reads every demuxed packet without decoding or writing media. FFprobe may
+ * exit successfully after recovering from damaged input, so stderr is
  * deliberately classified alongside the process exit status.
  */
-function scanTransportStreamIntegrity(inputUrl) {
+function scanFileIntegrity(inputUrl, profile) {
   return new Promise((resolve) => {
     const startedAtMs = Date.now();
     const args = [
@@ -602,6 +657,8 @@ function scanTransportStreamIntegrity(inputUrl) {
       clearTimeout(timer);
       resolve({
         scanner: "ffprobe-count-packets",
+        container: profile.id,
+        containerLabel: profile.label,
         scannedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAtMs,
         ...result
@@ -635,12 +692,12 @@ function scanTransportStreamIntegrity(inputUrl) {
         return;
       }
 
-      const findings = summarizeTransportIntegrityFindings(stderr);
+      const findings = summarizeFileIntegrityFindings(stderr, profile);
       if (code !== 0) {
         finish({
-          status: "unavailable",
+          status: findings.length ? "corrupt" : "unavailable",
           findings,
-          error: stderr.trim() || `ffprobe exited (code=${String(code)}, signal=${String(signal)})`
+          error: findings.length ? null : (stderr.trim() || `ffprobe exited (code=${String(code)}, signal=${String(signal)})`)
         });
         return;
       }
@@ -846,19 +903,22 @@ function setSourceState(streamId, patch) {
   return next;
 }
 
-/** Runs a full TS integrity scan without delaying media packaging. */
-function queueTransportIntegrityScan({ streamId, inputUrl, requestId }) {
+/** Runs a full-file integrity scan without delaying media packaging. */
+function queueFileIntegrityScan({ streamId, inputUrl, containerName, requestId }) {
+  const profile = resolveFileIntegrityProfile(inputUrl, containerName);
   setSourceState(streamId, {
     integrity: {
       status: "scanning",
       scanner: "ffprobe-count-packets",
+      container: profile.id,
+      containerLabel: profile.label,
       findings: [],
       error: null,
       startedAt: new Date().toISOString()
     }
   });
 
-  void scanTransportStreamIntegrity(inputUrl)
+  void scanFileIntegrity(inputUrl, profile)
     .then((integrity) => {
       const tracked = sourceStates.get(streamId);
       // A newer start may have replaced this source while its scan was running.
@@ -879,6 +939,8 @@ function queueTransportIntegrityScan({ streamId, inputUrl, requestId }) {
       const integrity = {
         status: "unavailable",
         scanner: "ffprobe-count-packets",
+        container: profile.id,
+        containerLabel: profile.label,
         findings: [],
         error: String(error?.message || error),
         scannedAt: new Date().toISOString()
@@ -1980,6 +2042,9 @@ app.post("/sources", async (req, res) => {
     // A confirmed no-KLV file has no telemetry sidecar to decode or finalize.
     // An absent/failed probe remains conservative and takes the normal KLV path.
     const klvProcessingRequired = sourceType !== "file" || sourceProbe?.klv?.available !== false;
+    const fileIntegrityProfile = sourceType === "file"
+      ? resolveFileIntegrityProfile(resolvedInputUrl, sourceProbe?.container?.name)
+      : null;
 
     if (sources.has(streamId)) {
       return res.status(409).json({
@@ -2014,8 +2079,15 @@ app.post("/sources", async (req, res) => {
       klvProcessingRequired,
       klvTelemetryEventCount: klvProcessingRequired ? null : 0,
       sourceVideo: sourceProbe?.video || null,
-      integrity: sourceType === "file" && isTransportStreamFile(resolvedInputUrl)
-        ? { status: "pending", scanner: "ffprobe-count-packets", findings: [], error: null }
+      integrity: sourceType === "file"
+        ? {
+          status: "pending",
+          scanner: "ffprobe-count-packets",
+          container: fileIntegrityProfile.id,
+          containerLabel: fileIntegrityProfile.label,
+          findings: [],
+          error: null
+        }
         : null,
       durationSeconds: fileDurationSeconds,
       availableClipEndSeconds: sourceType === "file" ? 0 : null,
@@ -2346,8 +2418,13 @@ app.post("/sources", async (req, res) => {
       lastError: null
     });
 
-    if (sourceType === "file" && isTransportStreamFile(resolvedInputUrl)) {
-      queueTransportIntegrityScan({ streamId, inputUrl: resolvedInputUrl, requestId: req.requestId });
+    if (sourceType === "file") {
+      queueFileIntegrityScan({
+        streamId,
+        inputUrl: resolvedInputUrl,
+        containerName: sourceProbe?.container?.name,
+        requestId: req.requestId
+      });
     }
 
     if (sourceType === "file" && hls.proc?.exitCode === 0) {

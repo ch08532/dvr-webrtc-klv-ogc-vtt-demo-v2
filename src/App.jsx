@@ -2512,21 +2512,22 @@ function App() {
     return { color: 'gray', label: 'No KLV found' };
   };
 
-  const transportIntegrityStatus = (source) => {
+  const fileIntegrityStatus = (source) => {
     const integrity = source?.integrity;
     if (!integrity) return null;
+    const containerLabel = integrity.containerLabel || 'File';
     if (integrity.status === 'pending' || integrity.status === 'scanning') {
       return {
         color: 'yellow',
-        label: 'Scanning TS integrity',
+        label: `Scanning ${containerLabel} integrity`,
         detail: 'Full-file scan running in the background; media packaging continues.'
       };
     }
     if (integrity.status === 'clean') {
       return {
         color: 'green',
-        label: 'TS integrity: clean',
-        detail: 'FFprobe scanned the full transport stream without corruption warnings.'
+        label: `${containerLabel} integrity: clean`,
+        detail: 'FFprobe read the full file without corruption warnings.'
       };
     }
     if (integrity.status === 'corrupt') {
@@ -2535,13 +2536,13 @@ function App() {
         : '';
       return {
         color: 'red',
-        label: 'TS corruption detected',
-        detail: `${findingText ? `${findingText} ` : ''}Valid media will be salvaged; final KLV may be incomplete.`
+        label: `${containerLabel} corruption detected`,
+        detail: `${findingText ? `${findingText} ` : ''}Valid media will be salvaged when possible; KLV may be incomplete when present.`
       };
     }
     return {
       color: 'yellow',
-      label: 'TS integrity unavailable',
+      label: `${containerLabel} integrity unavailable`,
       detail: integrity.error || 'The full-file integrity scan could not complete.'
     };
   };
@@ -3789,7 +3790,7 @@ function App() {
                     <Text size="xs" c="dimmed">Based on the uploaded file&apos;s stream probe.</Text>
                   </Group>
                   {(() => {
-                    const integrityStatus = transportIntegrityStatus(streamRuntime);
+                    const integrityStatus = fileIntegrityStatus(streamRuntime);
                     return integrityStatus ? (
                       <Group gap="xs" align="flex-start">
                         <Badge color={integrityStatus.color} variant="light">{integrityStatus.label}</Badge>
@@ -3856,7 +3857,7 @@ function App() {
                               return <Badge color={klvStatus.color} variant="light" w="fit-content">{klvStatus.label}</Badge>;
                             })()}
                             {(() => {
-                              const integrityStatus = transportIntegrityStatus(s);
+                              const integrityStatus = fileIntegrityStatus(s);
                               return integrityStatus ? (
                                 <Stack gap={2}>
                                   <Badge color={integrityStatus.color} variant="light" w="fit-content">{integrityStatus.label}</Badge>
