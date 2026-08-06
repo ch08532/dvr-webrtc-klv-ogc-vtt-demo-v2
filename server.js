@@ -1070,6 +1070,7 @@ function getSourceRuntime(streamId) {
       klvProbe: tracked?.klvProbe || null,
       klvProcessingRequired: tracked?.klvProcessingRequired !== false,
       klvTelemetryEventCount: tracked?.klvTelemetryEventCount ?? null,
+      manualVideoStartUtcMs: tracked?.manualVideoStartUtcMs ?? null,
       sourceVideo: tracked?.sourceVideo || null,
       integrity: tracked?.integrity || null,
       stage: tracked?.stage || null,
@@ -1127,6 +1128,7 @@ function getSourceRuntime(streamId) {
     klvProbe: source.klvProbe || tracked?.klvProbe || null,
     klvProcessingRequired: source.klvProcessingRequired !== false,
     klvTelemetryEventCount: tracked?.klvTelemetryEventCount ?? null,
+    manualVideoStartUtcMs: tracked?.manualVideoStartUtcMs ?? null,
     sourceVideo: source.sourceVideo || tracked?.sourceVideo || null,
     integrity: tracked?.integrity || null,
     stage: tracked?.stage || null,
@@ -1683,6 +1685,42 @@ app.get("/sources/:streamId/state", (req, res) => {
   res.json(getSourceRuntime(req.params.streamId));
 });
 
+/** Saves a UTC anchor for the first presentation frame of a no-KLV file source. */
+app.put("/sources/:streamId/manual-video-time-anchor", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const source = sources.get(streamId);
+    const state = currentSourceState(streamId);
+    if (!source || source.sourceType !== "file" || source.klvProcessingRequired !== false) {
+      return res.status(409).json({ ok: false, error: "mission timestamp is available only for file sources with confirmed no KLV" });
+    }
+    if (!["running", "finalizing", "ready"].includes(state)) {
+      return res.status(409).json({ ok: false, error: "mission timestamp is available once the file is playable" });
+    }
+    const anchor = await store.setManualVideoTimeAnchor(streamId, req.body?.firstFrameUtcMs);
+    setSourceState(streamId, { manualVideoStartUtcMs: anchor.firstFrameUtcMs });
+    res.json({ ok: true, streamId, manualVideoStartUtcMs: anchor.firstFrameUtcMs, updatedAt: anchor.updatedAt, state: getSourceRuntime(streamId) });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+/** Clears an operator-supplied no-KLV first-frame UTC anchor. */
+app.delete("/sources/:streamId/manual-video-time-anchor", async (req, res) => {
+  try {
+    const streamId = validateTargetLogStreamId(req.params.streamId);
+    const source = sources.get(streamId);
+    if (!source || source.sourceType !== "file" || source.klvProcessingRequired !== false) {
+      return res.status(409).json({ ok: false, error: "mission timestamp is available only for file sources with confirmed no KLV" });
+    }
+    await store.clearManualVideoTimeAnchor(streamId);
+    setSourceState(streamId, { manualVideoStartUtcMs: null });
+    res.json({ ok: true, streamId, manualVideoStartUtcMs: null, state: getSourceRuntime(streamId) });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
 /** Builds one CPU or GPU-assisted FFmpeg filmstrip capture command. */
 async function captureClipFilmstrip({ inputPath, times, filterInputs, hstackInputs, thumbnailPath, gpuDecoder = null }) {
   const useGpu = !!gpuDecoder;
@@ -2140,6 +2178,9 @@ app.post("/sources", async (req, res) => {
       klvProbe: sourceProbe?.klv || null,
       klvProcessingRequired,
       klvTelemetryEventCount: klvProcessingRequired ? null : 0,
+      // Source-state updates merge with the prior mission. Clear this
+      // per-source operator value before a newly selected file is packaged.
+      manualVideoStartUtcMs: null,
       sourceVideo: sourceProbe?.video || null,
       integrity: sourceType === "file"
         ? {
@@ -2963,8 +3004,13 @@ async function normalizeTargetLogCustomFields(streamId, suppliedFields, existing
 /** Resolves a KLV mission timestamp to a video offset only when it is within known telemetry coverage. */
 async function videoTimeForMissionTime(streamId, missionTimeMs) {
   const timeline = await store.getMissionTimeline(streamId);
-  if (!timeline || missionTimeMs < timeline.missionMinMs || missionTimeMs > timeline.missionMaxMs) return null;
-  const videoTimeMs = Math.round(timeline.videoBaseMs + (missionTimeMs - timeline.missionBaseMs));
+  if (timeline && missionTimeMs >= timeline.missionMinMs && missionTimeMs <= timeline.missionMaxMs) {
+    const videoTimeMs = Math.round(timeline.videoBaseMs + (missionTimeMs - timeline.missionBaseMs));
+    return Number.isFinite(videoTimeMs) && videoTimeMs >= 0 ? videoTimeMs : null;
+  }
+  const manualAnchor = await store.getManualVideoTimeAnchor(streamId);
+  if (!manualAnchor || missionTimeMs < manualAnchor.firstFrameUtcMs) return null;
+  const videoTimeMs = Math.round(missionTimeMs - manualAnchor.firstFrameUtcMs);
   return Number.isFinite(videoTimeMs) && videoTimeMs >= 0 ? videoTimeMs : null;
 }
 

@@ -332,6 +332,8 @@ function App() {
   const [targetLogEditor, setTargetLogEditor] = useState(null);
   const [targetLogSchemaOpen, setTargetLogSchemaOpen] = useState(false);
   const [targetLogFieldDraft, setTargetLogFieldDraft] = useState({ key: '', label: '', dataType: 'text', required: false });
+  const [manualVideoStartUtcText, setManualVideoStartUtcText] = useState('');
+  const [manualVideoAnchorInFlight, setManualVideoAnchorInFlight] = useState(false);
   const [fileStartProgress, setFileStartProgress] = useState(null);
   const [dvrDiag, setDvrDiag] = useState({
     currentSrc: null,
@@ -574,6 +576,18 @@ function App() {
   const canStartSource = serverOnline && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
   const currentSourceIsFile = streamRuntime?.sourceType === 'file';
+  const rawManualVideoStartUtcMs = streamRuntime?.manualVideoStartUtcMs;
+  const manualVideoStartUtcMs = Number(rawManualVideoStartUtcMs);
+  const hasManualVideoStartUtc = rawManualVideoStartUtcMs != null
+    && Number.isFinite(manualVideoStartUtcMs)
+    && manualVideoStartUtcMs >= 0;
+  const hasConfirmedNoKlvFile = currentSourceIsFile && streamRuntime?.klvProbe?.available === false;
+  const manualVideoUtcMs = hasManualVideoStartUtc && Number.isFinite(Number(dvrDiag.currentTimeSec))
+    ? Math.round(manualVideoStartUtcMs + (Number(dvrDiag.currentTimeSec) * 1000))
+    : null;
+  const canEditManualVideoAnchor = hasConfirmedNoKlvFile
+    && hlsMediaLoaded
+    && ['running', 'finalizing', 'ready'].includes(streamRuntime?.state);
   const hasActiveViewerSource = !['stopped', 'error', 'offline'].includes(streamRuntime?.state);
   const playbackTitle = currentSourceIsFile ? 'Post Mission Playback' : 'Time Shifted Playback (HLS)';
   const playbackDescription = currentSourceIsFile
@@ -1674,7 +1688,7 @@ function App() {
       return;
     }
     const telemetry = overlayData?.mode === 'dvr-vtt' || overlayData?.mode === 'live-ws' ? overlayData : null;
-    const missionTimeMs = klvMissionTimeMs(telemetry);
+    const missionTimeMs = klvMissionTimeMs(telemetry) ?? manualVideoUtcMs;
     const capture = isTargetLogCoordinate(mapPosition?.lat, mapPosition?.lon)
       ? { position: { lat: Number(mapPosition.lat), lon: Number(mapPosition.lon) }, positionSource: 'UNAVAILABLE' }
       : capturedTargetPosition(telemetry);
@@ -1759,6 +1773,41 @@ function App() {
       return null;
     } catch (error) {
       return String(error?.message || error);
+    }
+  };
+
+  const saveManualVideoTimeAnchor = async () => {
+    if (!canEditManualVideoAnchor || manualVideoAnchorInFlight) return;
+    setManualVideoAnchorInFlight(true);
+    try {
+      const firstFrameUtcMs = parseTargetLogMissionTime(manualVideoStartUtcText);
+      const result = await api(`/sources/${encodeURIComponent(streamId)}/manual-video-time-anchor`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ firstFrameUtcMs })
+      });
+      if (!result?.ok) throw new Error(result?.error || 'Could not save mission timestamp.');
+      if (result?.state?.streamId) setStreamRuntime(result.state);
+      setStatus('Mission timestamp saved for the first video frame.');
+    } catch (error) {
+      setStatus(`Mission timestamp save failed: ${String(error?.message || error)}`);
+    } finally {
+      setManualVideoAnchorInFlight(false);
+    }
+  };
+
+  const clearManualVideoTimeAnchor = async () => {
+    if (!hasConfirmedNoKlvFile || manualVideoAnchorInFlight) return;
+    setManualVideoAnchorInFlight(true);
+    try {
+      const result = await api(`/sources/${encodeURIComponent(streamId)}/manual-video-time-anchor`, { method: 'DELETE' });
+      if (!result?.ok) throw new Error(result?.error || 'Could not clear mission timestamp.');
+      if (result?.state?.streamId) setStreamRuntime(result.state);
+      setStatus('Mission timestamp cleared.');
+    } catch (error) {
+      setStatus(`Mission timestamp clear failed: ${String(error?.message || error)}`);
+    } finally {
+      setManualVideoAnchorInFlight(false);
     }
   };
 
@@ -3257,6 +3306,10 @@ function App() {
   }, [streamId]);
 
   useEffect(() => {
+    setManualVideoStartUtcText(hasManualVideoStartUtc ? new Date(manualVideoStartUtcMs).toISOString() : '');
+  }, [hasManualVideoStartUtc, manualVideoStartUtcMs]);
+
+  useEffect(() => {
     serverOnlineRef.current = serverOnline;
   }, [serverOnline]);
 
@@ -3552,6 +3605,10 @@ function App() {
   const missionTimePickerValue = targetLogEditor && !missionTimeValidationError
     ? new Date(parseTargetLogMissionTime(targetLogEditor.missionTimeText))
     : null;
+  const manualVideoAnchorPickerValue = (() => {
+    const parsed = Date.parse(manualVideoStartUtcText);
+    return Number.isFinite(parsed) ? new Date(parsed) : null;
+  })();
   const activeHlsRendition = activeHlsMode === 'abr'
     ? activeHlsRenditions.find((rendition) => (
       [dvrDiag.currentPlaylistUri, dvrDiag.currentPlaylistResolvedUri]
@@ -3969,6 +4026,33 @@ function App() {
                            ? `player time: ${formatPlayerTime(dvrDiag.currentTimeSec)} / ${formatPlayerTime(dvrDiag.durationSec)}`
                           : `Playback delay: ${formatPlayerTime(liveBehindSeconds)} behind HLS edge · playback window: ${formatPlayerTime(liveDvrWindowSeconds)}`}
                        </Text>
+                      {canEditManualVideoAnchor ? (
+                        <Paper p="xs" withBorder mt="xs">
+                          <Text size="sm" fw={600}>Mission Timestamp</Text>
+                          <Text size="xs" c="dimmed" mb="xs">
+                            Set the UTC mission timestamp of the first presentation frame. Playback time is derived from the HLS presentation timeline; this is manually assigned, not KLV telemetry.
+                          </Text>
+                          <Group align="end" gap="xs" wrap="wrap">
+                            <DateTimePicker
+                              label="First video frame"
+                              description="Choose in your local time zone; it is saved and displayed as UTC."
+                              value={manualVideoAnchorPickerValue}
+                              onChange={(value) => setManualVideoStartUtcText(value instanceof Date && Number.isFinite(value.getTime()) ? value.toISOString() : '')}
+                              valueFormat="YYYY-MM-DD HH:mm:ss"
+                              withSeconds
+                              clearable
+                              style={{ flex: '1 1 300px' }}
+                            />
+                            <Button size="xs" onClick={saveManualVideoTimeAnchor} loading={manualVideoAnchorInFlight} disabled={!manualVideoStartUtcText.trim()}>Save UTC</Button>
+                            {hasManualVideoStartUtc ? <Button size="xs" variant="default" onClick={clearManualVideoTimeAnchor} loading={manualVideoAnchorInFlight}>Clear</Button> : null}
+                          </Group>
+                          <Text size="xs" c={hasManualVideoStartUtc ? 'teal' : 'dimmed'} mt="xs">
+                            {hasManualVideoStartUtc && Number.isFinite(manualVideoUtcMs)
+                              ? `Current video UTC: ${new Date(manualVideoUtcMs).toISOString()} (PTS-backed playback time)`
+                              : 'No mission timestamp is set.'}
+                          </Text>
+                        </Paper>
+                      ) : null}
                       {activeTab === 'dvr' && hlsMediaLoaded ? (
                         <Group mt="xs" gap="xs" justify="center">
                           <Tooltip label="Play from start" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToStart} aria-label="Play from start"><PlaybackControlIcon name="start" /></ActionIcon></Tooltip>

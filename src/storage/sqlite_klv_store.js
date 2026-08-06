@@ -239,6 +239,13 @@ export class SqliteKlvStore {
         updated_at TEXT NOT NULL
       );
     `);
+    await run(this.db, `
+      CREATE TABLE IF NOT EXISTS stream_manual_video_time_anchor (
+        stream_id TEXT PRIMARY KEY,
+        first_frame_utc_ms INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
     log.info("init_complete", { dbPath: this.dbPath });
   }
 
@@ -482,6 +489,7 @@ export class SqliteKlvStore {
         const events = await run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]);
         await run(this.db, `DELETE FROM platform_track_points WHERE stream_id=?`, [streamId]);
         await run(this.db, `DELETE FROM stream_mission_timeline WHERE stream_id=?`, [streamId]);
+        await run(this.db, `DELETE FROM stream_manual_video_time_anchor WHERE stream_id=?`, [streamId]);
         await run(this.db, "COMMIT");
         return events;
       } catch (error) {
@@ -492,6 +500,33 @@ export class SqliteKlvStore {
     const deleted = result?.changes ?? 0;
     log.info("purge_stream", { streamId, deleted });
     return deleted;
+  }
+
+  /** Returns the optional operator-supplied UTC time for the first video frame. */
+  async getManualVideoTimeAnchor(streamId) {
+    const row = await get(this.db, `SELECT first_frame_utc_ms, updated_at FROM stream_manual_video_time_anchor WHERE stream_id=?`, [streamId]);
+    return row ? { firstFrameUtcMs: Number(row.first_frame_utc_ms), updatedAt: row.updated_at } : null;
+  }
+
+  /** Saves an operator-supplied UTC anchor for a no-KLV file source. */
+  async setManualVideoTimeAnchor(streamId, firstFrameUtcMs) {
+    const value = Math.round(Number(firstFrameUtcMs));
+    if (!Number.isFinite(value) || value < 0) throw new Error("firstFrameUtcMs must be a non-negative Unix timestamp in milliseconds");
+    const updatedAt = new Date().toISOString();
+    await retryBusyWrite("set_manual_video_time_anchor", () => run(this.db, `
+      INSERT INTO stream_manual_video_time_anchor(stream_id, first_frame_utc_ms, updated_at)
+      VALUES(?,?,?)
+      ON CONFLICT(stream_id) DO UPDATE SET first_frame_utc_ms=excluded.first_frame_utc_ms, updated_at=excluded.updated_at
+    `, [streamId, value, updatedAt]));
+    return { firstFrameUtcMs: value, updatedAt };
+  }
+
+  /** Removes a manual video UTC anchor without affecting the source media. */
+  async clearManualVideoTimeAnchor(streamId) {
+    const result = await retryBusyWrite("clear_manual_video_time_anchor", () => run(this.db,
+      `DELETE FROM stream_manual_video_time_anchor WHERE stream_id=?`, [streamId]
+    ));
+    return (result?.changes ?? 0) > 0;
   }
 
   /** Updates the KLV mission-time to video-time alignment for a stream. */
@@ -680,6 +715,7 @@ export class SqliteKlvStore {
         const telemetry = await run(this.db, `DELETE FROM klv_events`);
         await run(this.db, `DELETE FROM platform_track_points`);
         await run(this.db, `DELETE FROM stream_mission_timeline`);
+        await run(this.db, `DELETE FROM stream_manual_video_time_anchor`);
         const entries = await run(this.db, `DELETE FROM target_log_entries`);
         const fields = await run(this.db, `DELETE FROM target_log_fields`);
         await run(this.db, "COMMIT");
