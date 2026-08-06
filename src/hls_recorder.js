@@ -10,6 +10,15 @@ const log = createServiceLogger("hls_recorder");
 const TRANSIENT_INPUT_WARNING_RE = /Invalid frame dimensions 0x0\./i;
 const STOP_TERM_WAIT_MS = Number(process.env.FFMPEG_STOP_TERM_WAIT_MS || 1500);
 const STOP_KILL_WAIT_MS = Number(process.env.FFMPEG_STOP_KILL_WAIT_MS || 1500);
+const GPU_LADDER_CODECS = new Set(["h264", "hevc"]);
+const NVENC_ENCODERS = new Set(["h264_nvenc", "hevc_nvenc"]);
+
+/** Reads an opt-out flag while defaulting the supported CUDA ladder path on. */
+function envFlag(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw == null) return defaultValue;
+  return !["0", "false", "no", "off"].includes(String(raw).trim().toLowerCase());
+}
 
 /** Converts public HLS mode values to the recorder's internal encoder modes. */
 function normalizeMode(mode) {
@@ -135,7 +144,8 @@ function buildLadderFilter(
   renditions,
   copyRenditionIndex = null,
   nativeRenditionSampleAspectRatio = "1/1",
-  sourceDisplayAspectRatio = 16 / 9
+  sourceDisplayAspectRatio = 16 / 9,
+  useGpuFilters = false
 ) {
   const encodedRenditionIndexes = renditions
     .map((_, index) => index)
@@ -163,11 +173,17 @@ function buildLadderFilter(
     const lowerRungFit = fitSquarePixelRendition(rendition, sourceDisplayAspectRatio);
     const needsPadding = lowerRungFit.width !== rendition.width || lowerRungFit.height !== rendition.height;
     const lowerRungFilters = [
-      `scale=${lowerRungFit.width}:${lowerRungFit.height}`,
+      useGpuFilters
+        ? `scale_cuda=${lowerRungFit.width}:${lowerRungFit.height}:format=nv12`
+        : `scale=${lowerRungFit.width}:${lowerRungFit.height}`,
       "setsar=1"
     ];
     if (needsPadding) {
-      lowerRungFilters.push(`pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black`);
+      lowerRungFilters.push(
+        useGpuFilters
+          ? `pad_cuda=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black`
+          : `pad=${rendition.width}:${rendition.height}:(ow-iw)/2:(oh-ih)/2:color=black`
+      );
     }
     filters.push(
       `[input${inputIndex}]${lowerRungFilters.join(",")}[video${renditionIndex}]`
@@ -206,6 +222,16 @@ function scopeVideoArgsToStreams(videoArgs, streamIndexes) {
   return scoped;
 }
 
+/** Removes software pixel-format forcing so NVENC can consume CUDA frames directly. */
+function gpuFilterVideoArgs(videoArgs) {
+  const adjusted = [...videoArgs];
+  const pixelFormatIndex = adjusted.findIndex((value) => value === "-pix_fmt");
+  if (pixelFormatIndex >= 0 && pixelFormatIndex + 1 < adjusted.length) {
+    adjusted.splice(pixelFormatIndex, 2);
+  }
+  return adjusted;
+}
+
 /** Starts HLS packaging and returns a handle with process and output metadata. */
 export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds, mode, requestId, sourceType = "stream", sourceVideo = null, onProgress }) {
   const requestedMode = normalizeMode(mode);
@@ -233,6 +259,15 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
   const videoProfile = buildVideoArgs(chosen, {
     gpuPreset: isFileSource ? "p1" : undefined
   });
+  const gpuFilterEnabled = chosen === "xcode-any"
+    && videoProfile.usingGpu
+    && NVENC_ENCODERS.has(String(videoProfile.encoder || "").toLowerCase())
+    && envFlag("FFMPEG_ABR_GPU_FILTERS", true)
+    && GPU_LADDER_CODECS.has(String(sourceVideo?.codec || "").toLowerCase());
+  const gpuFilterInputArgs = gpuFilterEnabled
+    ? ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    : [];
+  const abrVideoArgs = gpuFilterEnabled ? gpuFilterVideoArgs(videoProfile.videoArgs) : videoProfile.videoArgs;
   const inputProtocolArgs = /^udp:\/\//i.test(inputUrl)
     ? ["-fifo_size", "2000000", "-overrun_nonfatal", "1"]
     : [];
@@ -269,6 +304,10 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     ...inputTimestampArgs,
     ...inputRecoveryArgs,
     "-avoid_negative_ts", "make_zero",
+
+    // Keep CUDA-decoded frames on the GPU through the ABR scale/pad graph
+    // and NVENC outputs. Unsupported codecs retain the CPU filter path.
+    ...gpuFilterInputArgs,
 
     // Tune probing (TS/KLV)
     "-probesize", "32M",
@@ -344,8 +383,8 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     "-an",
     "-sn",
     ...(copyNativeTopRung
-      ? scopeVideoArgsToStreams(videoProfile.videoArgs, encodedAbrRenditionIndexes)
-      : videoProfile.videoArgs),
+      ? scopeVideoArgsToStreams(abrVideoArgs, encodedAbrRenditionIndexes)
+      : abrVideoArgs),
     ...(copyNativeTopRung ? [`-c:v:${nativeTopRenditionIndex}`, "copy"] : []),
     ...renditions.flatMap((rendition, index) => {
       if (copyNativeTopRung && index === nativeTopRenditionIndex) return [];
@@ -382,7 +421,8 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
           renditions,
           copyNativeTopRung ? nativeTopRenditionIndex : null,
           nativeRenditionSampleAspectRatio,
-          sourceDisplayAspectRatio
+          sourceDisplayAspectRatio,
+          gpuFilterEnabled
         ), ...carrierOutput, ...abrOutput])
   ];
   // Runtime state, UI diagnostics, and the startup log share this immutable
@@ -413,6 +453,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     streamCopy: isPassthrough,
     encoder: videoProfile.encoder,
     usingGpu: videoProfile.usingGpu,
+    gpuFilterEnabled,
     copyNativeTopRung,
     renditions: renditionPlan,
     metadataPlaylist,
@@ -493,6 +534,7 @@ export function startHlsRecorder({ streamId, inputUrl, outDir, hlsSegmentSeconds
     requestId,
     encoder: videoProfile.encoder,
     usingGpu: videoProfile.usingGpu,
+    gpuFilterEnabled,
     isAbr: chosen === "xcode-any",
     copyNativeTopRung,
     renditions: renditionPlan,

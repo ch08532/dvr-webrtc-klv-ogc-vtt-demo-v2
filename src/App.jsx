@@ -3942,16 +3942,16 @@ function App() {
                           <>
                             {(() => {
                               const klvStatus = klvProbeStatus(s);
-                              return <Badge color={klvStatus.color} variant="light" w="fit-content">{klvStatus.label}</Badge>;
-                            })()}
-                            {(() => {
                               const integrityStatus = fileIntegrityStatus(s);
-                              return integrityStatus ? (
-                                <Stack gap={2}>
-                                  <Badge color={integrityStatus.color} variant="light" w="fit-content">{integrityStatus.label}</Badge>
+                              return <>
+                                <Group gap="xs" wrap="wrap">
+                                  <Badge color={klvStatus.color} variant="light">{klvStatus.label}</Badge>
+                                  {integrityStatus ? <Badge color={integrityStatus.color} variant="light">{integrityStatus.label}</Badge> : null}
+                                </Group>
+                                {integrityStatus ? (
                                   <Text size="xs" c={integrityStatus.color === 'red' ? 'red' : 'dimmed'}>{integrityStatus.detail}</Text>
-                                </Stack>
-                              ) : null;
+                                ) : null}
+                              </>;
                             })()}
                             <Text size="xs" c="dimmed">
                               conversion: {conversionProgress(s) != null ? `${conversionProgress(s).toFixed(1)}%` : 'preparing'} · {formatConversionTime(s.processedSeconds)} / {formatConversionTime(s.durationSeconds)}

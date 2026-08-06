@@ -25,6 +25,7 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 - `FFMPEG_USE_GPU=1` (default) enables GPU encode for HLS transcode modes (`xcode-single`, `xcode-any`).
 - `FFMPEG_GPU_CODEC=h264_nvenc` selects the GPU encoder.
 - `FFMPEG_HWACCEL=auto` selects decode hwaccel mode.
+- In ABR mode, supported H.264/HEVC inputs use CUDA decode plus `scale_cuda`/`pad_cuda` for encoded rungs, keeping frames on the GPU until NVENC. Set `FFMPEG_ABR_GPU_FILTERS=0` to retain GPU encoding while using the CPU filter path.
 - Set `FFMPEG_USE_GPU=0` to force CPU `libx264` fallback.
 - On startup, the service logs the FFmpeg and FFprobe version lines and runs a one-frame encode using `FFMPEG_GPU_CODEC`. Read the same result from `/healthz` or `/metrics/runtime` under `mediaTools`. Missing FFmpeg/FFprobe makes `/healthz` return `503`; an unavailable GPU encoder is reported but does not prevent CPU fallback.
 
