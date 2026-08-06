@@ -477,14 +477,43 @@ function App() {
     setLivePlatformHistoryLoading(false);
     setSourcesList([]);
     setAutoAttachOnDvr(false);
-    setInputProbe((prev) => ({ ...prev, phase: 'idle', error: null }));
+    setFileStartProgress(null);
+    setClipThumbnailFrames([]);
+    setClipThumbnailLoading(false);
+    setClipResult(null);
+    setClipStartSeconds(0);
+    setClipEndSeconds(0);
+    setInputProbe({
+      phase: 'idle',
+      available: null,
+      indicator: null,
+      container: null,
+      video: null,
+      klv: null,
+      error: null,
+      testedAt: null
+    });
     setStreamRuntime((prev) => ({
-      ...prev,
+      streamId: prev?.streamId || streamId,
       state: 'offline',
       running: false,
       hlsRunning: false,
       klvRunning: false,
       ingestRunning: false,
+      sourceType: null,
+      klvProbe: null,
+      integrity: null,
+      sourceVideo: null,
+      durationSeconds: null,
+      processedSeconds: null,
+      progressPercent: null,
+      encodeSpeed: null,
+      etaSeconds: null,
+      finalizationProgressPercent: null,
+      finalizationProcessedSegments: null,
+      finalizationTotalSegments: null,
+      finalizationEtaSeconds: null,
+      manualVideoStartUtcMs: null,
       lastError: 'server offline'
     }));
     setWebrtcDiag({
