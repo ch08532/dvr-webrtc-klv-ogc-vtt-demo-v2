@@ -27,61 +27,61 @@ const platformStyle = (heading) => new Style({
     points: 3,
     radius: 12,
     rotation: ((90 - (heading ?? 0)) * Math.PI) / 180,
-    fill: new Fill({ color: '#228be6' }),
-    stroke: new Stroke({ color: '#ffffff', width: 2 })
+    fill: new Fill({ color: '#3FC6D1' }),
+    stroke: new Stroke({ color: '#E7ECEF', width: 2 })
   })
 });
 
 const platformHeadingLineStyle = [
-  new Style({ stroke: new Stroke({ color: '#ffffff', width: 5 }) }),
-  new Style({ stroke: new Stroke({ color: '#228be6', width: 3 }) })
+  new Style({ stroke: new Stroke({ color: '#E7ECEF', width: 5 }) }),
+  new Style({ stroke: new Stroke({ color: '#3FC6D1', width: 3 }) })
 ];
 
 const platformHistoryStyle = [
-  new Style({ stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.78)', width: 6 }) }),
-  new Style({ stroke: new Stroke({ color: 'rgba(34, 139, 230, 0.88)', width: 3, lineDash: [9, 6] }) })
+  new Style({ stroke: new Stroke({ color: 'rgba(231, 236, 239, 0.78)', width: 6 }) }),
+  new Style({ stroke: new Stroke({ color: 'rgba(63, 198, 209, 0.88)', width: 3, lineDash: [9, 6] }) })
 ];
 
 const frameCenterStyle = new Style({
   image: new CircleStyle({
     radius: 7,
-    fill: new Fill({ color: '#fa5252' }),
-    stroke: new Stroke({ color: '#ffffff', width: 2 })
+    fill: new Fill({ color: '#E5484D' }),
+    stroke: new Stroke({ color: '#E7ECEF', width: 2 })
   }),
   text: new Text({
     text: 'Frame center',
     offsetY: -18,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#1a1b1e', width: 3 })
+    fill: new Fill({ color: '#E7ECEF' }),
+    stroke: new Stroke({ color: '#0A0D10', width: 3 })
   })
 });
 
 const lineStyle = new Style({
-  stroke: new Stroke({ color: 'rgba(250, 82, 82, 0.8)', width: 2, lineDash: [8, 6] })
+  stroke: new Stroke({ color: 'rgba(229, 72, 77, 0.8)', width: 2, lineDash: [8, 6] })
 });
 
 const frameGeometryStyle = new Style({
-  fill: new Fill({ color: 'rgba(252, 196, 25, 0.22)' }),
-  stroke: new Stroke({ color: '#f08c00', width: 3 }),
+  fill: new Fill({ color: 'rgba(232, 178, 61, 0.22)' }),
+  stroke: new Stroke({ color: '#E8B23D', width: 3 }),
   text: new Text({
     text: 'Frame footprint',
     offsetY: 18,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#1a1b1e', width: 3 })
+    fill: new Fill({ color: '#E7ECEF' }),
+    stroke: new Stroke({ color: '#0A0D10', width: 3 })
   })
 });
 
 const targetLogStyle = (selected) => new Style({
   image: new CircleStyle({
     radius: selected ? 9 : 7,
-    fill: new Fill({ color: selected ? '#e8590c' : '#7048e8' }),
-    stroke: new Stroke({ color: '#ffffff', width: 2 })
+    fill: new Fill({ color: selected ? '#E5484D' : '#3FC6D1' }),
+    stroke: new Stroke({ color: '#E7ECEF', width: 2 })
   }),
   text: new Text({
     text: 'Target',
     offsetY: -18,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#1a1b1e', width: 3 })
+    fill: new Fill({ color: '#E7ECEF' }),
+    stroke: new Stroke({ color: '#0A0D10', width: 3 })
   })
 });
 
@@ -126,6 +126,14 @@ function MapControlIcon({ name }) {
         <path d="M4 17c3-8 5 2 8-5s5 3 8-5" {...common} />
         <circle cx="4" cy="17" r="1.5" {...common} />
         <circle cx="20" cy="7" r="1.5" {...common} />
+      </svg>
+    );
+  }
+  if (name === 'legend') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="5" y="4" width="14" height="16" rx="1.5" {...common} />
+        <path d="M8 9h2M12 9h4M8 13h2M12 13h4M8 17h2M12 17h4" {...common} />
       </svg>
     );
   }
@@ -174,6 +182,7 @@ export default function KlvMap({
   const [hasTargetLogPositions, setHasTargetLogPositions] = useState(false);
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
   const [followFrameCenter, setFollowFrameCenter] = useState(false);
+  const [showLegend, setShowLegend] = useState(true);
 
   useEffect(() => {
     onPositionSelectRef.current = onPositionSelect;
@@ -513,6 +522,29 @@ export default function KlvMap({
   return (
     <div className="klv-map-shell">
       <div ref={targetRef} className="klv-map" aria-label="KLV telemetry map" />
+      {showLegend ? <div className="klv-map-legend" aria-label="Telemetry map legend">
+        <div className="klv-map-legend-title">Telemetry layers</div>
+        <div className="klv-map-legend-row">
+          <span className="klv-map-legend-symbol klv-map-legend-platform" aria-hidden="true" />
+          <span>Platform / heading</span>
+        </div>
+        <div className="klv-map-legend-row">
+          <span className="klv-map-legend-symbol klv-map-legend-history" aria-hidden="true" />
+          <span>Platform history</span>
+        </div>
+        <div className="klv-map-legend-row">
+          <span className="klv-map-legend-symbol klv-map-legend-frame-center" aria-hidden="true" />
+          <span>Frame center</span>
+        </div>
+        <div className="klv-map-legend-row">
+          <span className="klv-map-legend-symbol klv-map-legend-footprint" aria-hidden="true" />
+          <span>Frame footprint</span>
+        </div>
+        <div className="klv-map-legend-row">
+          <span className="klv-map-legend-symbol klv-map-legend-target" aria-hidden="true" />
+          <span>Target mark</span>
+        </div>
+      </div> : null}
       <div className="klv-map-controls">
         <button
           type="button"
@@ -566,6 +598,17 @@ export default function KlvMap({
           data-tooltip={showPlatformHistory ? 'Hide platform history' : 'Show platform history'}
         >
           <MapControlIcon name="history" />
+        </button>
+        <button
+          type="button"
+          className={`klv-map-control-button${showLegend ? ' is-active' : ''}`}
+          onClick={() => setShowLegend((visible) => !visible)}
+          aria-pressed={showLegend}
+          aria-label={showLegend ? 'Hide telemetry legend' : 'Show telemetry legend'}
+          title={showLegend ? 'Hide telemetry legend' : 'Show telemetry legend'}
+          data-tooltip={showLegend ? 'Hide legend' : 'Show legend'}
+        >
+          <MapControlIcon name="legend" />
         </button>
       </div>
       {!hasCoordinates && !hasPlatformHistory ? <div className="klv-map-empty">Waiting for KLV coordinates…</div> : null}

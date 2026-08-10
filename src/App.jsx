@@ -2,7 +2,7 @@ import '@mantine/core/styles.css';
 
 import { createTheme, MantineProvider } from '@mantine/core';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { Accordion, ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, Tooltip, Menu, Loader, Modal, Textarea, Checkbox, Slider } from '@mantine/core';
+import { Accordion, ActionIcon, AppShell, Text, Tabs, TextInput, NumberInput, Button, Group, Stack, Paper, Badge, Collapse, Select, FileInput, Progress, RingProgress, SimpleGrid, Tooltip, Menu, Loader, Modal, Textarea, Checkbox, Slider } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import '@mantine/dates/styles.css';
 import { Device } from 'mediasoup-client';
@@ -10,7 +10,42 @@ import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
 
 const theme = createTheme({
-  /** Put your mantine theme override here */
+  colorScheme: 'dark',
+  fontFamily: 'IBM Plex Sans, Arial, sans-serif',
+  fontFamilyMonospace: 'IBM Plex Mono, Consolas, monospace',
+  headings: {
+    fontFamily: 'IBM Plex Sans Condensed, Arial Narrow, sans-serif',
+    fontWeight: '600'
+  },
+  defaultRadius: 4,
+  primaryColor: 'signal',
+  primaryShade: 5,
+  black: '#0A0D10',
+  white: '#E7ECEF',
+  colors: {
+    signal: ['#E6F9FA', '#C3EFF2', '#9EE3E8', '#78D7DE', '#55CBD4', '#3FC6D1', '#2FA9B4', '#238590', '#186269', '#0F4247'],
+    caution: ['#FDF3DF', '#FAE4B3', '#F6D485', '#F2C458', '#EDB93F', '#E8B23D', '#C4922E', '#9C7324', '#74561A', '#4D3A11'],
+    healthy: ['#E1FAEC', '#B8F1D4', '#8EE8BC', '#63DFA3', '#4FD68A', '#3DBE77', '#2FA063', '#22824F', '#17643C', '#0E4629'],
+    critical: ['#FCE8E8', '#F6C4C5', '#F09FA1', '#EB7A7D', '#E5585B', '#E5484D', '#C23A3E', '#9B2D30', '#742123', '#4D1517'],
+    dark: ['#E7ECEF', '#C7D0D7', '#A5B2BB', '#8A97A3', '#6E7B87', '#586472', '#3E4B58', '#2E3944', '#232B33', '#171D24'],
+    green: ['#E1FAEC', '#B8F1D4', '#8EE8BC', '#63DFA3', '#4FD68A', '#3DBE77', '#2FA063', '#22824F', '#17643C', '#0E4629'],
+    red: ['#FCE8E8', '#F6C4C5', '#F09FA1', '#EB7A7D', '#E5585B', '#E5484D', '#C23A3E', '#9B2D30', '#742123', '#4D1517'],
+    yellow: ['#FDF3DF', '#FAE4B3', '#F6D485', '#F2C458', '#EDB93F', '#E8B23D', '#C4922E', '#9C7324', '#74561A', '#4D3A11'],
+    orange: ['#FDF3DF', '#FAE4B3', '#F6D485', '#F2C458', '#EDB93F', '#E8B23D', '#C4922E', '#9C7324', '#74561A', '#4D3A11'],
+    teal: ['#E6F9FA', '#C3EFF2', '#9EE3E8', '#78D7DE', '#55CBD4', '#3FC6D1', '#2FA9B4', '#238590', '#186269', '#0F4247'],
+    gray: ['#E7ECEF', '#C7D0D7', '#A5B2BB', '#8A97A3', '#6E7B87', '#586472', '#3E4B58', '#2E3944', '#232B33', '#171D24']
+  },
+  components: {
+    AppShell: { styles: { main: { backgroundColor: '#0A0D10' }, header: { backgroundColor: '#12171C', borderBottom: '1px solid #232B33' } } },
+    Paper: { styles: { root: { backgroundColor: '#12171C', borderColor: '#232B33' } } },
+    Button: { styles: { root: { fontWeight: 600 } } },
+    Input: { styles: { input: { backgroundColor: '#171D24', borderColor: '#2E3944', color: '#E7ECEF' }, label: { color: '#C7D0D7', fontWeight: 600 }, description: { color: '#8A97A3' } } },
+    Tabs: { styles: { tab: { color: '#8A97A3' }, tabLabel: { fontWeight: 600 } } },
+    Accordion: { styles: { item: { backgroundColor: '#12171C', borderColor: '#232B33' }, control: { color: '#E7ECEF' } } },
+    Modal: { styles: { content: { backgroundColor: '#12171C', border: '1px solid #232B33' }, header: { backgroundColor: '#12171C' } } },
+    Menu: { styles: { dropdown: { backgroundColor: '#171D24', borderColor: '#2E3944' }, item: { color: '#E7ECEF' } } },
+    Table: { styles: { table: { fontVariantNumeric: 'tabular-nums' } } }
+  }
 });
 
 function hlsQualityOptionsFor(renditions) {
@@ -248,6 +283,74 @@ function MediaToolsStatus({ mediaTools }) {
   </Stack>;
 }
 
+function utilizationTone(value) {
+  if (value > 85) return 'critical';
+  if (value > 65) return 'caution';
+  return 'signal';
+}
+
+function UtilizationWidget({ label, value, valueText, sub }) {
+  const numericValue = Number(value);
+  const hasValue = Number.isFinite(numericValue);
+  const percent = hasValue ? Math.min(100, Math.max(0, numericValue)) : 0;
+  const displayValue = valueText || (hasValue ? `${percent.toFixed(percent % 1 ? 1 : 0)}%` : '—');
+
+  return (
+    <Paper className="utilization-widget" p="sm" withBorder>
+      <Group justify="space-between" align="center" wrap="nowrap" gap="sm">
+        <Stack gap={0} miw={0}>
+          <Text className="utilization-widget-label">{label}</Text>
+          <Text className="utilization-widget-value" title={displayValue}>{displayValue}</Text>
+          <Text className="utilization-widget-sub" title={sub}>{sub}</Text>
+        </Stack>
+        <RingProgress
+          className="utilization-widget-ring"
+          size={58}
+          thickness={5}
+          roundCaps
+          sections={hasValue ? [{ value: percent, color: utilizationTone(percent) }] : []}
+          aria-label={hasValue ? `${label}: ${displayValue}` : `${label}: unavailable`}
+        />
+      </Group>
+    </Paper>
+  );
+}
+
+function ThroughputSparkline({ samples, color }) {
+  const values = samples.map((sample) => Number.isFinite(Number(sample)) ? Math.max(0, Number(sample)) : 0);
+  const maximum = Math.max(1, ...values);
+  const points = values.length > 1
+    ? values.map((value, index) => `${(index / (values.length - 1)) * 100},${31 - (value / maximum) * 27}`).join(' ')
+    : '';
+
+  return (
+    <svg className="throughput-sparkline" viewBox="0 0 100 34" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M0 31H100" className="throughput-sparkline-baseline" />
+      {points ? <polyline points={points} fill="none" stroke={color} strokeWidth="2.5" vectorEffect="non-scaling-stroke" /> : null}
+    </svg>
+  );
+}
+
+function ThroughputWidget({ label, primaryLabel, primaryValue, primarySamples, primaryColor, secondaryLabel, secondaryValue, secondarySamples, secondaryColor }) {
+  return (
+    <Paper className="throughput-widget" p="sm" withBorder>
+      <Text className="utilization-widget-label" mb={6}>{label}</Text>
+      <Stack gap={5}>
+        <div className="throughput-lane">
+          <Text className="throughput-lane-label">{primaryLabel}</Text>
+          <Text className="throughput-lane-value">{primaryValue}</Text>
+          <ThroughputSparkline samples={primarySamples} color={primaryColor} />
+        </div>
+        <div className="throughput-lane">
+          <Text className="throughput-lane-label">{secondaryLabel}</Text>
+          <Text className="throughput-lane-value">{secondaryValue}</Text>
+          <ThroughputSparkline samples={secondarySamples} color={secondaryColor} />
+        </div>
+      </Stack>
+    </Paper>
+  );
+}
+
 /** Compact SVG icons for video transport and capture actions. */
 function PlaybackControlIcon({ name }) {
   const common = { fill: 'currentColor' };
@@ -358,6 +461,7 @@ function App() {
   const [streamRuntime, setStreamRuntime] = useState({ streamId: 'stream1', state: 'stopped', running: false, lastError: null });
   const [sourcesList, setSourcesList] = useState([]);
   const [hostMetrics, setHostMetrics] = useState(null);
+  const [throughputHistory, setThroughputHistory] = useState({ diskRead: [], diskWrite: [], networkDown: [], networkUp: [] });
   const [processMetrics, setProcessMetrics] = useState([]);
   const [mediaTools, setMediaTools] = useState(null);
   const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
@@ -1500,7 +1604,7 @@ function App() {
 
   const refreshHostMetrics = async () => {
     const result = await api('/metrics/runtime');
-    if (result?.host) setHostMetrics(result.host);
+    if (result?.host) setHostMetrics({ ...result.host, sampledAt: result.timestampIso || Date.now() });
     if (Array.isArray(result?.processes)) setProcessMetrics(result.processes);
     if (result?.mediaTools) setMediaTools(result.mediaTools);
   };
@@ -3513,6 +3617,21 @@ function App() {
   }, [activeHlsRenditions, hlsQuality]);
 
   useEffect(() => {
+    if (!hostMetrics?.sampledAt) return;
+    const appendSample = (samples, value) => [
+      ...samples,
+      Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : null
+    ].slice(-60);
+
+    setThroughputHistory((current) => ({
+      diskRead: appendSample(current.diskRead, hostMetrics.disk?.readBytesPerSec),
+      diskWrite: appendSample(current.diskWrite, hostMetrics.disk?.writeBytesPerSec),
+      networkDown: appendSample(current.networkDown, hostMetrics.network?.receiveBytesPerSec),
+      networkUp: appendSample(current.networkUp, hostMetrics.network?.transmitBytesPerSec)
+    }));
+  }, [hostMetrics]);
+
+  useEffect(() => {
     if (activeTab !== 'dvr') {
       setHlsMediaLoaded(false);
       return;
@@ -3656,7 +3775,7 @@ function App() {
     ? activeHlsRenditions.map((rendition) => `${rendition.id}: ${rendition.processing === 'source-copy' ? 'source copy' : `encoded ${rendition.videoBitrate || ''}`.trim()}`).join(' · ')
     : null;
   return (
-    <MantineProvider theme={theme}>
+    <MantineProvider theme={theme} forceColorScheme="dark">
       <AppShell
         header={{ height: 60 }}
         padding="md"
@@ -4532,30 +4651,85 @@ function App() {
                   <MediaToolsStatus mediaTools={mediaTools} />
                 </Tabs.Panel>
                 <Tabs.Panel value="utilization" pt="md">
-                  <Group grow align="flex-start">
-                    <Stack gap={2}>
-                      <Text size="sm">CPU: {hostMetrics?.cpuPercent != null ? String(hostMetrics.cpuPercent) + '%' : 'Sampling...'}</Text>
-                      <Text size="sm">RAM: {hostMetrics?.memory ? formatBytes(hostMetrics.memory.usedBytes) + ' / ' + formatBytes(hostMetrics.memory.totalBytes) + ' (' + hostMetrics.memory.usedPercent + '%)' : 'n/a'}</Text>
-                    </Stack>
-                    <Stack gap={2}>
-                      <Text size="sm">Disk I/O: read {formatBytesPerSecond(hostMetrics?.disk?.readBytesPerSec)} · write {formatBytesPerSecond(hostMetrics?.disk?.writeBytesPerSec)}</Text>
-                      <Text size="sm">Network: down {formatBytesPerSecond(hostMetrics?.network?.receiveBytesPerSec)} · up {formatBytesPerSecond(hostMetrics?.network?.transmitBytesPerSec)}</Text>
-                    </Stack>
-                    <Stack gap={2}>
-                      {hostMetrics?.gpu?.available ? hostMetrics.gpu.gpus.map((gpu) => (
-                        <Text key={gpu.name} size="sm">
-                          GPU: {gpu.name} · {gpu.utilizationPercent ?? 'n/a'}% · {gpu.memoryUsedMiB ?? 'n/a'} / {gpu.memoryTotalMiB ?? 'n/a'} MiB{gpu.temperatureC != null ? ' · ' + gpu.temperatureC + '°C' : ''}
-                        </Text>
-                      )) : <Text size="sm" c="dimmed">GPU metrics unavailable</Text>}
-                    </Stack>
-                  </Group>
-                  <Stack gap={2} mt="sm">
-                    <Text size="sm" fw={500}>Process CPU</Text>
-                    {processMetrics.length ? processMetrics.map((processInfo) => (
-                      <Text key={`${processInfo.role}-${processInfo.streamId || ''}-${processInfo.pid}`} size="sm">
-                        {processInfo.role}{processInfo.streamId ? ` (${processInfo.streamId})` : ''} · PID {processInfo.pid}: {processInfo.cpuPercent != null ? `${processInfo.cpuPercent}%` : 'n/a'}
-                      </Text>
-                    )) : <Text size="sm" c="dimmed">Process CPU metrics are unavailable.</Text>}
+                  <Stack gap="md">
+                    <Group justify="space-between" align="flex-start" gap="sm">
+                      <div>
+                        <Text size="sm" fw={700}>Node utilization</Text>
+                        <Text size="xs" c="dimmed">Live host and media-worker metrics refresh every two seconds.</Text>
+                      </div>
+                      <Badge variant="dot" color={hostMetrics ? 'healthy' : 'gray'}>
+                        {hostMetrics ? 'Metrics reporting' : 'Waiting for sample'}
+                      </Badge>
+                    </Group>
+
+                    <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+                      <UtilizationWidget
+                        label="CPU"
+                        value={hostMetrics?.cpuPercent}
+                        sub={hostMetrics?.cpuPercent != null ? 'Host processor utilization' : 'Sampling host processor'}
+                      />
+                      <UtilizationWidget
+                        label="Memory"
+                        value={hostMetrics?.memory?.usedPercent}
+                        sub={hostMetrics?.memory
+                          ? `${formatBytes(hostMetrics.memory.usedBytes)} / ${formatBytes(hostMetrics.memory.totalBytes)}`
+                          : 'Waiting for memory sample'}
+                      />
+                      <ThroughputWidget
+                        label="Disk throughput"
+                        primaryLabel="Read"
+                        primaryValue={formatBytesPerSecond(hostMetrics?.disk?.readBytesPerSec)}
+                        primarySamples={throughputHistory.diskRead}
+                        primaryColor="#3FC6D1"
+                        secondaryLabel="Write"
+                        secondaryValue={formatBytesPerSecond(hostMetrics?.disk?.writeBytesPerSec)}
+                        secondarySamples={throughputHistory.diskWrite}
+                        secondaryColor="#E8B23D"
+                      />
+                      <ThroughputWidget
+                        label="Network throughput"
+                        primaryLabel="Down"
+                        primaryValue={formatBytesPerSecond(hostMetrics?.network?.receiveBytesPerSec)}
+                        primarySamples={throughputHistory.networkDown}
+                        primaryColor="#3FC6D1"
+                        secondaryLabel="Up"
+                        secondaryValue={formatBytesPerSecond(hostMetrics?.network?.transmitBytesPerSec)}
+                        secondarySamples={throughputHistory.networkUp}
+                        secondaryColor="#4FD68A"
+                      />
+                    </SimpleGrid>
+
+                    {hostMetrics?.gpu?.available ? (
+                      <div>
+                        <Text className="utilization-section-label" mb="xs">GPU utilization</Text>
+                        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
+                          {hostMetrics.gpu.gpus.map((gpu) => (
+                            <UtilizationWidget
+                              key={gpu.name}
+                              label={gpu.name}
+                              value={gpu.utilizationPercent}
+                              sub={`${gpu.memoryUsedMiB ?? 'n/a'} / ${gpu.memoryTotalMiB ?? 'n/a'} MiB${gpu.temperatureC != null ? ` · ${gpu.temperatureC}°C` : ''}`}
+                            />
+                          ))}
+                        </SimpleGrid>
+                      </div>
+                    ) : <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="dimmed">GPU metrics unavailable</Text></Paper>}
+
+                    <div>
+                      <Text className="utilization-section-label" mb="xs">Process CPU</Text>
+                      {processMetrics.length ? (
+                        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
+                          {processMetrics.map((processInfo) => (
+                            <UtilizationWidget
+                              key={`${processInfo.role}-${processInfo.streamId || ''}-${processInfo.pid}`}
+                              label={processInfo.role}
+                              value={processInfo.cpuPercent}
+                              sub={`PID ${processInfo.pid}${processInfo.streamId ? ` · ${processInfo.streamId}` : ''}`}
+                            />
+                          ))}
+                        </SimpleGrid>
+                      ) : <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="dimmed">Process CPU metrics are unavailable.</Text></Paper>}
+                    </div>
                   </Stack>
                 </Tabs.Panel>
               </Tabs>
