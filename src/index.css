@@ -72,7 +72,8 @@ body,
 }
 
 .klv-map {
-  height: 360px;
+  min-height: 420px;
+  height: 420px;
   width: 100%;
   border: 1px solid #232b33;
   border-radius: 4px;
@@ -87,6 +88,58 @@ body,
   display: grid;
   gap: 0.35rem;
   justify-items: end;
+}
+
+.klv-map-basemap-control {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 3;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #2e3944;
+  border-radius: 4px;
+  color: #c7d0d7;
+  background: rgba(18, 23, 28, 0.94);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  font-family: "IBM Plex Sans Condensed", Arial Narrow, sans-serif;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.klv-map-basemap-control select {
+  min-width: 8.75rem;
+  padding: 0.25rem 1.5rem 0.25rem 0.35rem;
+  border: 1px solid #586472;
+  border-radius: 3px;
+  color: #e7ecef;
+  background: #171d24;
+  font: 400 0.75rem "IBM Plex Sans", Arial, sans-serif;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.klv-map-basemap-control select:focus-visible {
+  border-color: #3fc6d1;
+  outline: 2px solid rgba(63, 198, 209, 0.35);
+  outline-offset: 1px;
+}
+
+.klv-map-attribution {
+  position: absolute;
+  right: 0.35rem;
+  bottom: 0.2rem;
+  z-index: 3;
+  padding: 0.08rem 0.22rem;
+  border-radius: 2px;
+  color: #c7d0d7;
+  background: rgba(18, 23, 28, 0.78);
+  font-size: 0.62rem;
+  line-height: 1.2;
+  pointer-events: none;
 }
 
 .klv-map-legend {

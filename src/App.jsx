@@ -4421,6 +4421,7 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
+                            matchHeightTo={dvrVideoHostRef}
                             platformHistory={Number.isFinite(dvrPlatformHistoryUntilMs) ? dvrPlatformHistory : null}
                             platformHistoryUntilMs={dvrPlatformHistoryUntilMs}
                             showPlatformHistory={dvrPlatformHistoryEnabled}
@@ -4545,6 +4546,7 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
+                            matchHeightTo={liveVideoViewportRef}
                             platformHistory={Number.isFinite(livePlatformHistoryUntilMs) ? livePlatformHistory : null}
                             platformHistoryUntilMs={livePlatformHistoryUntilMs}
                             showPlatformHistory={livePlatformHistoryEnabled}

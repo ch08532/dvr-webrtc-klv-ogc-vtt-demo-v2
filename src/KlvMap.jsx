@@ -8,6 +8,7 @@ import Polygon from 'ol/geom/Polygon.js';
 import TileLayer from 'ol/layer/Tile.js';
 import VectorLayer from 'ol/layer/Vector.js';
 import OSM from 'ol/source/OSM.js';
+import XYZ from 'ol/source/XYZ.js';
 import VectorSource from 'ol/source/Vector.js';
 import { fromLonLat, toLonLat } from 'ol/proj.js';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from 'ol/style.js';
@@ -101,6 +102,16 @@ const getKlvFrameCorners = (telemetry) => {
   return corners.some((corner) => Number(corner.lat) !== 0 || Number(corner.lon) !== 0) ? corners : null;
 };
 
+const createBaseMapSource = (baseMap) => {
+  if (baseMap === 'world-imagery') {
+    return new XYZ({
+      url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      attributions: 'Tiles © Esri'
+    });
+  }
+  return new OSM();
+};
+
 /** Compact, dependency-free map-control icons. */
 function MapControlIcon({ name }) {
   const common = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
@@ -157,10 +168,12 @@ export default function KlvMap({
   onPointerCoordinate = null,
   targetLogEntries = [],
   selectedTargetLogId = null,
-  onTargetLogSelect = null
+  onTargetLogSelect = null,
+  matchHeightTo = null
 }) {
   const targetRef = useRef(null);
   const mapRef = useRef(null);
+  const baseMapLayerRef = useRef(null);
   const sourceRef = useRef(null);
   const platformHistoryRef = useRef(null);
   const platformRef = useRef(null);
@@ -183,6 +196,7 @@ export default function KlvMap({
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
   const [followFrameCenter, setFollowFrameCenter] = useState(false);
   const [showLegend, setShowLegend] = useState(true);
+  const [baseMap, setBaseMap] = useState('streets');
 
   useEffect(() => {
     onPositionSelectRef.current = onPositionSelect;
@@ -308,10 +322,11 @@ export default function KlvMap({
     frameGeometry.setStyle(frameGeometryStyle);
     source.addFeatures([platformHistory, frameGeometry, line, platformHeadingLine, platform, frameCenter]);
 
+    const baseMapLayer = new TileLayer({ source: createBaseMapSource(baseMap) });
     const map = new Map({
       target: targetRef.current,
       layers: [
-        new TileLayer({ source: new OSM() }),
+        baseMapLayer,
         new VectorLayer({ source })
       ],
       view: new View({ center: fromLonLat([0, 0]), zoom: 2 }),
@@ -321,6 +336,7 @@ export default function KlvMap({
     resizeObserver.observe(targetRef.current);
 
     mapRef.current = map;
+    baseMapLayerRef.current = baseMapLayer;
     sourceRef.current = source;
     platformHistoryRef.current = platformHistory;
     platformRef.current = platform;
@@ -375,12 +391,38 @@ export default function KlvMap({
       onPointerCoordinateRef.current?.(null);
       map.setTarget(undefined);
       mapRef.current = null;
+      baseMapLayerRef.current = null;
       sourceRef.current = null;
       platformHistoryRef.current = null;
       targetLogFeaturesRef.current = [];
       platformHeadingLineRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    baseMapLayerRef.current?.setSource(createBaseMapSource(baseMap));
+  }, [baseMap]);
+
+  // The telemetry panel is narrower than the video panel, so an aspect-ratio
+  // rule cannot reliably keep their viewports aligned. Mirror the actual video
+  // viewport height instead, including when the browser or video layout resizes.
+  useEffect(() => {
+    const mapElement = targetRef.current;
+    const videoElement = matchHeightTo?.current;
+    if (!mapElement || !videoElement) return undefined;
+
+    const syncHeight = () => {
+      const height = Math.round(videoElement.getBoundingClientRect().height);
+      if (height <= 0) return;
+      mapElement.style.height = `${height}px`;
+      mapRef.current?.updateSize();
+    };
+
+    const resizeObserver = new ResizeObserver(syncHeight);
+    resizeObserver.observe(videoElement);
+    syncHeight();
+    return () => resizeObserver.disconnect();
+  }, [matchHeightTo]);
 
   useEffect(() => {
     const historyFeature = platformHistoryRef.current;
@@ -522,6 +564,16 @@ export default function KlvMap({
   return (
     <div className="klv-map-shell">
       <div ref={targetRef} className="klv-map" aria-label="KLV telemetry map" />
+      <label className="klv-map-basemap-control">
+        <span>Base map</span>
+        <select value={baseMap} onChange={(event) => setBaseMap(event.target.value)}>
+          <option value="streets">OpenStreetMap</option>
+          <option value="world-imagery">World Imagery</option>
+        </select>
+      </label>
+      <div className="klv-map-attribution">
+        {baseMap === 'world-imagery' ? 'Tiles © Esri' : '© OpenStreetMap contributors'}
+      </div>
       {showLegend ? <div className="klv-map-legend" aria-label="Telemetry map legend">
         <div className="klv-map-legend-title">Telemetry layers</div>
         <div className="klv-map-legend-row">
