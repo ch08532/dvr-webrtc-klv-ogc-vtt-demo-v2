@@ -8,6 +8,7 @@ import '@mantine/dates/styles.css';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
+import { useFootprintMap } from './hooks/useFootprintMap.js';
 
 const theme = createTheme({
   colorScheme: 'dark',
@@ -116,12 +117,6 @@ function playbackViewTransform(view) {
   const translateX = -clampUnit(view?.panX ?? 0.5) * (zoom - 1) * 100;
   const translateY = -clampUnit(view?.panY ?? 0.5) * (zoom - 1) * 100;
   return `translate(${translateX}%, ${translateY}%) scale(${zoom})`;
-}
-
-function sameMapPointerPosition(a, b) {
-  if (!a || !b) return a === b;
-  return Math.abs(Number(a.lat) - Number(b.lat)) < 1e-7
-    && Math.abs(Number(a.lon) - Number(b.lon)) < 1e-7;
 }
 
 function formatMapPointerPosition(position) {
@@ -403,8 +398,6 @@ function App() {
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
   const [liveTelemetryTab, setLiveTelemetryTab] = useState('map');
-  const [dvrMapPointerPosition, setDvrMapPointerPosition] = useState(null);
-  const [liveMapPointerPosition, setLiveMapPointerPosition] = useState(null);
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [hlsQuality, setHlsQuality] = useState('auto');
@@ -465,12 +458,8 @@ function App() {
   const [processMetrics, setProcessMetrics] = useState([]);
   const [mediaTools, setMediaTools] = useState(null);
   const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
-  const updateDvrMapPointerPosition = (position) => {
-    setDvrMapPointerPosition((previous) => sameMapPointerPosition(previous, position) ? previous : position);
-  };
-  const updateLiveMapPointerPosition = (position) => {
-    setLiveMapPointerPosition((previous) => sameMapPointerPosition(previous, position) ? previous : position);
-  };
+  const dvrFootprintMap = useFootprintMap();
+  const liveFootprintMap = useFootprintMap();
   const activeHlsMode = hlsRuntimeIsActive
     ? streamRuntime?.hlsEffectiveMode || streamRuntime?.hlsMode || hlsMode
     : hlsMode;
@@ -4428,7 +4417,7 @@ function App() {
                             onPlatformHistoryToggle={setDvrPlatformHistoryEnabled}
                             platformHistoryLoading={dvrPlatformHistoryLoading}
                             onPositionSelect={openNewTargetLogEntry}
-                            onPointerCoordinate={updateDvrMapPointerPosition}
+                            onPointerCoordinate={dvrFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
                             selectedTargetLogId={selectedTargetLogId}
                             onTargetLogSelect={selectTargetLogEntryById}
@@ -4438,7 +4427,7 @@ function App() {
                               Mission timestamp: {overlayData?.mode === 'dvr-vtt' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
                             </Text>
                             <Text size="xs" c="dimmed" style={{ textAlign: 'right' }}>
-                              {formatMapPointerPosition(dvrMapPointerPosition)}
+                              {formatMapPointerPosition(dvrFootprintMap.pointerPosition)}
                             </Text>
                           </Group>
                         </Tabs.Panel>
@@ -4553,7 +4542,7 @@ function App() {
                             onPlatformHistoryToggle={setLivePlatformHistoryEnabled}
                             platformHistoryLoading={livePlatformHistoryLoading}
                             onPositionSelect={openNewTargetLogEntry}
-                            onPointerCoordinate={updateLiveMapPointerPosition}
+                            onPointerCoordinate={liveFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
                             selectedTargetLogId={selectedTargetLogId}
                             onTargetLogSelect={selectTargetLogEntryById}
@@ -4563,7 +4552,7 @@ function App() {
                               Mission timestamp: {overlayData?.mode === 'live-ws' && overlayData.timestampIso ? overlayData.timestampIso : 'n/a'}
                             </Text>
                             <Text size="xs" c="dimmed" style={{ textAlign: 'right' }}>
-                              {formatMapPointerPosition(liveMapPointerPosition)}
+                              {formatMapPointerPosition(liveFootprintMap.pointerPosition)}
                             </Text>
                           </Group>
                         </Tabs.Panel>
