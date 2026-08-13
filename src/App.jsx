@@ -75,6 +75,71 @@ const MIN_CLIP_DURATION_SECONDS = 0.25;
 const PLATFORM_HISTORY_MAX_POINTS = 5000;
 const LIVE_PLATFORM_HISTORY_WINDOW_MS = 15 * 60 * 1000;
 const PLATFORM_HISTORY_REFRESH_MS = 5000;
+const VIEWER_SPLIT_MIN_PERCENT = 25;
+const VIEWER_SPLIT_MAX_PERCENT = 75;
+
+function clampViewerSplit(value) {
+  return Math.min(VIEWER_SPLIT_MAX_PERCENT, Math.max(VIEWER_SPLIT_MIN_PERCENT, Math.round(Number(value))));
+}
+
+/** An accessible, pointer-friendly divider for the video and telemetry panes. */
+function ViewerSplitHandle({ value, onChange, label }) {
+  const beginDrag = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+
+    const handle = event.currentTarget;
+    const layout = handle.parentElement;
+    if (!layout) return;
+
+    const update = (pointerEvent) => {
+      const rect = layout.getBoundingClientRect();
+      if (!rect.width) return;
+      onChange(clampViewerSplit(((pointerEvent.clientX - rect.left) / rect.width) * 100));
+    };
+    const endDrag = (pointerEvent) => {
+      handle.removeEventListener('pointermove', update);
+      handle.removeEventListener('pointerup', endDrag);
+      handle.removeEventListener('pointercancel', endDrag);
+      if (handle.hasPointerCapture?.(pointerEvent.pointerId)) handle.releasePointerCapture(pointerEvent.pointerId);
+    };
+
+    handle.setPointerCapture(event.pointerId);
+    handle.addEventListener('pointermove', update);
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+    update(event);
+  };
+
+  const handleKeyDown = (event) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      onChange(clampViewerSplit(value - 5));
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      onChange(clampViewerSplit(value + 5));
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      onChange(VIEWER_SPLIT_MIN_PERCENT);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      onChange(VIEWER_SPLIT_MAX_PERCENT);
+    }
+  };
+
+  return <button
+    type="button"
+    className="viewer-split-handle"
+    role="separator"
+    aria-label={label}
+    aria-orientation="vertical"
+    aria-valuemin={VIEWER_SPLIT_MIN_PERCENT}
+    aria-valuemax={VIEWER_SPLIT_MAX_PERCENT}
+    aria-valuenow={value}
+    onPointerDown={beginDrag}
+    onKeyDown={handleKeyDown}
+  ><span aria-hidden="true" /></button>;
+}
 
 function clampPlaybackZoom(value) {
   const rounded = Math.round(Number(value) * 100) / 100;
@@ -404,6 +469,7 @@ function App() {
   const [hlsPlaybackRate, setHlsPlaybackRate] = useState(1);
   const [hlsView, setHlsView] = useState(INITIAL_PLAYBACK_VIEW);
   const [webRtcView, setWebRtcView] = useState(INITIAL_PLAYBACK_VIEW);
+  const [viewerSplit, setViewerSplit] = useState(50);
   const [hlsPanning, setHlsPanning] = useState(false);
   const [webRtcPanning, setWebRtcPanning] = useState(false);
   const [hlsBrightness, setHlsBrightness] = useState(DEFAULT_IMAGE_ADJUSTMENT);
@@ -475,8 +541,10 @@ function App() {
 
   const videoRef = useRef(null);
   const dvrVideoHostRef = useRef(null);
+  const dvrViewerVideoPanelRef = useRef(null);
   const liveVideoRef = useRef(null);
   const liveVideoViewportRef = useRef(null);
+  const liveViewerVideoPanelRef = useRef(null);
   const hlsPanGestureRef = useRef(null);
   const webRtcPanGestureRef = useRef(null);
   const wsWorkerRef = useRef(null);
@@ -766,14 +834,14 @@ function App() {
     : null;
   const liveVideoFrameStyle = liveDisplayAspect
     ? {
-      width: `min(100%, ${400 * liveDisplayAspect.value}px)`,
+      width: '100%',
       aspectRatio: `${liveDisplayAspect.width} / ${liveDisplayAspect.height}`,
       margin: '0 auto'
     }
     : { width: '100%' };
   const liveVideoStyle = liveDisplayAspect
-    ? { width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` }
-    : { width: '100%', maxHeight: '400px', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` };
+    ? { display: 'block', width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` }
+    : { display: 'block', width: '100%', height: 'auto', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` };
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -4096,8 +4164,8 @@ function App() {
 
                 <Tabs.Panel value="dvr" pt="xs">
                   <Text>{playbackDescription}</Text>
-                  <Group mt="xs" align="flex-start" grow wrap="wrap">
-                    <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
+                  <div className="viewer-split-layout" style={{ '--viewer-video-width': `${viewerSplit}%` }}>
+                    <Paper ref={dvrViewerVideoPanelRef} className="viewer-split-video" p="sm" withBorder>
                       <Group gap="xs" mb="xs">
                         <Text size="sm" c="dimmed">Status: {dvrStatus}</Text>
                         <Badge color={dvrBadge.color} variant="light">{dvrBadge.label}</Badge>
@@ -4365,7 +4433,8 @@ function App() {
                          <Text size="xs" c="dimmed" mt="sm">Clip creation is available only for uploaded, file-backed video. Live streams remain view-only.</Text>
                        )}
                     </Paper>
-                    <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
+                    <ViewerSplitHandle value={viewerSplit} onChange={setViewerSplit} label="Resize video and map panels" />
+                    <Paper className="viewer-split-telemetry" p="sm" withBorder>
                       <Group justify="space-between" align="center">
                         <Text size="sm" fw={600}>VTT with KLV Telemetry</Text>
                         <Menu shadow="md" width={190} position="bottom-end" withArrow>
@@ -4410,7 +4479,7 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
-                            matchHeightTo={dvrVideoHostRef}
+                            matchHeightTo={dvrViewerVideoPanelRef}
                             platformHistory={Number.isFinite(dvrPlatformHistoryUntilMs) ? dvrPlatformHistory : null}
                             platformHistoryUntilMs={dvrPlatformHistoryUntilMs}
                             showPlatformHistory={dvrPlatformHistoryEnabled}
@@ -4433,14 +4502,14 @@ function App() {
                         </Tabs.Panel>
                       </Tabs>
                     </Paper>
-                  </Group>
+                  </div>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="live-webrtc" pt="xs">
                   <Text>Live video via WebRTC with synchronized KLV metadata via WebSocket.
                   </Text>
-                  <Group mt="xs" align="flex-start" grow wrap="wrap">
-                    <Paper p="sm" withBorder style={{ flex: 2, minWidth: 320 }}>
+                  <div className="viewer-split-layout" style={{ '--viewer-video-width': `${viewerSplit}%` }}>
+                    <Paper ref={liveViewerVideoPanelRef} className="viewer-split-video" p="sm" withBorder>
                       <Group gap="xs" mb="xs">
                         <Text size="sm" c="dimmed">Status: {liveStatus}</Text>
                         <Badge color={webrtcBadge.color} variant="light">{webrtcBadge.label}</Badge>
@@ -4490,7 +4559,8 @@ function App() {
                         <Tooltip label="Add target mark" withArrow><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></Tooltip>
                       </Group> : null}
                     </Paper>
-                    <Paper p="sm" withBorder style={{ flex: 1, minWidth: 280 }}>
+                    <ViewerSplitHandle value={viewerSplit} onChange={setViewerSplit} label="Resize live video and map panels" />
+                    <Paper className="viewer-split-telemetry" p="sm" withBorder>
                       <Group justify="space-between" align="center">
                         <Text size="sm" fw={600}>Live KLV Telemetry</Text>
                         <Menu shadow="md" width={190} position="bottom-end" withArrow>
@@ -4535,7 +4605,7 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
-                            matchHeightTo={liveVideoViewportRef}
+                            matchHeightTo={liveViewerVideoPanelRef}
                             platformHistory={Number.isFinite(livePlatformHistoryUntilMs) ? livePlatformHistory : null}
                             platformHistoryUntilMs={livePlatformHistoryUntilMs}
                             showPlatformHistory={livePlatformHistoryEnabled}
@@ -4558,7 +4628,7 @@ function App() {
                         </Tabs.Panel>
                       </Tabs>
                     </Paper>
-                  </Group>
+                  </div>
                 </Tabs.Panel>
               </Tabs>
               <div className="target-log-panel">

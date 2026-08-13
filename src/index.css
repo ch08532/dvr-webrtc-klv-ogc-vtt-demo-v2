@@ -67,6 +67,98 @@ body,
   background-color: #3fc6d1;
 }
 
+/* The telemetry pane holds both the data and map tabs. The divider lets an
+ * operator prioritize live imagery or mapping without allowing either pane to
+ * disappear. */
+.viewer-split-layout {
+  display: grid;
+  grid-template-columns:
+    minmax(0, calc(var(--viewer-video-width) - 6px))
+    12px
+    minmax(0, calc(100% - var(--viewer-video-width) - 6px));
+  align-items: start;
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.viewer-split-video,
+.viewer-split-telemetry {
+  min-width: 0;
+}
+
+.viewer-split-handle {
+  position: relative;
+  align-self: stretch;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.viewer-split-handle::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  border-radius: 2px;
+  background: #2e3944;
+  content: "";
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.viewer-split-handle span {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 8px;
+  height: 30px;
+  transform: translateY(-50%);
+  border: 1px solid #586472;
+  border-radius: 4px;
+  background:
+    radial-gradient(circle, #c7d0d7 1px, transparent 1.5px) center 7px / 4px 6px repeat-y,
+    #171d24;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.viewer-split-handle:hover::before,
+.viewer-split-handle:focus-visible::before {
+  background: #3fc6d1;
+  box-shadow: 0 0 0 1px rgba(63, 198, 209, 0.35);
+}
+
+.viewer-split-handle:focus-visible {
+  outline: none;
+}
+
+.viewer-split-handle:focus-visible span {
+  border-color: #3fc6d1;
+  box-shadow: 0 0 0 2px rgba(63, 198, 209, 0.35);
+}
+
+@media (max-width: 760px) {
+  .viewer-split-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .viewer-split-handle {
+    display: none;
+  }
+
+  .viewer-split-video,
+  .viewer-split-telemetry {
+    min-width: 0 !important;
+  }
+
+  .viewer-split-telemetry {
+    margin-top: 0.5rem;
+  }
+}
+
 .klv-map-shell {
   position: relative;
 }

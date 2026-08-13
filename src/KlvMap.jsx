@@ -403,9 +403,8 @@ export default function KlvMap({
     baseMapLayerRef.current?.setSource(createBaseMapSource(baseMap));
   }, [baseMap]);
 
-  // The telemetry panel is narrower than the video panel, so an aspect-ratio
-  // rule cannot reliably keep their viewports aligned. Mirror the actual video
-  // viewport height instead, including when the browser or video layout resizes.
+  // Keep the map canvas aligned with the full video pane, including playback
+  // controls and file-only widgets such as clip creation.
   useEffect(() => {
     const mapElement = targetRef.current;
     const videoElement = matchHeightTo?.current;
