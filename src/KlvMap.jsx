@@ -109,6 +109,13 @@ const createBaseMapSource = (baseMap) => {
       attributions: 'Tiles © Esri'
     });
   }
+  if (baseMap === 'dark-openstreetmap') {
+    return new XYZ({
+      url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}@2x.png',
+      attributions: '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors',
+      maxZoom: 20
+    });
+  }
   return new OSM();
 };
 
@@ -400,7 +407,19 @@ export default function KlvMap({
   }, []);
 
   useEffect(() => {
-    baseMapLayerRef.current?.setSource(createBaseMapSource(baseMap));
+    const map = mapRef.current;
+    const previousLayer = baseMapLayerRef.current;
+    if (!map || !previousLayer) return;
+
+    // Replace only the base layer to preserve all telemetry overlays and map state.
+    const baseMapLayer = new TileLayer({
+      source: createBaseMapSource(baseMap)
+    });
+    const layers = map.getLayers();
+    const index = layers.getArray().indexOf(previousLayer);
+    if (index < 0) return;
+    layers.setAt(index, baseMapLayer);
+    baseMapLayerRef.current = baseMapLayer;
   }, [baseMap]);
 
   // Keep the map canvas aligned with the full video pane, including playback
@@ -567,11 +586,16 @@ export default function KlvMap({
         <span>Base map</span>
         <select value={baseMap} onChange={(event) => setBaseMap(event.target.value)}>
           <option value="streets">OpenStreetMap</option>
+          <option value="dark-openstreetmap">Dark mode (Alidade)</option>
           <option value="world-imagery">World Imagery</option>
         </select>
       </label>
       <div className="klv-map-attribution">
-        {baseMap === 'world-imagery' ? 'Tiles © Esri' : '© OpenStreetMap contributors'}
+        {baseMap === 'world-imagery'
+          ? 'Tiles © Esri'
+          : baseMap === 'dark-openstreetmap'
+            ? '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors'
+            : '© OpenStreetMap contributors'}
       </div>
       {showLegend ? <div className="klv-map-legend" aria-label="Telemetry map legend">
         <div className="klv-map-legend-title">Telemetry layers</div>
