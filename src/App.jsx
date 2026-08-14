@@ -4725,8 +4725,8 @@ function App() {
                         <Tabs.Panel value="map" pt="xs">
                           <Text size="xs" c="dimmed" mb="xs">
                             {canAddTargetMark
-                              ? 'Following the active WebVTT cue. Click an empty map area to place a target mark; select an existing target pin to seek to it.'
-                              : `${targetMarkUnavailableMessage} Existing target pins remain selectable.`}
+                              ? 'Following the active WebVTT cue. Hover a target pin to link it with the Target Log and clip timeline; click it to seek. Click an empty map area to place a target mark.'
+                              : `${targetMarkUnavailableMessage} Existing target pins remain hoverable and clickable.`}
                           </Text>
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
@@ -4742,6 +4742,8 @@ function App() {
                             onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={dvrFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
+                            hoveredTargetLogId={hoveredTargetLogId}
+                            onTargetLogHoverChange={setHoveredTargetLogId}
                             onTargetLogActivate={seekTargetLogEntryById}
                           />
                           <Group mt="xs" justify="space-between" gap="xs" wrap="nowrap">
@@ -4860,8 +4862,8 @@ function App() {
                         <Tabs.Panel value="map" pt="xs">
                           <Text size="xs" c="dimmed" mb="xs">
                             {canAddTargetMark
-                              ? 'Following the live WebSocket KLV feed. Click an empty map area to place a target mark; select an existing target pin to select it.'
-                              : `${targetMarkUnavailableMessage} Existing target pins remain selectable.`}
+                              ? 'Following the live WebSocket KLV feed. Hover a target pin to link it with the Target Log and clip timeline; clicking a pin leaves live playback unchanged. Click an empty map area to place a target mark.'
+                              : `${targetMarkUnavailableMessage} Existing target pins remain hoverable; clicking them leaves live playback unchanged.`}
                           </Text>
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
@@ -4877,6 +4879,8 @@ function App() {
                             onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={liveFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
+                            hoveredTargetLogId={hoveredTargetLogId}
+                            onTargetLogHoverChange={setHoveredTargetLogId}
                             onTargetLogActivate={seekTargetLogEntryById}
                           />
                           <Group mt="xs" justify="space-between" gap="xs" wrap="nowrap">

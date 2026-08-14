@@ -72,10 +72,10 @@ const frameGeometryStyle = new Style({
   })
 });
 
-const targetLogStyle = new Style({
+const targetLogStyle = (highlighted = false) => new Style({
   image: new CircleStyle({
-    radius: 7,
-    fill: new Fill({ color: '#3FC6D1' }),
+    radius: highlighted ? 9 : 7,
+    fill: new Fill({ color: highlighted ? '#E5484D' : '#3FC6D1' }),
     stroke: new Stroke({ color: '#E7ECEF', width: 2 })
   }),
   text: new Text({
@@ -176,6 +176,8 @@ export default function KlvMap({
   onPositionSelect = null,
   onPointerCoordinate = null,
   targetLogEntries = [],
+  hoveredTargetLogId = null,
+  onTargetLogHoverChange = null,
   onTargetLogActivate = null,
   matchHeightTo = null
 }) {
@@ -197,6 +199,7 @@ export default function KlvMap({
   const centerRequestRef = useRef(0);
   const onPositionSelectRef = useRef(onPositionSelect);
   const onPointerCoordinateRef = useRef(onPointerCoordinate);
+  const onTargetLogHoverChangeRef = useRef(onTargetLogHoverChange);
   const onTargetLogActivateRef = useRef(onTargetLogActivate);
   const [hasCoordinates, setHasCoordinates] = useState(false);
   const [hasPlatformHistory, setHasPlatformHistory] = useState(false);
@@ -212,6 +215,10 @@ export default function KlvMap({
   useEffect(() => {
     onPointerCoordinateRef.current = onPointerCoordinate;
   }, [onPointerCoordinate]);
+
+  useEffect(() => {
+    onTargetLogHoverChangeRef.current = onTargetLogHoverChange;
+  }, [onTargetLogHoverChange]);
 
   useEffect(() => {
     onTargetLogActivateRef.current = onTargetLogActivate;
@@ -353,9 +360,9 @@ export default function KlvMap({
     frameGeometryRef.current = frameGeometry;
     const view = map.getView();
     const onResolutionChange = () => updatePlatformHeadingLine();
-    const onMapSingleClick = (event) => {
+    const targetLogIdAtPixel = (pixel) => {
       let targetLogId = null;
-      map.forEachFeatureAtPixel(event.pixel, (feature) => {
+      map.forEachFeatureAtPixel(pixel, (feature) => {
         const id = feature.get('targetLogEntryId');
         if (id) {
           targetLogId = id;
@@ -363,6 +370,10 @@ export default function KlvMap({
         }
         return undefined;
       }, { hitTolerance: 6 });
+      return targetLogId;
+    };
+    const onMapSingleClick = (event) => {
+      const targetLogId = targetLogIdAtPixel(event.pixel);
       if (targetLogId) {
         onTargetLogActivateRef.current?.(targetLogId);
         return;
@@ -376,6 +387,10 @@ export default function KlvMap({
       }
     };
     const onMapPointerMove = (event) => {
+      const targetLogId = event?.pixel ? targetLogIdAtPixel(event.pixel) : null;
+      onTargetLogHoverChangeRef.current?.(targetLogId);
+      if (targetRef.current) targetRef.current.style.cursor = targetLogId ? 'pointer' : '';
+
       const callback = onPointerCoordinateRef.current;
       if (!callback || !event?.coordinate) return;
       const [lon, lat] = toLonLat(event.coordinate);
@@ -383,7 +398,11 @@ export default function KlvMap({
         ? { lat, lon }
         : null);
     };
-    const onMapPointerLeave = () => onPointerCoordinateRef.current?.(null);
+    const onMapPointerLeave = () => {
+      onTargetLogHoverChangeRef.current?.(null);
+      onPointerCoordinateRef.current?.(null);
+      if (targetRef.current) targetRef.current.style.cursor = '';
+    };
     view.on('change:resolution', onResolutionChange);
     map.on('singleclick', onMapSingleClick);
     map.on('pointermove', onMapPointerMove);
@@ -395,6 +414,7 @@ export default function KlvMap({
       map.un('singleclick', onMapSingleClick);
       map.un('pointermove', onMapPointerMove);
       targetRef.current?.removeEventListener('pointerleave', onMapPointerLeave);
+      onTargetLogHoverChangeRef.current?.(null);
       onPointerCoordinateRef.current?.(null);
       map.setTarget(undefined);
       mapRef.current = null;
@@ -495,13 +515,13 @@ export default function KlvMap({
           geometry: new Point(fromLonLat([Number(entry.position.lon), Number(entry.position.lat)]))
         });
         feature.set('targetLogEntryId', entry.id);
-        feature.setStyle(targetLogStyle);
+        feature.setStyle(targetLogStyle(entry.id === hoveredTargetLogId));
         return feature;
       });
     source.addFeatures(features);
     targetLogFeaturesRef.current = features;
     setHasTargetLogPositions(features.length > 0);
-  }, [targetLogEntries]);
+  }, [targetLogEntries, hoveredTargetLogId]);
 
   useEffect(() => {
     hasCenteredRef.current = false;
