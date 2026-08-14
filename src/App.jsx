@@ -80,12 +80,22 @@ const LIVE_PLATFORM_HISTORY_WINDOW_MS = 15 * 60 * 1000;
 const PLATFORM_HISTORY_REFRESH_MS = 5000;
 const VIEWER_SPLIT_MIN_PERCENT = 25;
 const VIEWER_SPLIT_MAX_PERCENT = 75;
+const TARGET_LOG_OBSERVATION_PREVIEW_MAX_LENGTH = 140;
 const TELEMETRY_BASE_MAP_STORAGE_KEY = 'midas-play:telemetry-base-map';
 const DEFAULT_TELEMETRY_BASE_MAP = 'streets';
 const TELEMETRY_BASE_MAP_VALUES = new Set(['streets', 'dark-openstreetmap', 'world-imagery']);
 
 function clampViewerSplit(value) {
   return Math.min(VIEWER_SPLIT_MAX_PERCENT, Math.max(VIEWER_SPLIT_MIN_PERCENT, Math.round(Number(value))));
+}
+
+/** Keeps compact clip-marker tooltips readable without changing stored observations. */
+function targetLogObservationPreview(observation) {
+  const text = String(observation ?? '').trim().replace(/\s+/g, ' ');
+  if (!text) return 'No observation';
+  return text.length > TARGET_LOG_OBSERVATION_PREVIEW_MAX_LENGTH
+    ? `${text.slice(0, TARGET_LOG_OBSERVATION_PREVIEW_MAX_LENGTH - 1).trimEnd()}…`
+    : text;
 }
 
 function normalizeTelemetryBaseMap(value) {
@@ -492,6 +502,8 @@ function PlaybackControlIcon({ name }) {
   if (name === 'clipStart') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 7h8l-3 5 3 5H9z" {...stroke} /></svg>;
   if (name === 'clipEnd') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14M15 7H7l3 5-3 5h8z" {...stroke} /></svg>;
   if (name === 'targetMark') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 10a6 6 0 1 0-12 0c0 4.5 6 10 6 10s6-5.5 6-10Z" {...stroke} /><circle cx="12" cy="10" r="2" {...stroke} /></svg>;
+  if (name === 'edit') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 3.5-.8L18 8.7a2.1 2.1 0 0 0-3-3l-9.5 9.5z" {...stroke} /><path d="m13.5 7.2 3.3 3.3" {...stroke} /></svg>;
+  if (name === 'remove') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v5m4-5v5M9 7l1-2h4l1 2m-8 0 1 12h8l1-12" {...stroke} /></svg>;
   if (name === 'exportCsv') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3" {...stroke} /><path d="M7 5h3" {...stroke} /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h3l1.5-2h5L16 8h3v11H5z" {...stroke} /><circle cx="12" cy="13" r="3" {...stroke} /></svg>;
 }
@@ -525,10 +537,16 @@ function App() {
   const [overlayData, setOverlayData] = useState(null);
   const [dvrPlatformHistory, setDvrPlatformHistory] = useState(null);
   const [livePlatformHistory, setLivePlatformHistory] = useState(null);
+  const [dvrFrameCenterHistory, setDvrFrameCenterHistory] = useState(null);
+  const [liveFrameCenterHistory, setLiveFrameCenterHistory] = useState(null);
   const [dvrPlatformHistoryEnabled, setDvrPlatformHistoryEnabled] = useState(false);
   const [livePlatformHistoryEnabled, setLivePlatformHistoryEnabled] = useState(false);
+  const [dvrFrameCenterHistoryEnabled, setDvrFrameCenterHistoryEnabled] = useState(false);
+  const [liveFrameCenterHistoryEnabled, setLiveFrameCenterHistoryEnabled] = useState(false);
   const [dvrPlatformHistoryLoading, setDvrPlatformHistoryLoading] = useState(false);
   const [livePlatformHistoryLoading, setLivePlatformHistoryLoading] = useState(false);
+  const [dvrFrameCenterHistoryLoading, setDvrFrameCenterHistoryLoading] = useState(false);
+  const [liveFrameCenterHistoryLoading, setLiveFrameCenterHistoryLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
   const [liveTelemetryTab, setLiveTelemetryTab] = useState('map');
@@ -729,10 +747,16 @@ function App() {
     setOverlayData(null);
     setDvrPlatformHistory(null);
     setLivePlatformHistory(null);
+    setDvrFrameCenterHistory(null);
+    setLiveFrameCenterHistory(null);
     setDvrPlatformHistoryEnabled(false);
     setLivePlatformHistoryEnabled(false);
+    setDvrFrameCenterHistoryEnabled(false);
+    setLiveFrameCenterHistoryEnabled(false);
     setDvrPlatformHistoryLoading(false);
     setLivePlatformHistoryLoading(false);
+    setDvrFrameCenterHistoryLoading(false);
+    setLiveFrameCenterHistoryLoading(false);
     setSourcesList([]);
     setAutoAttachOnDvr(false);
     setFileStartProgress(null);
@@ -1697,8 +1721,12 @@ function App() {
     setOverlayData(null);
     setDvrPlatformHistory(null);
     setLivePlatformHistory(null);
+    setDvrFrameCenterHistory(null);
+    setLiveFrameCenterHistory(null);
     setDvrPlatformHistoryEnabled(false);
     setLivePlatformHistoryEnabled(false);
+    setDvrFrameCenterHistoryEnabled(false);
+    setLiveFrameCenterHistoryEnabled(false);
     setFileStartProgress(null);
     setHlsMediaLoaded(false);
     hlsQualityRef.current = 'auto';
@@ -1798,10 +1826,16 @@ function App() {
     setOverlayData(null);
     setDvrPlatformHistory(null);
     setLivePlatformHistory(null);
+    setDvrFrameCenterHistory(null);
+    setLiveFrameCenterHistory(null);
     setDvrPlatformHistoryEnabled(false);
     setLivePlatformHistoryEnabled(false);
+    setDvrFrameCenterHistoryEnabled(false);
+    setLiveFrameCenterHistoryEnabled(false);
     setDvrPlatformHistoryLoading(false);
     setLivePlatformHistoryLoading(false);
+    setDvrFrameCenterHistoryLoading(false);
+    setLiveFrameCenterHistoryLoading(false);
     clipRangeStreamRef.current = null;
     setClipStartSeconds(0);
     setClipEndSeconds(0);
@@ -2054,6 +2088,17 @@ function App() {
     const result = await api(`/streams/${encodeURIComponent(streamId)}/klv/platform-history.geojson?${query.toString()}`);
     if (result?.type !== 'Feature') {
       throw new Error(result?.error || 'Platform history response was not GeoJSON');
+    }
+    return result;
+  };
+
+  const fetchFrameCenterHistory = async ({ fromMs = null, toMs = null } = {}) => {
+    const query = new URLSearchParams({ maxPoints: String(PLATFORM_HISTORY_MAX_POINTS) });
+    if (Number.isFinite(fromMs)) query.set('fromMs', String(Math.round(fromMs)));
+    if (Number.isFinite(toMs)) query.set('toMs', String(Math.round(toMs)));
+    const result = await api(`/streams/${encodeURIComponent(streamId)}/klv/frame-center-history.geojson?${query.toString()}`);
+    if (result?.type !== 'Feature') {
+      throw new Error(result?.error || 'Frame-center history response was not GeoJSON');
     }
     return result;
   };
@@ -3718,6 +3763,8 @@ function App() {
       disconnectWs();
       setLivePlatformHistory(null);
       setLivePlatformHistoryLoading(false);
+      setLiveFrameCenterHistory(null);
+      setLiveFrameCenterHistoryLoading(false);
     }
   }, [activeTab]);
 
@@ -3725,10 +3772,16 @@ function App() {
     streamIdRef.current = streamId;
     setDvrPlatformHistory(null);
     setLivePlatformHistory(null);
+    setDvrFrameCenterHistory(null);
+    setLiveFrameCenterHistory(null);
     setDvrPlatformHistoryEnabled(false);
     setLivePlatformHistoryEnabled(false);
+    setDvrFrameCenterHistoryEnabled(false);
+    setLiveFrameCenterHistoryEnabled(false);
     setDvrPlatformHistoryLoading(false);
     setLivePlatformHistoryLoading(false);
+    setDvrFrameCenterHistoryLoading(false);
+    setLiveFrameCenterHistoryLoading(false);
   }, [streamId]);
 
   useEffect(() => {
@@ -3789,6 +3842,42 @@ function App() {
   }, [dvrPlatformHistoryEnabled, activeTab, canLoadDvrPlatformHistory, currentSourceIsFile, dvrPlatformHistoryTimeAvailable, streamId, streamRuntime?.state]);
 
   useEffect(() => {
+    const needsRollingWindow = !currentSourceIsFile;
+    if (!dvrFrameCenterHistoryEnabled || activeTab !== 'dvr' || !canLoadDvrPlatformHistory
+      || (needsRollingWindow && !dvrPlatformHistoryTimeAvailable)) {
+      if (!dvrFrameCenterHistoryEnabled) setDvrFrameCenterHistory(null);
+      setDvrFrameCenterHistoryLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      const toMs = dvrPlatformHistoryUntilMsRef.current;
+      if (needsRollingWindow && !Number.isFinite(toMs)) return;
+      setDvrFrameCenterHistoryLoading(true);
+      try {
+        const history = needsRollingWindow
+          ? await fetchFrameCenterHistory({ fromMs: toMs - LIVE_PLATFORM_HISTORY_WINDOW_MS, toMs })
+          : await fetchFrameCenterHistory();
+        if (!cancelled) setDvrFrameCenterHistory(history);
+      } catch {
+        if (!cancelled) setDvrFrameCenterHistory(null);
+      } finally {
+        if (!cancelled) setDvrFrameCenterHistoryLoading(false);
+      }
+    };
+    void refresh();
+    const isStillProcessing = ['starting', 'running', 'finalizing'].includes(streamRuntime?.state);
+    const timer = (needsRollingWindow || isStillProcessing)
+      ? setInterval(() => { void refresh(); }, PLATFORM_HISTORY_REFRESH_MS)
+      : null;
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [dvrFrameCenterHistoryEnabled, activeTab, canLoadDvrPlatformHistory, currentSourceIsFile, dvrPlatformHistoryTimeAvailable, streamId, streamRuntime?.state]);
+
+  useEffect(() => {
     if (!livePlatformHistoryEnabled || activeTab !== 'live-webrtc' || !canLoadLivePlatformHistory || !livePlatformHistoryTimeAvailable) {
       if (!livePlatformHistoryEnabled) setLivePlatformHistory(null);
       setLivePlatformHistoryLoading(false);
@@ -3819,6 +3908,38 @@ function App() {
       clearInterval(timer);
     };
   }, [livePlatformHistoryEnabled, activeTab, canLoadLivePlatformHistory, livePlatformHistoryTimeAvailable, streamId]);
+
+  useEffect(() => {
+    if (!liveFrameCenterHistoryEnabled || activeTab !== 'live-webrtc' || !canLoadLivePlatformHistory || !livePlatformHistoryTimeAvailable) {
+      if (!liveFrameCenterHistoryEnabled) setLiveFrameCenterHistory(null);
+      setLiveFrameCenterHistoryLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      const toMs = livePlatformHistoryUntilMsRef.current;
+      if (!Number.isFinite(toMs)) return;
+      setLiveFrameCenterHistoryLoading(true);
+      try {
+        const history = await fetchFrameCenterHistory({
+          fromMs: toMs - LIVE_PLATFORM_HISTORY_WINDOW_MS,
+          toMs
+        });
+        if (!cancelled) setLiveFrameCenterHistory(history);
+      } catch {
+        if (!cancelled) setLiveFrameCenterHistory(null);
+      } finally {
+        if (!cancelled) setLiveFrameCenterHistoryLoading(false);
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, PLATFORM_HISTORY_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [liveFrameCenterHistoryEnabled, activeTab, canLoadLivePlatformHistory, livePlatformHistoryTimeAvailable, streamId]);
 
   useEffect(() => {
     if (sourceType !== 'local-file' || !serverOnline) return;
@@ -4610,7 +4731,8 @@ function App() {
                                    const positionText = entry.position
                                      ? `${entry.position.lat.toFixed(5)}, ${entry.position.lon.toFixed(5)}`
                                      : 'Position unavailable';
-                                   return <Tooltip key={entry.id} multiline w={280} label={`${formatMissionTime(entry.missionTimeMs)} · ${entry.observation || 'No observation'} · ${positionText}`} withArrow>
+                                   const observationPreview = targetLogObservationPreview(entry.observation);
+                                   return <Tooltip key={entry.id} multiline w={280} label={`${formatMissionTime(entry.missionTimeMs)} · ${observationPreview} · ${positionText}`} withArrow>
                                      <button
                                        type="button"
                                        className={`clip-target-log-marker${entry.id === hoveredTargetLogId ? ' is-hovered' : ''}`}
@@ -4739,6 +4861,11 @@ function App() {
                             showPlatformHistory={dvrPlatformHistoryEnabled}
                             onPlatformHistoryToggle={setDvrPlatformHistoryEnabled}
                             platformHistoryLoading={dvrPlatformHistoryLoading}
+                            frameCenterHistory={Number.isFinite(dvrPlatformHistoryUntilMs) ? dvrFrameCenterHistory : null}
+                            frameCenterHistoryUntilMs={dvrPlatformHistoryUntilMs}
+                            showFrameCenterHistory={dvrFrameCenterHistoryEnabled}
+                            onFrameCenterHistoryToggle={setDvrFrameCenterHistoryEnabled}
+                            frameCenterHistoryLoading={dvrFrameCenterHistoryLoading}
                             onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={dvrFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
@@ -4876,6 +5003,11 @@ function App() {
                             showPlatformHistory={livePlatformHistoryEnabled}
                             onPlatformHistoryToggle={setLivePlatformHistoryEnabled}
                             platformHistoryLoading={livePlatformHistoryLoading}
+                            frameCenterHistory={Number.isFinite(livePlatformHistoryUntilMs) ? liveFrameCenterHistory : null}
+                            frameCenterHistoryUntilMs={livePlatformHistoryUntilMs}
+                            showFrameCenterHistory={liveFrameCenterHistoryEnabled}
+                            onFrameCenterHistoryToggle={setLiveFrameCenterHistoryEnabled}
+                            frameCenterHistoryLoading={liveFrameCenterHistoryLoading}
                             onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={liveFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
@@ -4956,8 +5088,32 @@ function App() {
                               <td key={field.id}>{entry.customFields?.[field.key] == null || entry.customFields?.[field.key] === '' ? '—' : String(entry.customFields[field.key])}</td>
                             ))}
                             <td className="target-log-grid-actions">
-                              <Button size="compact-xs" variant="subtle" onClick={(event) => { event.stopPropagation(); openEditTargetLogEntry(entry); }} onKeyDown={(event) => event.stopPropagation()}>Edit</Button>
-                              <Button size="compact-xs" color="red" variant="subtle" onClick={(event) => { event.stopPropagation(); deleteTargetLogEntry(entry); }} onKeyDown={(event) => event.stopPropagation()} disabled={targetLogInFlight}>Remove</Button>
+                              <Group gap={2} wrap="nowrap">
+                                <Tooltip label="Edit target mark" withArrow>
+                                  <ActionIcon
+                                    variant="subtle"
+                                    size="sm"
+                                    aria-label="Edit target mark"
+                                    onClick={(event) => { event.stopPropagation(); openEditTargetLogEntry(entry); }}
+                                    onKeyDown={(event) => event.stopPropagation()}
+                                  >
+                                    <PlaybackControlIcon name="edit" />
+                                  </ActionIcon>
+                                </Tooltip>
+                                <Tooltip label="Remove target mark" withArrow>
+                                  <ActionIcon
+                                    variant="subtle"
+                                    color="red"
+                                    size="sm"
+                                    aria-label="Remove target mark"
+                                    onClick={(event) => { event.stopPropagation(); deleteTargetLogEntry(entry); }}
+                                    onKeyDown={(event) => event.stopPropagation()}
+                                    disabled={targetLogInFlight}
+                                  >
+                                    <PlaybackControlIcon name="remove" />
+                                  </ActionIcon>
+                                </Tooltip>
+                              </Group>
                             </td>
                           </tr>
                         ))}
@@ -5093,7 +5249,10 @@ function App() {
                 description="KLV mission time; editable. Must be a valid ISO 8601 date/time with UTC offset."
                 placeholder="2026-07-29T16:51:25.000Z"
                 value={targetLogEditor.missionTimeText || ''}
-                onChange={(event) => setTargetLogEditor((current) => current ? { ...current, missionTimeText: event.currentTarget.value } : current)}
+                onChange={(event) => {
+                  const missionTimeText = event.currentTarget.value;
+                  setTargetLogEditor((current) => current ? { ...current, missionTimeText } : current);
+                }}
                 error={missionTimeValidationError || undefined}
               />
               {targetLogEditor.missionId ? <Text size="xs" c="dimmed">Mission: {targetLogEditor.missionId}</Text> : null}
@@ -5129,7 +5288,10 @@ function App() {
               minRows={3}
               placeholder="Describe the target or observation"
               value={targetLogEditor.observation || ''}
-              onChange={(event) => setTargetLogEditor((current) => current ? { ...current, observation: event.currentTarget.value } : current)}
+              onChange={(event) => {
+                const observation = event.currentTarget.value;
+                setTargetLogEditor((current) => current ? { ...current, observation } : current);
+              }}
             />
             {targetLogActiveFields.length ? targetLogActiveFields.map((field) => field.dataType === 'boolean' ? (
               <Select
@@ -5183,8 +5345,26 @@ function App() {
               <Text size="sm" fw={600} mb="xs">Add metadata field</Text>
               <Stack gap="xs">
                 <Group grow align="end">
-                  <TextInput label="Field key" description="Used internally; use lowercase letters, numbers, _ or -." placeholder="priority" value={targetLogFieldDraft.key} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, key: event.currentTarget.value }))} />
-                  <TextInput label="Display label" description="Shown to users on target marks." placeholder="Priority" value={targetLogFieldDraft.label} onChange={(event) => setTargetLogFieldDraft((draft) => ({ ...draft, label: event.currentTarget.value }))} />
+                  <TextInput
+                    label="Field key"
+                    description="Used internally; use lowercase letters, numbers, _ or -."
+                    placeholder="priority"
+                    value={targetLogFieldDraft.key}
+                    onChange={(event) => {
+                      const key = event.currentTarget.value;
+                      setTargetLogFieldDraft((draft) => ({ ...draft, key }));
+                    }}
+                  />
+                  <TextInput
+                    label="Display label"
+                    description="Shown to users on target marks."
+                    placeholder="Priority"
+                    value={targetLogFieldDraft.label}
+                    onChange={(event) => {
+                      const label = event.currentTarget.value;
+                      setTargetLogFieldDraft((draft) => ({ ...draft, label }));
+                    }}
+                  />
                 </Group>
                 <Group justify="space-between" align="end">
                   <Select

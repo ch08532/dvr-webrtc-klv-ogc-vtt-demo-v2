@@ -292,6 +292,11 @@ body,
   border-top: 3px dashed #3fc6d1;
 }
 
+.klv-map-legend-frame-history {
+  width: 1rem;
+  border-top: 3px dashed #e5484d;
+}
+
 .klv-map-legend-frame-center,
 .klv-map-legend-target {
   width: 0.62rem;

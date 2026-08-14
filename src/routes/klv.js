@@ -133,6 +133,57 @@ router.get("/streams/:streamId/klv/platform-history.geojson", async (req, res) =
   }
 });
 
+/**
+ * Returns one lightweight GeoJSON frame-center path built from completed
+ * HLS-segment samples. It mirrors the platform-history contract so browser
+ * clients can apply the same mission-time filtering without loading KLV JSON.
+ */
+router.get("/streams/:streamId/klv/frame-center-history.geojson", async (req, res) => {
+  try {
+    const streamId = validateStreamId(req.params.streamId);
+    const parseOptionalTime = (value, name) => {
+      if (value == null || String(value).trim() === "") return null;
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) throw new Error(`${name} must be milliseconds since epoch`);
+      return Math.round(parsed);
+    };
+    const fromMs = parseOptionalTime(req.query.fromMs, "fromMs");
+    const toMs = parseOptionalTime(req.query.toMs, "toMs");
+    if (fromMs != null && toMs != null && fromMs > toMs) {
+      throw new Error("fromMs must be less than or equal to toMs");
+    }
+    const rawMaxPoints = req.query.maxPoints == null ? PLATFORM_HISTORY_MAX_POINTS : Number(req.query.maxPoints);
+    if (!Number.isFinite(rawMaxPoints) || rawMaxPoints < 2) {
+      throw new Error("maxPoints must be at least 2");
+    }
+    const maxPoints = Math.min(PLATFORM_HISTORY_MAX_POINTS, Math.floor(rawMaxPoints));
+    const history = await store.listFrameCenterTrackPoints(streamId, { fromMs, toMs, maxPoints });
+    const points = history.points;
+    const geometry = points.length >= 2
+      ? { type: "LineString", coordinates: points.map((point) => [point.lon, point.lat]) }
+      : null;
+    res.set("Cache-Control", "no-store");
+    res.type("application/geo+json").json({
+      type: "Feature",
+      properties: {
+        streamId,
+        sampleSource: "last-frame-center-position-per-completed-hls-segment",
+        fromMs,
+        toMs,
+        pointCount: points.length,
+        sourcePointCount: history.sourcePointCount,
+        deduplicatedPointCount: history.deduplicatedPointCount,
+        reduced: history.reduced,
+        timesMs: points.map((point) => point.tMs)
+      },
+      geometry
+    });
+  } catch (error) {
+    log.warn("frame_center_history_geojson_error", { streamId: req.params.streamId, error: serializeError(error) });
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
 // Raw interval query for clients that need individual telemetry events.
 router.get("/streams/:streamId/klv", async (req, res) => {
   const streamId = req.params.streamId;

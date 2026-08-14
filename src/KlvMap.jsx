@@ -43,6 +43,11 @@ const platformHistoryStyle = [
   new Style({ stroke: new Stroke({ color: 'rgba(63, 198, 209, 0.88)', width: 3, lineDash: [9, 6] }) })
 ];
 
+const frameCenterHistoryStyle = [
+  new Style({ stroke: new Stroke({ color: 'rgba(231, 236, 239, 0.78)', width: 6 }) }),
+  new Style({ stroke: new Stroke({ color: 'rgba(229, 72, 77, 0.9)', width: 3, lineDash: [7, 5] }) })
+];
+
 const frameCenterStyle = new Style({
   image: new CircleStyle({
     radius: 7,
@@ -147,6 +152,16 @@ function MapControlIcon({ name }) {
       </svg>
     );
   }
+  if (name === 'frame-history') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 17c3-8 5 2 8-5s5 3 8-5" {...common} />
+        <circle cx="4" cy="17" r="1.5" {...common} />
+        <circle cx="20" cy="7" r="1.5" {...common} />
+        <circle cx="12" cy="12" r="2.5" {...common} />
+      </svg>
+    );
+  }
   if (name === 'legend') {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -173,6 +188,11 @@ export default function KlvMap({
   showPlatformHistory = false,
   onPlatformHistoryToggle = null,
   platformHistoryLoading = false,
+  frameCenterHistory = null,
+  frameCenterHistoryUntilMs = null,
+  showFrameCenterHistory = false,
+  onFrameCenterHistoryToggle = null,
+  frameCenterHistoryLoading = false,
   onPositionSelect = null,
   onPointerCoordinate = null,
   targetLogEntries = [],
@@ -186,6 +206,7 @@ export default function KlvMap({
   const baseMapLayerRef = useRef(null);
   const sourceRef = useRef(null);
   const platformHistoryRef = useRef(null);
+  const frameCenterHistoryRef = useRef(null);
   const platformRef = useRef(null);
   const platformHeadingLineRef = useRef(null);
   const platformPositionRef = useRef(null);
@@ -203,6 +224,7 @@ export default function KlvMap({
   const onTargetLogActivateRef = useRef(onTargetLogActivate);
   const [hasCoordinates, setHasCoordinates] = useState(false);
   const [hasPlatformHistory, setHasPlatformHistory] = useState(false);
+  const [hasFrameCenterHistory, setHasFrameCenterHistory] = useState(false);
   const [hasTargetLogPositions, setHasTargetLogPositions] = useState(false);
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
   const [followFrameCenter, setFollowFrameCenter] = useState(false);
@@ -246,6 +268,7 @@ export default function KlvMap({
     const fit = () => {
       const features = [
         platformHistoryRef.current,
+        frameCenterHistoryRef.current,
         platformRef.current,
         frameCenterRef.current,
         lineRef.current,
@@ -322,6 +345,7 @@ export default function KlvMap({
   useEffect(() => {
     const source = new VectorSource();
     const platformHistory = new Feature();
+    const frameCenterHistory = new Feature();
     const platform = new Feature();
     const platformHeadingLine = new Feature();
     const frameCenter = new Feature();
@@ -329,12 +353,13 @@ export default function KlvMap({
     const frameGeometry = new Feature();
 
     platformHistory.setStyle(platformHistoryStyle);
+    frameCenterHistory.setStyle(frameCenterHistoryStyle);
     platform.setStyle(platformStyle(0));
     platformHeadingLine.setStyle(platformHeadingLineStyle);
     frameCenter.setStyle(frameCenterStyle);
     line.setStyle(lineStyle);
     frameGeometry.setStyle(frameGeometryStyle);
-    source.addFeatures([platformHistory, frameGeometry, line, platformHeadingLine, platform, frameCenter]);
+    source.addFeatures([platformHistory, frameCenterHistory, frameGeometry, line, platformHeadingLine, platform, frameCenter]);
 
     const baseMapLayer = new TileLayer({ source: createBaseMapSource(baseMap) });
     const map = new Map({
@@ -353,6 +378,7 @@ export default function KlvMap({
     baseMapLayerRef.current = baseMapLayer;
     sourceRef.current = source;
     platformHistoryRef.current = platformHistory;
+    frameCenterHistoryRef.current = frameCenterHistory;
     platformRef.current = platform;
     platformHeadingLineRef.current = platformHeadingLine;
     frameCenterRef.current = frameCenter;
@@ -421,6 +447,7 @@ export default function KlvMap({
       baseMapLayerRef.current = null;
       sourceRef.current = null;
       platformHistoryRef.current = null;
+      frameCenterHistoryRef.current = null;
       targetLogFeaturesRef.current = [];
       platformHeadingLineRef.current = null;
     };
@@ -504,6 +531,42 @@ export default function KlvMap({
   }, [platformHistory, platformHistoryUntilMs, showPlatformHistory, telemetry]);
 
   useEffect(() => {
+    const historyFeature = frameCenterHistoryRef.current;
+    if (!historyFeature) return;
+    const coordinates = Array.isArray(frameCenterHistory?.geometry?.coordinates)
+      ? frameCenterHistory.geometry.coordinates
+      : [];
+    const timesMs = Array.isArray(frameCenterHistory?.properties?.timesMs)
+      ? frameCenterHistory.properties.timesMs
+      : [];
+    const untilMs = Number(frameCenterHistoryUntilMs);
+    const lineCoordinates = coordinates
+      .filter((coordinate, index) => {
+        if (!Array.isArray(coordinate) || !isCoordinate(coordinate[1], coordinate[0])) return false;
+        const pointTimeMs = Number(timesMs[index]);
+        return !Number.isFinite(untilMs) || (Number.isFinite(pointTimeMs) && pointTimeMs <= untilMs);
+      })
+      .map((coordinate) => [Number(coordinate[0]), Number(coordinate[1])]);
+
+    // Like platform history, completed-segment indexing naturally trails the
+    // active cue. Append the current frame center only in map memory.
+    const currentFrameCenterCoordinate = isCoordinate(telemetry?.frameCenterLat, telemetry?.frameCenterLon)
+      ? [Number(telemetry.frameCenterLon), Number(telemetry.frameCenterLat)]
+      : null;
+    const lastHistoryCoordinate = lineCoordinates[lineCoordinates.length - 1];
+    if (currentFrameCenterCoordinate && (!lastHistoryCoordinate
+      || lastHistoryCoordinate[0] !== currentFrameCenterCoordinate[0]
+      || lastHistoryCoordinate[1] !== currentFrameCenterCoordinate[1])) {
+      lineCoordinates.push(currentFrameCenterCoordinate);
+    }
+
+    const projected = lineCoordinates.map((coordinate) => fromLonLat(coordinate));
+    const visible = showFrameCenterHistory && projected.length >= 2;
+    historyFeature.setGeometry(visible ? new LineString(projected) : null);
+    setHasFrameCenterHistory(visible);
+  }, [frameCenterHistory, frameCenterHistoryUntilMs, showFrameCenterHistory, telemetry]);
+
+  useEffect(() => {
     const source = sourceRef.current;
     if (!source) return;
 
@@ -541,6 +604,13 @@ export default function KlvMap({
       centerOnInitialGeometry();
     }
   }, [active, hasPlatformHistory]);
+
+  useEffect(() => {
+    if (active && hasFrameCenterHistory && !hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      centerOnInitialGeometry();
+    }
+  }, [active, hasFrameCenterHistory]);
 
   useEffect(() => {
     if (!mapRef.current || !sourceRef.current) return;
@@ -628,6 +698,10 @@ export default function KlvMap({
           <span>Platform history</span>
         </div>
         <div className="klv-map-legend-row">
+          <span className="klv-map-legend-symbol klv-map-legend-frame-history" aria-hidden="true" />
+          <span>Frame-center history</span>
+        </div>
+        <div className="klv-map-legend-row">
           <span className="klv-map-legend-symbol klv-map-legend-frame-center" aria-hidden="true" />
           <span>Frame center</span>
         </div>
@@ -645,7 +719,7 @@ export default function KlvMap({
           type="button"
           className="klv-map-control-button"
           onClick={centerOnAllFeatures}
-          disabled={!hasCoordinates && !hasTargetLogPositions && !hasPlatformHistory}
+          disabled={!hasCoordinates && !hasTargetLogPositions && !hasPlatformHistory && !hasFrameCenterHistory}
           aria-label="Center map on telemetry and targets"
           title="Center map on telemetry and targets"
           data-tooltip="Center map"
@@ -696,6 +770,19 @@ export default function KlvMap({
         </button>
         <button
           type="button"
+          className={`klv-map-control-button${showFrameCenterHistory ? ' is-active' : ''}`}
+          onClick={() => onFrameCenterHistoryToggle?.(!showFrameCenterHistory)}
+          disabled={!onFrameCenterHistoryToggle || !active}
+          aria-pressed={showFrameCenterHistory}
+          aria-busy={frameCenterHistoryLoading}
+          aria-label={showFrameCenterHistory ? 'Hide frame-center history' : 'Show frame-center history'}
+          title={showFrameCenterHistory ? 'Hide frame-center history' : 'Show frame-center history'}
+          data-tooltip={showFrameCenterHistory ? 'Hide frame history' : 'Show frame history'}
+        >
+          <MapControlIcon name="frame-history" />
+        </button>
+        <button
+          type="button"
           className={`klv-map-control-button${showLegend ? ' is-active' : ''}`}
           onClick={() => setShowLegend((visible) => !visible)}
           aria-pressed={showLegend}
@@ -706,7 +793,7 @@ export default function KlvMap({
           <MapControlIcon name="legend" />
         </button>
       </div>
-      {!hasCoordinates && !hasPlatformHistory ? <div className="klv-map-empty">Waiting for KLV coordinates…</div> : null}
+      {!hasCoordinates && !hasPlatformHistory && !hasFrameCenterHistory ? <div className="klv-map-empty">Waiting for KLV coordinates…</div> : null}
     </div>
   );
 }

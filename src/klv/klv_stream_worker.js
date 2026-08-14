@@ -370,21 +370,21 @@ function prepareSegmentEntry(current, decodedSegment) {
 }
 
 /**
- * Selects exactly one compact history sample from a completed browser HLS
- * segment. This deliberately runs after carrier-segment KLV extraction, not
- * when FFmpeg creates a media file: KLV may arrive late in the segment.
+ * Selects exactly one compact position-history sample from a completed browser
+ * HLS segment. This deliberately runs after carrier-segment KLV extraction,
+ * not when FFmpeg creates a media file: KLV may arrive late in the segment.
  *
  * `sequence` preserves browser HLS playback order, while `tMs` is the decoded
  * mission/ingest time used for GeoJSON time-window filtering. This is a map
  * index only; full-rate decoded KLV remains in `klv_events`.
  */
-function platformTrackSampleForPreparedSegment(prepared) {
+function trackSampleForPreparedSegment(prepared, latitudeField, longitudeField) {
   const sequence = Number(prepared?.videoEntry?.sequence);
   if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
   for (let index = prepared.records.length - 1; index >= 0; index -= 1) {
     const record = prepared.records[index];
-    const lat = Number(record?.decoded?.sensorLat);
-    const lon = Number(record?.decoded?.sensorLon);
+    const lat = Number(record?.decoded?.[latitudeField]);
+    const lon = Number(record?.decoded?.[longitudeField]);
     const tMs = Number(record?.klvUnixMs);
     if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
       && Number.isSafeInteger(tMs) && tMs >= 0) {
@@ -509,7 +509,10 @@ async function processPendingSegments() {
       // only after the full decoded batch succeeds, before its VTT sidecars
       // are published for browser playback.
       const platformTrackSamples = preparedBatch
-        .map(platformTrackSampleForPreparedSegment)
+        .map((prepared) => trackSampleForPreparedSegment(prepared, 'sensorLat', 'sensorLon'))
+        .filter(Boolean);
+      const frameCenterTrackSamples = preparedBatch
+        .map((prepared) => trackSampleForPreparedSegment(prepared, 'frameCenterLat', 'frameCenterLon'))
         .filter(Boolean);
       const sourceTimestampRecords = preparedBatch
         .flatMap((item) => item.records)
@@ -517,12 +520,14 @@ async function processPendingSegments() {
       if (current.writeSqlite) {
         await current.store.addMany(current.streamId, decodedForStorage);
         await current.store.upsertPlatformTrackSamples(current.streamId, platformTrackSamples);
+        await current.store.upsertFrameCenterTrackSamples(current.streamId, frameCenterTrackSamples);
       } else {
         log.debug("sqlite_write_skipped", {
           requestId: current.requestId,
           streamId: current.streamId,
           decodedCount: decodedForStorage.length,
-          platformTrackSampleCount: platformTrackSamples.length
+          platformTrackSampleCount: platformTrackSamples.length,
+          frameCenterTrackSampleCount: frameCenterTrackSamples.length
         });
       }
       if (sourceTimestampRecords.length && Number.isFinite(current.sourceTimelineBaseMs) && Number.isFinite(current.sourceTimelineStartSec)) {

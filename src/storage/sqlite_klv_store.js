@@ -181,9 +181,9 @@ export class SqliteKlvStore {
       );
     `);
     await run(this.db, `CREATE INDEX IF NOT EXISTS idx_klv_stream_time ON klv_events(stream_id, t_ms);`);
-    // This small index is intentionally separate from full-rate `klv_events`:
-    // it holds only the final valid platform location from each completed
-    // browser HLS segment for map history requests.
+    // These small indexes are intentionally separate from full-rate
+    // `klv_events`: they hold only the final valid platform and frame-center
+    // locations from each completed browser HLS segment for map history.
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS platform_track_points (
         stream_id TEXT NOT NULL,
@@ -195,6 +195,17 @@ export class SqliteKlvStore {
       );
     `);
     await run(this.db, `CREATE INDEX IF NOT EXISTS idx_platform_track_stream_time ON platform_track_points(stream_id, t_ms);`);
+    await run(this.db, `
+      CREATE TABLE IF NOT EXISTS frame_center_track_points (
+        stream_id TEXT NOT NULL,
+        video_sequence INTEGER NOT NULL,
+        t_ms INTEGER NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        PRIMARY KEY(stream_id, video_sequence)
+      );
+    `);
+    await run(this.db, `CREATE INDEX IF NOT EXISTS idx_frame_center_track_stream_time ON frame_center_track_points(stream_id, t_ms);`);
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS target_log_entries (
         id TEXT PRIMARY KEY,
@@ -344,6 +355,47 @@ export class SqliteKlvStore {
   }
 
   /**
+   * Stores the last valid frame-center position for each processed browser
+   * HLS segment. The stream/sequence key makes repeated playlist scans
+   * idempotent, independently of the platform-history index.
+   */
+  async upsertFrameCenterTrackSamples(streamId, samples) {
+    const rows = (Array.isArray(samples) ? samples : [])
+      .map(normalizePlatformTrackPoint)
+      .filter(Boolean);
+    if (!rows.length) return 0;
+
+    const rowsPerStatement = 150;
+    return retryBusyWrite("upsert_frame_center_track_samples", async () => {
+      let transactionOpen = false;
+      try {
+        await run(this.db, "BEGIN IMMEDIATE");
+        transactionOpen = true;
+        for (let offset = 0; offset < rows.length; offset += rowsPerStatement) {
+          const chunk = rows.slice(offset, offset + rowsPerStatement);
+          const placeholders = chunk.map(() => "(?,?,?,?,?)").join(",");
+          await run(this.db, `
+            INSERT INTO frame_center_track_points(stream_id, video_sequence, t_ms, lat, lon)
+            VALUES ${placeholders}
+            ON CONFLICT(stream_id, video_sequence) DO UPDATE SET
+              t_ms=excluded.t_ms,
+              lat=excluded.lat,
+              lon=excluded.lon
+          `, chunk.flatMap((sample) => [streamId, sample.sequence, sample.tMs, sample.lat, sample.lon]));
+        }
+        await run(this.db, "COMMIT");
+        transactionOpen = false;
+        return rows.length;
+      } catch (error) {
+        if (transactionOpen) {
+          try { await run(this.db, "ROLLBACK"); } catch {}
+        }
+        throw error;
+      }
+    });
+  }
+
+  /**
    * Returns a deduplicated, bounded platform path without loading full KLV
    * JSON. Results stay in HLS sequence order even when source mission times
    * repeat; callers receive the parallel timestamps to apply a time window.
@@ -376,6 +428,50 @@ export class SqliteKlvStore {
       };
       const previous = deduplicated[deduplicated.length - 1];
       // A stationary platform needs only its newest position until it moves.
+      if (previous && previous.lat === point.lat && previous.lon === point.lon) {
+        deduplicated[deduplicated.length - 1] = point;
+      } else {
+        deduplicated.push(point);
+      }
+    }
+    const safeMaxPoints = Math.max(2, Math.floor(Number(maxPoints) || 5000));
+    const points = reduceTrackPoints(deduplicated, safeMaxPoints);
+    return {
+      points,
+      sourcePointCount,
+      deduplicatedPointCount: deduplicated.length,
+      reduced: points.length < deduplicated.length
+    };
+  }
+
+  /** Returns a deduplicated, bounded frame-center path in HLS sequence order. */
+  async listFrameCenterTrackPoints(streamId, { fromMs = null, toMs = null, maxPoints = 5000 } = {}) {
+    const conditions = ["stream_id=?"];
+    const values = [streamId];
+    if (Number.isFinite(fromMs)) {
+      conditions.push("t_ms>=?");
+      values.push(Math.round(fromMs));
+    }
+    if (Number.isFinite(toMs)) {
+      conditions.push("t_ms<=?");
+      values.push(Math.round(toMs));
+    }
+    const rows = await all(this.db, `
+      SELECT video_sequence, t_ms, lat, lon
+      FROM frame_center_track_points
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY video_sequence ASC
+    `, values);
+    const sourcePointCount = rows.length;
+    const deduplicated = [];
+    for (const row of rows) {
+      const point = {
+        sequence: Number(row.video_sequence),
+        tMs: Number(row.t_ms),
+        lat: Number(row.lat),
+        lon: Number(row.lon)
+      };
+      const previous = deduplicated[deduplicated.length - 1];
       if (previous && previous.lat === point.lat && previous.lon === point.lon) {
         deduplicated[deduplicated.length - 1] = point;
       } else {
@@ -492,6 +588,7 @@ export class SqliteKlvStore {
       try {
         const events = await run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]);
         await run(this.db, `DELETE FROM platform_track_points WHERE stream_id=?`, [streamId]);
+        await run(this.db, `DELETE FROM frame_center_track_points WHERE stream_id=?`, [streamId]);
         await run(this.db, `DELETE FROM stream_mission_timeline WHERE stream_id=?`, [streamId]);
         await run(this.db, `DELETE FROM stream_manual_video_time_anchor WHERE stream_id=?`, [streamId]);
         await run(this.db, "COMMIT");
@@ -718,6 +815,7 @@ export class SqliteKlvStore {
       try {
         const telemetry = await run(this.db, `DELETE FROM klv_events`);
         await run(this.db, `DELETE FROM platform_track_points`);
+        await run(this.db, `DELETE FROM frame_center_track_points`);
         await run(this.db, `DELETE FROM stream_mission_timeline`);
         await run(this.db, `DELETE FROM stream_manual_video_time_anchor`);
         const entries = await run(this.db, `DELETE FROM target_log_entries`);
