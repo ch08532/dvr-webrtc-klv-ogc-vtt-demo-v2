@@ -73,8 +73,12 @@ function featureItem(collectionId, mFeatureId) {
 export function registerOgcMovingFeaturesRoutes(app, { sources, store }) {
   app.get("/ogc", (req, res) => {
     res.json({
-      title: "OGC API – Moving Features (demo subset)",
-      links: [{ rel: "collections", href: "/ogc/collections" }]
+      title: "OGC API – Moving Features and Processes (demo subset)",
+      links: [
+        { rel: "collections", href: "/ogc/collections" },
+        { rel: "processes", href: "/ogc/processes", type: "application/json" },
+        { rel: "conformance", href: "/ogc/conformance", type: "application/json" }
+      ]
     });
   });
 

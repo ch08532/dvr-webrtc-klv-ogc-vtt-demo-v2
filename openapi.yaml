@@ -17,6 +17,7 @@ tags:
   - name: Telemetry
   - name: Target Log
   - name: WebRTC
+  - name: OGC Processes
 paths:
   /healthz:
     get:
@@ -30,6 +31,80 @@ paths:
       summary: Read host and runtime metrics, including disk I/O and network throughput when available
       responses:
         '200': { description: Runtime metrics payload }
+  /ogc:
+    get:
+      tags: [OGC Processes]
+      summary: OGC API landing page, including OGC API - Processes links
+      responses:
+        '200': { description: Process API links }
+  /ogc/conformance:
+    get:
+      tags: [OGC Processes]
+      summary: List OGC API - Processes conformance classes
+      responses:
+        '200': { description: Conformance declaration }
+  /ogc/processes:
+    get:
+      tags: [OGC Processes]
+      summary: List available asynchronous processes
+      responses:
+        '200': { description: Process catalog }
+  /ogc/processes/{processId}:
+    get:
+      tags: [OGC Processes]
+      summary: Describe an OGC process
+      parameters: [ { name: processId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Process description }
+        '404': { $ref: '#/components/responses/Error' }
+  /ogc/processes/{processId}/execution:
+    post:
+      tags: [OGC Processes]
+      summary: Submit an asynchronous OGC process job
+      parameters: [ { name: processId, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inputs]
+              properties:
+                inputs: { type: object, additionalProperties: true }
+      responses:
+        '201': { description: Job accepted; Location identifies its status resource }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /ogc/jobs:
+    get:
+      tags: [OGC Processes]
+      summary: List service-lifetime process jobs
+      responses:
+        '200': { description: Job list }
+  /ogc/jobs/{jobId}:
+    get:
+      tags: [OGC Processes]
+      summary: Read process job status
+      parameters: [ { name: jobId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '200': { description: Job status }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [OGC Processes]
+      summary: Dismiss a job; an in-progress source provisioning job stops its source session
+      parameters: [ { name: jobId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '204': { description: Job dismissed }
+        '404': { $ref: '#/components/responses/Error' }
+  /ogc/jobs/{jobId}/results:
+    get:
+      tags: [OGC Processes]
+      summary: Read successful process outputs
+      parameters: [ { name: jobId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '200': { description: Process outputs }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
   /sources:
     get:
       tags: [Sources]

@@ -93,6 +93,10 @@ Open:
 - UI: http://localhost:8090
 - OGC collections: http://localhost:8090/ogc/collections
 
+### OGC API - Processes
+
+FMV source provisioning is also available through the service-lifetime OGC API - Processes resources at `http://localhost:8090/ogc/processes` and `http://localhost:8090/ogc/jobs`. `provision-live-fmv` starts live ingest, HLS/KLV, and WebRTC, then completes when the source reaches `running`. `package-fmv-file` packages an uploaded/local source and completes when it reaches `ready`; HLS can be consumed while it is still finalizing. Both results link to the continuing `/sources/{streamId}/state` source session, rather than owning it. `export-clip` and `export-klv` provide finite artifact exports. Dismissing a successful job only removes job metadata; stop the continuing session explicitly with `DELETE /sources/{streamId}`.
+
 ## Start a source
 In the UI, set:
 - Stream ID: `stream1`

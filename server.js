@@ -23,6 +23,7 @@ import { createMetricsRouter } from "./src/routes/metrics.js";
 import { createUploadsRouter } from "./src/routes/uploads.js";
 import { createKlvRouter } from "./src/routes/klv.js";
 import { createSourcesRouter } from "./src/routes/sources.js";
+import { createOgcProcessesRouter } from "./src/routes/ogc_processes.js";
 import { getProcessCpuPercents, getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
 import { getGpuMetrics } from "./src/gpu_metrics.js";
 import { checkMediaTools } from "./src/media_tool_preflight.js";
@@ -910,6 +911,13 @@ async function bootstrapSubtitleArtifacts(outDir, segmentSeconds) {
   await fs.promises.writeFile(subtitlePlaylistPath, playlist);
 }
 
+const sourceStateSubscribers = new Set();
+
+function subscribeSourceState(listener) {
+  sourceStateSubscribers.add(listener);
+  return () => sourceStateSubscribers.delete(listener);
+}
+
 /** Merges a source lifecycle update and broadcasts it to subscribed clients. */
 function setSourceState(streamId, patch) {
   const prev = sourceStates.get(streamId) || {
@@ -926,6 +934,9 @@ function setSourceState(streamId, patch) {
     updatedAt: new Date().toISOString()
   };
   sourceStates.set(streamId, next);
+  for (const listener of sourceStateSubscribers) {
+    try { listener(next); } catch (error) { log.warn("source_state_subscriber_error", { error: serializeError(error) }); }
+  }
   return next;
 }
 
@@ -1332,6 +1343,18 @@ app.use("/hls", (_req, res) => {
 // ---------- OGC Moving Features subset ----------
 registerOgcMovingFeaturesRoutes(app, { sources, store });
 
+// ---------- OGC API - Processes ----------
+// Process jobs provision source sessions through the same lifecycle service as
+// the legacy /sources endpoint; both APIs therefore expose one runtime.
+app.use("/ogc", createOgcProcessesRouter({
+  startSourceRuntime,
+  stopSourceRuntime,
+  createFileClipRuntime,
+  getSourceRuntime,
+  subscribeSourceState,
+  store
+}));
+
 // ---------- API: uploads and input probe ----------
 app.use(createUploadsRouter({
   path,
@@ -1520,14 +1543,17 @@ app.get("/sources/:streamId/clip-thumbnails/:assetKey/:filename", async (req, re
 // ---------- API: file-backed clips ----------
 // Clips seek directly in the authoritative uploaded file. The export stream-copies
 // every source stream, including KLV/data, into a new MPEG-TS container.
-app.post("/sources/:streamId/clips", async (req, res) => {
-  const streamId = req.params.streamId;
+async function createFileClipRuntime(streamId, requestBody) {
   const source = sources.get(streamId);
   if (!source || source.sourceType !== "file") {
-    return res.status(409).json({ ok: false, error: "clipping is available only for an uploaded video source" });
+    const error = new Error("clipping is available only for an uploaded video source");
+    error.statusCode = 409;
+    throw error;
   }
   if (currentSourceState(streamId) !== "ready") {
-    return res.status(409).json({ ok: false, error: "wait for the uploaded video to finish packaging before creating a clip" });
+    const error = new Error("wait for the uploaded video to finish packaging before creating a clip");
+    error.statusCode = 409;
+    throw error;
   }
 
   const outDir = path.join(RECORD_ROOT, streamId);
@@ -1535,8 +1561,8 @@ app.post("/sources/:streamId/clips", async (req, res) => {
   let sourceInputPath;
   try {
     requestedRange = normalizeClipRange({
-      startSeconds: req.body?.startSeconds,
-      endSeconds: req.body?.endSeconds,
+      startSeconds: requestBody?.startSeconds,
+      endSeconds: requestBody?.endSeconds,
       durationSeconds: sourceStates.get(streamId)?.durationSeconds
     });
     const sourceDir = resolveSourceAssetDir(streamId);
@@ -1545,7 +1571,8 @@ app.post("/sources/:streamId/clips", async (req, res) => {
       throw new Error("uploaded source file is unavailable");
     }
   } catch (error) {
-    return res.status(400).json({ ok: false, error: String(error?.message || error) });
+    error.statusCode = 400;
+    throw error;
   }
 
   const clipId = randomUUID();
@@ -1611,18 +1638,27 @@ app.post("/sources/:streamId/clips", async (req, res) => {
     if (!source.clips) source.clips = new Map();
     source.clips.set(clipId, clip);
     log.info("clip_export_complete", { streamId, clipId, durationSeconds: clip.durationSeconds, klvEmbedded: clip.klvEmbedded });
-    return res.status(201).json({
+    return {
       ok: true,
       clip: {
         ...clip,
         downloadUrl: `/sources/${encodeURIComponent(streamId)}/clips/${encodeURIComponent(clipId)}/download`
       }
-    });
+    };
   } catch (error) {
     await fs.promises.rm(outputPath, { force: true }).catch(() => {});
     const message = String(error?.message || error);
     log.warn("clip_export_error", { streamId, clipId, error: serializeError(error) });
-    return res.status(500).json({ ok: false, error: message });
+    error.statusCode = 500;
+    throw error;
+  }
+}
+
+app.post("/sources/:streamId/clips", async (req, res) => {
+  try {
+    res.status(201).json(await createFileClipRuntime(req.params.streamId, req.body));
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ ok: false, error: String(error?.message || error) });
   }
 });
 
@@ -1700,7 +1736,7 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
   }
 });
 
-app.post("/sources", async (req, res) => {
+async function startSourceRuntime(requestBody, requestId) {
   let requestedStreamId = null;
   let hls = null;
   let klvWorker = null;
@@ -1708,6 +1744,7 @@ app.post("/sources", async (req, res) => {
   let sourceType = "stream";
   let producerId = null;
   let purgeResult;
+  let sourceCreationStarted = false;
 
   try {
     const {
@@ -1724,7 +1761,7 @@ app.post("/sources", async (req, res) => {
   maxCuesPerSecond = 10,
   minCueDurSec = 0.10,
   maxCueDurSec = 0.50
-} = req.body || {};
+} = requestBody || {};
     sourceType = normalizeSourceType(requestedSourceType);
     const hlsMode = normalizeHlsMode(requestedHlsMode);
     const webRtcMode = normalizeWebRtcMode(requestedWebRtcMode);
@@ -1792,21 +1829,20 @@ app.post("/sources", async (req, res) => {
       : null;
 
     if (sources.has(streamId)) {
-      return res.status(409).json({
-        ok: false,
-        error: `source ${streamId} already exists`,
-        state: getSourceRuntime(streamId)
-      });
+      const error = new Error(`source ${streamId} already exists`);
+      error.statusCode = 409;
+      error.state = getSourceRuntime(streamId);
+      throw error;
     }
     const currentState = currentSourceState(streamId);
     if (currentState === "starting" || currentState === "running" || currentState === "degraded" || currentState === "stopping") {
-      return res.status(409).json({
-        ok: false,
-        error: `source ${streamId} is currently ${currentState}; start is not allowed`,
-        state: getSourceRuntime(streamId)
-      });
+      const error = new Error(`source ${streamId} is currently ${currentState}; start is not allowed`);
+      error.statusCode = 409;
+      error.state = getSourceRuntime(streamId);
+      throw error;
     }
 
+    sourceCreationStarted = true;
     setSourceState(streamId, {
       state: "starting",
       running: false,
@@ -1909,7 +1945,7 @@ app.post("/sources", async (req, res) => {
           etaSeconds: complete ? 0 : etaSeconds
         });
       },
-      requestId: req.requestId
+      requestId
     });
 
     // TS duration is often absent from the short ffprobe read.  Resolve it in
@@ -1977,7 +2013,7 @@ app.post("/sources", async (req, res) => {
       minCueDurSec: Number(minCueDurSec) || 0.10,
       maxCueDurSec: Number(maxCueDurSec) || 0.50,
       dbPath: path.join(DB_DIR, "klv.sqlite"),
-      requestId: req.requestId,
+      requestId,
       onDecoded: ({ decoded, klvUnixMs, timeSource }) => {
         wsBroadcastLive(streamId, decoded);
         setSourceState(streamId, {
@@ -2016,7 +2052,7 @@ app.post("/sources", async (req, res) => {
         streamId,
         inputUrl: resolvedInputUrl,
         mode: webRtcEncoderMode,
-        requestId: req.requestId
+        requestId
       });
       startedSfuIngest = true;
       producerId = ingest.producerId;
@@ -2171,7 +2207,7 @@ app.post("/sources", async (req, res) => {
         streamId,
         inputUrl: resolvedInputUrl,
         containerName: sourceProbe?.container?.name,
-        requestId: req.requestId
+        requestId
       });
     }
 
@@ -2181,7 +2217,7 @@ app.post("/sources", async (req, res) => {
 
     log.info("source_create_success", { streamId, sourceType, producerId });
 
-    res.json({
+    return {
       ok: true,
       streamId,
       hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
@@ -2199,7 +2235,7 @@ app.post("/sources", async (req, res) => {
         deletedEvents: purgeResult.deletedEvents
       },
       state: getSourceRuntime(streamId)
-    });
+    };
   } catch (e) {
     if (klvWorker) await stopKlvStreamWorker(klvWorker);
     await stopHlsRecorder(hls);
@@ -2207,7 +2243,7 @@ app.post("/sources", async (req, res) => {
       try { await sfuClient.stopIngest(requestedStreamId); } catch {}
     }
 
-    if (requestedStreamId) {
+    if (requestedStreamId && sourceCreationStarted) {
       sources.delete(requestedStreamId);
       setSourceState(requestedStreamId, {
         // A create failure occurs before a source runtime is published. All
@@ -2222,22 +2258,37 @@ app.post("/sources", async (req, res) => {
     }
 
     log.error("source_create_error", { error: serializeError(e) });
-    res.status(400).json({ ok: false, error: String(e?.message || e) });
+    throw e;
+  }
+}
+
+app.post("/sources", async (req, res) => {
+  try {
+    res.json(await startSourceRuntime(req.body, req.requestId));
+  } catch (error) {
+    res.status(error.statusCode || 400).json({
+      ok: false,
+      error: String(error?.message || error),
+      ...(error.state ? { state: error.state } : {})
+    });
   }
 });
 
-app.delete("/sources/:streamId", async (req, res) => {
-  const streamId = req.params.streamId;
+async function stopSourceRuntime(streamId) {
   const state = currentSourceState(streamId);
   if (state === "starting" || state === "stopping") {
-    return res.status(409).json({
-      ok: false,
-      error: `source ${streamId} is currently ${state}; stop is not allowed`,
-      state: getSourceRuntime(streamId)
-    });
+    const error = new Error(`source ${streamId} is currently ${state}; stop is not allowed`);
+    error.statusCode = 409;
+    error.state = getSourceRuntime(streamId);
+    throw error;
   }
   const s = sources.get(streamId);
-  if (!s) return res.status(404).json({ ok: false, error: "not found", state: getSourceRuntime(streamId) });
+  if (!s) {
+    const error = new Error("not found");
+    error.statusCode = 404;
+    error.state = getSourceRuntime(streamId);
+    throw error;
+  }
 
   log.info("source_delete_start", { streamId });
   setSourceState(streamId, {
@@ -2269,7 +2320,19 @@ app.delete("/sources/:streamId", async (req, res) => {
     lastError: null
   });
   log.info("source_delete_success", { streamId, deletedTargetLog });
-  res.json({ ok: true, deletedTargetLog });
+  return { ok: true, deletedTargetLog };
+}
+
+app.delete("/sources/:streamId", async (req, res) => {
+  try {
+    res.json(await stopSourceRuntime(req.params.streamId));
+  } catch (error) {
+    res.status(error.statusCode || 400).json({
+      ok: false,
+      error: String(error?.message || error),
+      ...(error.state ? { state: error.state } : {})
+    });
+  }
 });
 
 // ---------- API: direct KLV query ----------

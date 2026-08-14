@@ -6,9 +6,9 @@ This is a local-first proof of concept for ingesting video sources that carry MI
 
 - HLS DVR playback with a time-aligned telemetry overlay.
 - Low-latency WebRTC playback for live stream sources.
-- Telemetry inspection, map display, direct queries, and a small OGC API – Moving Features subset.
+- Telemetry inspection, map display, direct queries, OGC API – Moving Features, and OGC API – Processes.
 
-An uploaded file may additionally be exported as a keyframe-aligned clip without re-encoding or losing its embedded KLV data. The PoC accepts UDP inputs and uploaded `.ts`, `.m2ts`, `.mp4`, `.mov`, and `.mkv` files. It is intentionally a single-node application: it has no authentication, tenancy, object-store integration, distributed job queue, or production retention policy.
+An uploaded file may additionally be exported as a keyframe-aligned clip without re-encoding or losing its embedded KLV data. The UI submits source provisioning and artifact exports as OGC API - Processes jobs; media execution remains local to this service. The PoC accepts UDP inputs and uploaded `.ts`, `.m2ts`, `.mp4`, `.mov`, and `.mkv` files. It is intentionally a single-node application: it has no authentication, tenancy, object-store integration, distributed job queue, durable job recovery, or production retention policy.
 
 ## 2. Architecture at a glance
 
@@ -28,7 +28,9 @@ An uploaded file may additionally be exported as a keyframe-aligned clip without
           |                   /            \            |
           |          WebVTT sidecars      SQLite      WebRTC browser
           |                   |             |
-          +----------- React UI ----------+---- OGC API / live WebSocket
+          +----------- React UI ----------+---- OGC APIs / live WebSocket
+                       |                        |
+                 OGC Process jobs          Moving Features + source sessions
 ```
 
 The browser does not render KLV directly from the media container. Instead, it receives video from HLS or WebRTC and receives matching decoded telemetry from a WebVTT cue (DVR) or a WebSocket event (live). This separation keeps browser playback compatible while the server retains access to original KLV carrier packets.
@@ -48,6 +50,7 @@ The browser does not render KLV directly from the media container. Instead, it r
 | `src/App.jsx` | React/Mantine control surface: source setup, upload progress, playback, active-source previews, telemetry, clip controls, and system utilization. |
 | `src/KlvMap.jsx` | OpenLayers map of source KLV geometry and computed-flat fallback footprints. |
 | `src/ogc_moving_features.js` | Minimal OGC Moving Features discovery, temporal geometry, and temporal-property routes. |
+| `src/routes/ogc_processes.js` | OGC API - Processes catalog, service-lifetime job manager, source-state observers, and process result resources. |
 
 The top-level Node service owns the source map and public runtime state. The KLV and SFU components run out-of-process so their failures can be reported independently and do not execute within the request handler process.
 
@@ -55,22 +58,22 @@ The top-level Node service owns the source map and public runtime state. The KLV
 
 ### 4.1 Live stream source
 
-1. The user enters a UDP URL and starts the source.
-2. The server probes streams and codecs with `ffprobe`.
+1. The UI submits `provision-live-fmv` to OGC API - Processes with the stream configuration.
+2. The asynchronous executor probes streams and codecs with `ffprobe`.
 3. FFmpeg begins HLS packaging and a private KLV carrier playlist.
 4. A KLV worker begins extracting carrier segments.
 5. An FFmpeg RTP ingest and mediasoup producer are started for WebRTC.
-6. The source reports `running` when the expected media paths are healthy; a lost KLV/SFU path produces `degraded` rather than silently appearing healthy.
+6. The source reports `running` when the expected media paths are healthy; the provisioning job then becomes `successful` and returns a source-session document. A lost KLV/SFU path produces `degraded` rather than silently appearing healthy.
 
 ### 4.2 File source
 
-1. The browser uploads the selected file over HTTP to the ignored `./videos/` directory. XMLHttpRequest is used so the UI can show transferred bytes and percent.
-2. The UI reports **Preparing file** while the server probes video, duration, and KLV streams.
+1. The browser uploads or copies the selected file into the authoritative per-source asset directory. Resumable upload support reports transferred bytes and percent.
+2. The UI submits `package-fmv-file`, then reports **Preparing file** while the server probes video, duration, and KLV streams.
 3. The server creates full-history VOD HLS, a KLV carrier playlist, WebVTT sidecars, and a poster image. File sources are HLS-only; they do not get a live WebRTC producer.
 4. FFmpeg progress updates source media time processed, percent, speed, and ETA.
 5. During packaging, `availableClipEndSeconds` is derived from every browser HLS playback playlist: only `#EXTINF` entries whose media file exists and is non-empty count toward the playable end. For ABR, the earliest rendition boundary is used so no selected quality can seek past its published segment. This is intentionally distinct from FFmpeg's input-processing progress, which can lead the last published segment.
 6. When FFmpeg reaches EOF, state changes to `finalizing`; the KLV worker drains remaining carrier segments and writes the final subtitle playlist.
-7. Once finalization succeeds, state is `ready`. Generated HLS/VTT artifacts remain playable even though the media worker processes have exited.
+7. Once finalization succeeds, state is `ready` and the packaging job becomes `successful`. Generated HLS/VTT artifacts remain playable even though the media worker processes have exited.
 
 ### 4.3 State model
 
@@ -86,6 +89,19 @@ The top-level Node service owns the source map and public runtime state. The KLV
 | `error` | Startup or runtime failure prevented the expected source behavior. |
 
 Stopping a source terminates its KLV worker, HLS recorder, and any SFU ingest. Purging before start removes that source's generated recording directory, SDP artifact, and SQLite telemetry rows. The original uploaded asset is not a recording artifact and is separately server-owned.
+
+### 4.4 OGC process jobs and source sessions
+
+The Process API deliberately separates finite work from continuing media sessions. Jobs use OGC statuses `accepted`, `running`, `successful`, `failed`, and `dismissed`, and are retained only for the service lifetime. A source session remains a `/sources/{streamId}/state` resource after its live provisioning job finishes.
+
+| Process | Inputs | Completion boundary | Results |
+| --- | --- | --- | --- |
+| `provision-live-fmv` | Stream ID, input URL, HLS/WebRTC mode, segment and VTT tuning | Source state is `running` | Source state, HLS master/subtitles, Moving Features, and WebRTC signaling links. |
+| `package-fmv-file` | Stream ID, uploaded/local `assetId`, HLS mode, segment and VTT tuning | Source state is `ready` | Source state, HLS master/subtitles, poster, and Moving Features links. |
+| `export-clip` | File stream ID and start/end seconds | FFmpeg has produced and verified the clip | Downloadable MPEG-TS clip link. |
+| `export-klv` | Stream ID and `csv` or `kml` format | Export link has been prepared | Canonical telemetry export link. |
+
+Dismissal removes job metadata and results. Dismissing an in-progress provisioning job stops the source once startup has made it stoppable; dismissing a successful provisioning job does not stop the source. `DELETE /sources/{streamId}` is the explicit source-session termination operation.
 
 ## 5. Media packaging
 
@@ -208,23 +224,34 @@ The OpenLayers map renders source KLV geometry, with a bounded `computed-flat` f
 
 No terrain model is downloaded. There is no terrain correction, terrain target, or terrain-derived footprint. The computed-flat fallback is an approximation and may be less accurate over uneven terrain. **Center map** recenters on the latest valid frame-center position.
 
+The DVR and live map use one shared base-map preference. The selected `streets`, `dark-openstreetmap`, or `world-imagery` value is persisted in browser `localStorage`, restored on restart, and synchronized between open tabs through the browser `storage` event. It is a device preference, not service-side mission data.
+
+### 7.4 Viewer-only image adjustments and snapshots
+
+Each HLS and WebRTC viewer keeps independent browser-only brightness, contrast, and saturation values. The controls affect CSS rendering only; they do not alter FFmpeg ingest, recordings, HLS segments, WebRTC media, KLV, clips, or authoritative FFmpeg snapshots. Reset restores all three adjustments for the current viewer.
+
+The displayed-frame snapshot uses the decoded browser frame with its current zoom/pan and color adjustments. For uploaded files, the separate authoritative snapshot continues to seek the original asset with FFmpeg and is deliberately unmodified.
+
 ## 8. File clips and KLV preservation
 
-The clip widget is available only for file sources because the server needs an authoritative, seekable original asset. It uses the packaged HLS duration for UI preview and exports from the existing private source-copy carrier playlist, never from browser playback renditions. This avoids a second full-file packaging pass or a delayed first export. While the source is packaging, the widget still displays the full authoritative duration and filmstrip, but it accepts trim positions only through `availableClipEndSeconds`, which is calculated from completed browser HLS segments on disk. The future filmstrip is dimmed, so a user cannot select or seek to a segment that has not been published. The end handle follows that growing boundary until a user deliberately moves it earlier; then their chosen end is preserved. Once the state becomes `ready`, the selectable boundary becomes the complete source duration.
+The clip widget is available only for file sources because the server needs an authoritative, seekable original asset. It uses the packaged HLS duration for UI preview, but `export-clip` seeks in the authoritative uploaded source rather than browser playback renditions. This avoids a re-encode while preserving source video, audio, and embedded KLV/data streams. While the source is packaging, the widget still displays the full authoritative duration and filmstrip, but it accepts trim positions only through `availableClipEndSeconds`, which is calculated from completed browser HLS segments on disk. The future filmstrip is dimmed, so a user cannot select or seek to a segment that has not been published. The end handle follows that growing boundary until a user deliberately moves it earlier; then their chosen end is preserved. Once the state becomes `ready`, the selectable boundary becomes the complete source duration.
 
 1. The user drags start/end grips or sets boundaries at the HLS playhead.
 2. The client previews the boundary by seeking HLS.
-3. The export endpoint validates the requested range against the original asset duration and selects complete source-carrier segments covering it.
-4. FFmpeg concatenates those carrier segments and stream copies video, audio, and data streams (`-c:v copy`, `-c:a copy`, `-c:d copy`).
-5. Both bounds snap outward to verified decodable source-keyframe segment boundaries.
+3. The UI submits `export-clip` and monitors its OGC job resource.
+4. The executor validates the requested range against the original asset duration, seeks from a nearby preceding decodable keyframe, and stream copies every source stream.
+5. FFmpeg writes a fresh MPEG-TS timeline while retaining video, audio, and data streams (`-c copy`).
 6. The output is MPEG-TS, allowing KLV data streams to remain embedded. The server probes the result and rejects a KLV-bearing source whose KLV was not retained.
 
-Clip APIs:
+The UI process submission and result resources are:
 
 ```text
-POST /sources/:streamId/clips
-GET  /sources/:streamId/clips/:clipId/download
+POST /ogc/processes/export-clip/execution
+GET  /ogc/jobs/:jobId
+GET  /ogc/jobs/:jobId/results
 ```
+
+The legacy `POST /sources/:streamId/clips` and clip download endpoint remain available for compatible clients. KLV CSV/KML controls likewise submit `export-klv`; their result link resolves to the canonical legacy export resource.
 
 The default policy accepts any duration at least 0.25 seconds. A deployment can set a positive `MAX_CLIP_DURATION_SECONDS` limit. Clips are held under `recordings/<streamId>/clips/` and tracked in memory for the lifetime of the active source.
 
@@ -236,18 +263,22 @@ The UI uses these primary HTTP routes:
 | --- | --- |
 | `POST /uploads/video` | Stores an allowed video file and returns a server-owned asset ID. Enforces `MAX_VIDEO_UPLOAD_MB` (10 GB default). |
 | `POST /probe/input` | Performs a non-starting input probe. |
-| `POST /sources` | Starts a stream or uploaded-file source. |
-| `GET /sources`, `GET /sources/:streamId/state` | Enumerates sources and returns lifecycle/progress/runtime state. |
+| `POST /ogc/processes/{processId}/execution` | Starts `provision-live-fmv`, `package-fmv-file`, `export-clip`, or `export-klv` asynchronously. This is the UI's source-start and export entry point. |
+| `GET /ogc/jobs/{jobId}`, `GET /ogc/jobs/{jobId}/results` | Monitors a finite process job and obtains its output links. |
+| `GET /sources`, `GET /sources/:streamId/state` | Enumerates source sessions and returns lifecycle/progress/runtime state; the UI continues to poll this while a job provisions or packages media. |
 | `DELETE /sources/:streamId` | Stops a source and its child media workers. |
+| `POST /sources`, `POST /sources/:streamId/clips` | Legacy compatible source-start and clip APIs; retained for non-UI clients. |
 | `/hls/:streamId/...` | Serves generated HLS playback files, VTT sidecars, and source posters. |
 | `GET /streams/:streamId/klv/platform-history.geojson` | Returns the bounded, segment-sampled platform-history GeoJSON Feature used by the map overlay. |
 | `GET /metrics/runtime`, `GET /healthz` | Host, GPU, worker, source, and service health information. |
 | `/webrtc/*` | mediasoup signaling for live browser consumption. |
-| `/ogc/*` | OGC Moving Features demo subset. |
+| `/ogc/collections/*` | OGC Moving Features discovery and telemetry collections. |
+| `GET /ogc/processes`, `GET /ogc/processes/{processId}` | OGC API - Processes catalog and descriptions. |
+| `GET /ogc/jobs`, `DELETE /ogc/jobs/{jobId}` | Lists service-lifetime jobs and dismisses one. |
 
 The `/ws` WebSocket supports a `subscribe` message containing `streamId` and `mode: "live"`. It broadcasts decoded ST 0601 objects only to subscribed clients.
 
-The OGC subset exposes collection discovery plus `platform` and `frameCenter` moving features. It returns temporal geometry sequences and temporal property arrays from the same SQLite data, accepting ISO timestamps or epoch milliseconds in the `datetime` query parameter.
+The OGC API landing page links to both process and Moving Features resources. The Moving Features subset exposes collection discovery plus `platform` and `frameCenter` moving features. It returns temporal geometry sequences and temporal property arrays from the same SQLite data, accepting ISO timestamps or epoch milliseconds in the `datetime` query parameter. The Processes surface conforms to the OGC API - Processes Core asynchronous-job model: provisioning results describe a continuing source session, whereas artifact exports are finite results.
 
 ## 10. Observability, errors, and shutdown
 
@@ -258,6 +289,8 @@ Expected failures are surfaced instead of silently hidden:
 - Input probe or startup failure leaves the source in `error` with `lastError`.
 - KLV or SFU ingest exit can degrade a source while leaving any remaining path available.
 - Finalization uses a duration/segment-count estimate, bounded by `KLV_FINALIZE_MIN_TIMEOUT_MS`, `KLV_FINALIZE_MS_PER_SEGMENT`, and `KLV_FINALIZE_MAX_TIMEOUT_MS`; timeout failures are reported in state.
+- A process job fails when its source reaches an incompatible terminal lifecycle state; its job result links are not published until successful completion.
+- The browser suppresses a stale pre-provisioning `stopped` source record while an accepted start job has not yet published its first lifecycle update.
 - Browser source polling treats unavailable backend responses as offline and resets playback state until the server returns.
 
 On process shutdown, the service stops source workers, closes WebSocket clients and HTTP sockets, closes the SQLite store, and applies a bounded forced-exit timeout.

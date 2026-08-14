@@ -619,6 +619,8 @@ function App() {
   const hlsRetryTimerRef = useRef(null);
   const hlsRetryTokenRef = useRef(0);
   const startRequestInFlightRef = useRef(false);
+  const provisioningStreamRef = useRef(null);
+  const hlsBufferingTimerRef = useRef(null);
   const hlsStallTimerRef = useRef(null);
   const hlsRecoveryTimerRef = useRef(null);
   const hlsRecoveryPendingRef = useRef(false);
@@ -1006,13 +1008,11 @@ function App() {
     if (!targetStreamId) return;
     const result = await api(`/sources/${encodeURIComponent(targetStreamId)}/state`);
     if (result?.streamId) {
-      // A file upload is part of the Start Source workflow, but the server
-      // cannot create its source runtime until the upload has completed. Keep
-      // the in-progress `starting` state rather than briefly displaying the
-      // stale stopped state returned during that interval.
-      if (startRequestInFlightRef.current
-        && streamRuntimeRef.current?.state === 'starting'
-        && result.state === 'stopped') return;
+      // An accepted OGC job may spend time probing before it publishes the
+      // source's `starting` record. Keep its local starting state instead of
+      // briefly applying the prior stopped source-state resource.
+      if (provisioningStreamRef.current === targetStreamId && result.state === 'stopped') return;
+      if (provisioningStreamRef.current === targetStreamId) provisioningStreamRef.current = null;
       streamRuntimeRef.current = result;
       setStreamRuntime(result);
       if (!hasDvrKlvTelemetry(result)) setOverlayData(null);
@@ -1020,6 +1020,60 @@ function App() {
       if (!result.running && result.state !== 'ready') setAutoAttachOnDvr(false);
       if (updateStatus) setStatus(JSON.stringify(result, null, 2));
     }
+  };
+
+  // Provisioning jobs are finite OGC Process resources. Their associated
+  // source session stays alive after success, so monitor both job and source
+  // state: HLS can become playable while a file job is still finalizing.
+  const monitorOgcProvisionJob = async (jobId, targetStreamId, isFileSource) => {
+    const deadline = Date.now() + (isFileSource ? 2 * 60 * 60 * 1000 : 2 * 60 * 1000);
+    let hlsAttachRequested = false;
+    while (Date.now() < deadline) {
+      const job = await api(`/ogc/jobs/${encodeURIComponent(jobId)}`);
+      await refreshStreamState(targetStreamId);
+      const runtime = streamRuntimeRef.current;
+      const playable = runtime?.state === 'running' || runtime?.state === 'finalizing' || runtime?.state === 'ready';
+      if (playable) {
+        setAutoAttachOnDvr(true);
+        // startHlsAutoAttach owns its own retry loop. Calling it for every job
+        // poll resets that loop and its “Waiting for HLS playlist” status,
+        // producing a visible Waiting/Playing flicker during file packaging.
+        if (activeTabRef.current === 'dvr' && !hlsAttachRequested) {
+          hlsAttachRequested = true;
+          startHlsAutoAttach(targetStreamId);
+        }
+      }
+      if (job?.status === 'successful') {
+        if (provisioningStreamRef.current === targetStreamId) provisioningStreamRef.current = null;
+        setStatus(JSON.stringify(job, null, 2));
+        if (!isFileSource && activeTabRef.current === 'live-webrtc') startWebRtcAutoAttach(targetStreamId);
+        return;
+      }
+      if (job?.status === 'failed' || job?.status === 'dismissed') {
+        if (provisioningStreamRef.current === targetStreamId) provisioningStreamRef.current = null;
+        throw new Error(job.message || `Provisioning job ${job.status}`);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 750));
+    }
+    throw new Error('Timed out waiting for the OGC provisioning job');
+  };
+
+  // Artifact exports are finite OGC jobs. Keep polling inside one shared
+  // helper so clip and KLV controls follow the same status/results contract.
+  const waitForOgcProcessResults = async (jobId, { timeoutMs = 5 * 60 * 1000 } = {}) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const job = await api(`/ogc/jobs/${encodeURIComponent(jobId)}`);
+      if (job?.status === 'successful') {
+        const results = await api(`/ogc/jobs/${encodeURIComponent(jobId)}/results`);
+        return { job, outputs: results?.outputs || {} };
+      }
+      if (job?.status === 'failed' || job?.status === 'dismissed') {
+        throw new Error(job.message || `OGC process job ${job.status}`);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+    }
+    throw new Error('Timed out waiting for the OGC process job');
   };
 
   const testInputFeed = async () => {
@@ -1086,6 +1140,27 @@ function App() {
     }
   };
 
+  // HLS players can emit short waiting/stalled pairs at rendition and segment
+  // boundaries even while frames keep arriving.  Do not flash the operator
+  // status for those harmless events; only show buffering when it persists.
+  const clearHlsBufferingIndicator = () => {
+    if (hlsBufferingTimerRef.current) {
+      clearTimeout(hlsBufferingTimerRef.current);
+      hlsBufferingTimerRef.current = null;
+    }
+  };
+
+  const scheduleHlsBufferingIndicator = (targetStreamId, player) => {
+    if (player?.paused?.()) return;
+    clearHlsBufferingIndicator();
+    hlsBufferingTimerRef.current = setTimeout(() => {
+      hlsBufferingTimerRef.current = null;
+      if (window.player !== player || player?.isDisposed?.() || player?.paused?.()) return;
+      if (activeTabRef.current !== 'dvr' || streamIdRef.current !== targetStreamId) return;
+      setDvrStatus('Buffering...');
+    }, 1200);
+  };
+
   const clearHlsRecoveryTimer = () => {
     if (hlsRecoveryTimerRef.current) {
       clearTimeout(hlsRecoveryTimerRef.current);
@@ -1136,6 +1211,7 @@ function App() {
   };
 
   const clearDvrPlayerInstance = () => {
+    clearHlsBufferingIndicator();
     clearHlsStallTimer();
     clearHlsRecoveryTimer();
     clearVttOverlayHooks();
@@ -1580,6 +1656,7 @@ function App() {
   const startSource = async () => {
     if (!canStartSource) return;
     startRequestInFlightRef.current = true;
+    provisioningStreamRef.current = streamId;
     setStartRequestInFlight(true);
     setOverlayData(null);
     setDvrPlatformHistory(null);
@@ -1629,42 +1706,38 @@ function App() {
         setStatus(`Copied ${copyResult.sourceFilename || 'local server video'}. Analyzing video streams and KLV metadata...`);
         setActiveTab('dvr');
       }
-      if (selectedFileSource) setStatus('Starting file conversion and KLV processing...');
-      const result = await api("/sources", {
+      const processId = selectedFileSource ? 'package-fmv-file' : 'provision-live-fmv';
+      if (selectedFileSource) setStatus('Starting OGC file packaging and KLV processing...');
+      else setStatus('Submitting live FMV provisioning job...');
+      const result = await api(`/ogc/processes/${processId}/execution`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", Prefer: "respond-async" },
         body: JSON.stringify({
-          streamId,
-          sourceType: selectedFileSource ? 'file' : sourceType,
-          inputUrl: sourceType === 'stream' ? inputUrl : undefined,
-          assetId,
-          hlsMode,
-          webRtcMode,
-          hlsSegmentSeconds,
-          vttSegmentSeconds: hlsSegmentSeconds,
-          maxCuesPerSecond,
-          minCueDurSec,
-          maxCueDurSec
+          inputs: {
+            streamId,
+            inputUrl: sourceType === 'stream' ? inputUrl : undefined,
+            assetId,
+            hlsMode,
+            webRtcMode,
+            hlsSegmentSeconds,
+            vttSegmentSeconds: hlsSegmentSeconds,
+            maxCuesPerSecond,
+            minCueDurSec,
+            maxCueDurSec
+          }
         })
       });
+      if (!result?.jobID) throw new Error(result?.detail || result?.error || 'OGC process job was not accepted');
       setFileStartProgress(null);
       setStatus(JSON.stringify(result, null, 2));
-      if (result?.state?.streamId) setStreamRuntime(result.state);
       await refreshStreamState(streamId);
       await refreshSources({ silent: true });
-
-      if (result?.ok) {
-        setAutoAttachOnDvr(true);
-      }
-
-      // Start probing for HLS and attach as soon as playlist is available.
-      if (result?.ok && activeTab === 'dvr') {
-        startHlsAutoAttach(streamId);
-      }
-      if (result?.ok && !selectedFileSource && activeTab === 'live-webrtc') {
-        startWebRtcAutoAttach(streamId);
-      }
+      void monitorOgcProvisionJob(result.jobID, streamId, selectedFileSource).catch((error) => {
+        setStatus(`FMV provisioning failed: ${String(error?.message || error)}`);
+        refreshStreamState(streamId).catch(() => {});
+      });
     } catch (error) {
+      if (provisioningStreamRef.current === streamId) provisioningStreamRef.current = null;
       setFileStartProgress(null);
       setStatus(`Start source failed: ${String(error?.message || error)}`);
       setStreamRuntime((prev) => ({
@@ -1684,6 +1757,7 @@ function App() {
 
   const stopSource = async () => {
     if (!canStopSource) return;
+    if (provisioningStreamRef.current === streamId) provisioningStreamRef.current = null;
     setStopRequestInFlight(true);
     setOverlayData(null);
     setDvrPlatformHistory(null);
@@ -2597,7 +2671,17 @@ function App() {
     setKlvExportInFlight(normalizedFormat);
     let response = null;
     try {
-      response = await fetch(`/streams/${encodeURIComponent(streamId)}/klv/export.${normalizedFormat}`);
+      setStatus(`Preparing KLV ${normalizedFormat.toUpperCase()} export...`);
+      const accepted = await api('/ogc/processes/export-klv/execution', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Prefer: 'respond-async' },
+        body: JSON.stringify({ inputs: { streamId, format: normalizedFormat } })
+      });
+      if (!accepted?.jobID) throw new Error(accepted?.detail || accepted?.error || 'KLV export job was not accepted');
+      const { outputs } = await waitForOgcProcessResults(accepted.jobID);
+      const exportLink = outputs?.telemetryExport?.href;
+      if (!exportLink) throw new Error('KLV export job returned no download link');
+      response = await fetch(exportLink);
       markServerOnline();
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -2743,19 +2827,21 @@ function App() {
     setClipInFlight(true);
     setClipResult(null);
     try {
-      const result = await api(`/sources/${encodeURIComponent(streamId)}/clips`, {
+      setStatus('Creating clip export job...');
+      const accepted = await api('/ogc/processes/export-clip/execution', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ startSeconds: clipStartSeconds, endSeconds: clipEndSeconds })
+        headers: { 'content-type': 'application/json', Prefer: 'respond-async' },
+        body: JSON.stringify({ inputs: { streamId, startSeconds: clipStartSeconds, endSeconds: clipEndSeconds } })
       });
-      if (!result?.ok || !result?.clip?.downloadUrl) {
-        throw new Error(result?.error || 'Clip creation failed');
-      }
-      setClipResult(result.clip);
-      setStatus(`Clip ready: ${result.clip.filename}. Video copied directly from the uploaded source near a keyframe boundary; KLV embedded: ${result.clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
+      if (!accepted?.jobID) throw new Error(accepted?.detail || accepted?.error || 'Clip export job was not accepted');
+      const { outputs } = await waitForOgcProcessResults(accepted.jobID);
+      const clip = outputs?.clip;
+      if (!clip?.downloadUrl) throw new Error('Clip export job returned no download link');
+      setClipResult(clip);
+      setStatus(`Clip ready: ${clip.filename}. Video copied directly from the uploaded source near a keyframe boundary; KLV embedded: ${clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
       const download = document.createElement('a');
-      download.href = result.clip.downloadUrl;
-      download.download = result.clip.filename;
+      download.href = clip.downloadUrl;
+      download.download = clip.filename;
       document.body.appendChild(download);
       download.click();
       download.remove();
@@ -3089,6 +3175,7 @@ function App() {
     if (hlsRecoveryPendingRef.current) return;
 
     hlsRecoveryPendingRef.current = true;
+    clearHlsBufferingIndicator();
     clearHlsStallTimer();
     setHlsMediaLoaded(false);
     setDvrStatus(`Reconnecting HLS (${reason})...`);
@@ -3116,6 +3203,7 @@ function App() {
     const maxRetries = 50; // Stop after 50 retries (~5 seconds)
 
     const url = `/hls/${encodeURIComponent(streamId)}/master.m3u8`;
+    clearHlsBufferingIndicator();
     setHlsMediaLoaded(false);
     setHlsQualityControlAvailable(false);
     setHlsPlaybackPaused(true);
@@ -3219,6 +3307,7 @@ function App() {
 
       player.on('loadstart', () => {
         forceHideCaptionTracks(window.player);
+        clearHlsBufferingIndicator();
         setHlsMediaLoaded(false);
         setHlsPlaybackPaused(Boolean(player.paused?.()));
         setDvrStatus('Loading playlist...');
@@ -3227,6 +3316,7 @@ function App() {
       });
       player.on('loadedmetadata', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         forceHideCaptionTracks(player);
         // File-backed HLS is a VOD asset. Video.js can otherwise position at
@@ -3246,6 +3336,7 @@ function App() {
       });
       player.on('canplay', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         forceHideCaptionTracks(player);
         setHlsMediaLoaded(true);
@@ -3255,6 +3346,7 @@ function App() {
       });
       player.on('playing', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         setHlsMediaLoaded(true);
         setHlsPlaybackPaused(false);
@@ -3264,24 +3356,26 @@ function App() {
       });
       player.on('waiting', () => {
         if (window.player !== player) return;
-        setDvrStatus('Buffering...');
+        scheduleHlsBufferingIndicator(streamId, player);
         setHlsPlaybackPaused(Boolean(player.paused?.()));
         refreshDvrPlaybackInfo(player);
         armHlsStallRecovery(streamId, player);
       });
       player.on('stalled', () => {
         if (window.player !== player) return;
-        setDvrStatus('Buffering...');
+        scheduleHlsBufferingIndicator(streamId, player);
         setHlsPlaybackPaused(Boolean(player.paused?.()));
         armHlsStallRecovery(streamId, player);
       });
       player.on('seeking', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         setDvrStatus('Seeking...');
         setHlsPlaybackPaused(Boolean(player.paused?.()));
       });
       player.on('seeked', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         setDvrStatus(player.paused?.() ? 'Paused' : 'Playing');
         setHlsPlaybackPaused(Boolean(player.paused?.()));
@@ -3293,24 +3387,28 @@ function App() {
       });
       player.on('pause', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         setHlsPlaybackPaused(true);
         if (!player.ended?.()) setDvrStatus('Paused');
       });
       player.on('ended', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         setHlsPlaybackPaused(true);
         setDvrStatus('Ended');
       });
       player.on('emptied', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         setHlsMediaLoaded(false);
         setHlsPlaybackPaused(true);
         setDvrStatus('Idle');
       });
       player.on('dispose', () => {
+        clearHlsBufferingIndicator();
         clearHlsStallTimer();
         setHlsMediaLoaded(false);
         setHlsQualityControlAvailable(false);
@@ -3320,6 +3418,7 @@ function App() {
 
       player.on('error', () => {
         if (window.player !== player) return;
+        clearHlsBufferingIndicator();
         setHlsMediaLoaded(false);
         setHlsPlaybackPaused(Boolean(player.paused?.()));
         const err = player.error?.();
