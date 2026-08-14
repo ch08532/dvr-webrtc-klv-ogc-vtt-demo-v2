@@ -228,6 +228,18 @@ function formatMapPointerPosition(position) {
     : 'Map pointer: —';
 }
 
+function klvMissionTimeMs(telemetry) {
+  const micros = telemetry?.timestampUnixMicros;
+  if (micros != null && String(micros).trim()) {
+    try {
+      const value = Number(BigInt(String(micros).trim()) / 1000n);
+      if (Number.isSafeInteger(value) && value >= 0) return value;
+    } catch {}
+  }
+  const isoMs = Date.parse(String(telemetry?.timestampIso || ''));
+  return Number.isFinite(isoMs) && isoMs >= 0 ? isoMs : null;
+}
+
 /** Parses ffprobe's display/sample aspect-ratio form, e.g. "16:9". */
 function parseAspectRatio(value) {
   const match = String(value || '').match(/^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/);
@@ -971,7 +983,25 @@ function App() {
         : currentSourceIsFile
           ? 'Checking KLV telemetry availability'
           : 'KLV export is available while the live stream is running';
-  const canAddTargetMark = targetLogSourceActive && !targetLogInFlight;
+  const targetMarkTelemetry = overlayData?.mode === 'dvr-vtt' || overlayData?.mode === 'live-ws'
+    ? overlayData
+    : null;
+  const currentKlvMissionTimeMs = klvMissionTimeMs(targetMarkTelemetry);
+  const targetMarkMissionTimeMs = currentKlvMissionTimeMs
+    ?? (hasConfirmedNoKlvFile ? manualVideoUtcMs : null);
+  const hasCurrentTargetMarkMissionTime = Number.isFinite(targetMarkMissionTimeMs);
+  const targetMarkUnavailableMessage = !serverOnline
+    ? 'Server is offline.'
+    : !targetLogSourceActive
+      ? 'Start a source before adding a target mark.'
+      : targetLogInFlight
+        ? 'A target-log request is already in progress.'
+        : hasConfirmedNoKlvFile && !hasManualVideoStartUtc
+          ? 'Set the first video frame UTC timestamp before adding a target mark.'
+          : hasConfirmedNoKlvFile
+            ? 'Start or play the source until a valid video frame time is available.'
+            : 'Wait for a KLV mission timestamp at the current playback position.';
+  const canAddTargetMark = targetLogSourceActive && !targetLogInFlight && hasCurrentTargetMarkMissionTime;
   const canManageTargetLogFields = targetLogSourceActive && !targetLogInFlight;
   const showTargetMarkAction = activeTab !== 'live-webrtc' || liveVideoStreaming;
 
@@ -2003,18 +2033,6 @@ function App() {
     return { position: null, positionSource: 'UNAVAILABLE' };
   };
 
-  const klvMissionTimeMs = (telemetry) => {
-    const micros = telemetry?.timestampUnixMicros;
-    if (micros != null && String(micros).trim()) {
-      try {
-        const value = Number(BigInt(String(micros).trim()) / 1000n);
-        if (Number.isSafeInteger(value) && value >= 0) return value;
-      } catch {}
-    }
-    const isoMs = Date.parse(String(telemetry?.timestampIso || ''));
-    return Number.isFinite(isoMs) && isoMs >= 0 ? isoMs : null;
-  };
-
   const dvrPlatformHistoryUntilMs = overlayData?.mode === 'dvr-vtt'
     ? klvMissionTimeMs(overlayData)
     : null;
@@ -2042,12 +2060,12 @@ function App() {
   };
 
   const openNewTargetLogEntry = (mapPosition = null) => {
-    if (!targetLogSourceActive) {
-      setStatus('Start a source before adding a target mark.');
+    if (!canAddTargetMark) {
+      setStatus(targetMarkUnavailableMessage);
       return;
     }
-    const telemetry = overlayData?.mode === 'dvr-vtt' || overlayData?.mode === 'live-ws' ? overlayData : null;
-    const missionTimeMs = klvMissionTimeMs(telemetry) ?? manualVideoUtcMs;
+    const telemetry = targetMarkTelemetry;
+    const missionTimeMs = targetMarkMissionTimeMs;
     const capture = isTargetLogCoordinate(mapPosition?.lat, mapPosition?.lon)
       ? { position: { lat: Number(mapPosition.lat), lon: Number(mapPosition.lon) }, positionSource: 'UNAVAILABLE' }
       : capturedTargetPosition(telemetry);
@@ -4548,7 +4566,9 @@ function App() {
                               </Menu.Dropdown>
                             </Menu>
                           ) : <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>}
-                          <Tooltip label="Add target mark" withArrow><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></Tooltip>
+                          <Tooltip label={canAddTargetMark ? 'Add target mark' : targetMarkUnavailableMessage} withArrow>
+                            <span><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></span>
+                          </Tooltip>
                         </Group>
                       ) : null}
                        {clipSourceIsActive ? (
@@ -4711,7 +4731,11 @@ function App() {
                           )}
                         </Tabs.Panel>
                         <Tabs.Panel value="map" pt="xs">
-                          <Text size="xs" c="dimmed" mb="xs">Following the active WebVTT cue. Click an empty map area to place a target mark; select an existing target pin to seek to it.</Text>
+                          <Text size="xs" c="dimmed" mb="xs">
+                            {canAddTargetMark
+                              ? 'Following the active WebVTT cue. Click an empty map area to place a target mark; select an existing target pin to seek to it.'
+                              : `${targetMarkUnavailableMessage} Existing target pins remain selectable.`}
+                          </Text>
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
@@ -4723,7 +4747,7 @@ function App() {
                             showPlatformHistory={dvrPlatformHistoryEnabled}
                             onPlatformHistoryToggle={setDvrPlatformHistoryEnabled}
                             platformHistoryLoading={dvrPlatformHistoryLoading}
-                            onPositionSelect={openNewTargetLogEntry}
+                            onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={dvrFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
                             selectedTargetLogId={selectedTargetLogId}
@@ -4796,7 +4820,9 @@ function App() {
                             <PlaybackControlIcon name="snapshot" />
                           </ActionIcon>
                         </Tooltip>
-                        <Tooltip label="Add target mark" withArrow><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></Tooltip>
+                        <Tooltip label={canAddTargetMark ? 'Add target mark' : targetMarkUnavailableMessage} withArrow>
+                          <span><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></span>
+                        </Tooltip>
                       </Group> : null}
                     </Paper>
                     <ViewerSplitHandle value={viewerSplit} onChange={setViewerSplit} label="Resize live video and map panels" />
@@ -4841,7 +4867,11 @@ function App() {
                           )}
                         </Tabs.Panel>
                         <Tabs.Panel value="map" pt="xs">
-                          <Text size="xs" c="dimmed" mb="xs">Following the live WebSocket KLV feed. Click an empty map area to place a target mark; select an existing target pin to select it.</Text>
+                          <Text size="xs" c="dimmed" mb="xs">
+                            {canAddTargetMark
+                              ? 'Following the live WebSocket KLV feed. Click an empty map area to place a target mark; select an existing target pin to select it.'
+                              : `${targetMarkUnavailableMessage} Existing target pins remain selectable.`}
+                          </Text>
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
@@ -4853,7 +4883,7 @@ function App() {
                             showPlatformHistory={livePlatformHistoryEnabled}
                             onPlatformHistoryToggle={setLivePlatformHistoryEnabled}
                             platformHistoryLoading={livePlatformHistoryLoading}
-                            onPositionSelect={openNewTargetLogEntry}
+                            onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={liveFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
                             selectedTargetLogId={selectedTargetLogId}
@@ -4886,7 +4916,11 @@ function App() {
                   <Group gap="xs">
                     {targetLogLoading ? <Loader size="xs" /> : <Badge variant="light">{targetLogEntries.length} mark{targetLogEntries.length === 1 ? '' : 's'}</Badge>}
                     <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)} disabled={!canManageTargetLogFields}>User-Defined Metadata</Button>
-                    {showTargetMarkAction ? <Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button> : null}
+                    {showTargetMarkAction ? (
+                      <Tooltip label={canAddTargetMark ? 'Add target mark' : targetMarkUnavailableMessage} withArrow>
+                        <span><Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button></span>
+                      </Tooltip>
+                    ) : null}
                   </Group>
                 </Group>
                 {targetLogEntries.length ? (
