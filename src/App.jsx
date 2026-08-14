@@ -473,7 +473,8 @@ function PlaybackControlIcon({ name }) {
   const stroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
   if (name === 'start') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14" {...stroke} /><path d="m9 6 10 6-10 6z" {...common} /></svg>;
   if (name === 'rewind') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 6-7 6 7 6zM20 6l-7 6 7 6z" {...common} /></svg>;
-  if (name === 'playPause') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14l8-7zM16 6v12M20 6v12" {...stroke} /></svg>;
+  if (name === 'play') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" {...common} /></svg>;
+  if (name === 'pause') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3v14H7zM14 5h3v14h-3z" {...common} /></svg>;
   if (name === 'forward') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 6 7 6-7 6zM13 6l7 6-7 6z" {...common} /></svg>;
   if (name === 'end') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14" {...stroke} /><path d="m15 6-10 6 10 6z" {...common} /></svg>;
   if (name === 'clipStart') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 7h8l-3 5 3 5H9z" {...stroke} /></svg>;
@@ -537,6 +538,7 @@ function App() {
   const [webRtcSaturation, setWebRtcSaturation] = useState(DEFAULT_IMAGE_SATURATION);
   const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
+  const [hlsPlaybackPaused, setHlsPlaybackPaused] = useState(true);
   const [clipStartSeconds, setClipStartSeconds] = useState(0);
   const [clipEndSeconds, setClipEndSeconds] = useState(0);
   const [clipInFlight, setClipInFlight] = useState(false);
@@ -1147,6 +1149,7 @@ function App() {
     videoRef.current = null;
     setHlsMediaLoaded(false);
     setHlsQualityControlAvailable(false);
+    setHlsPlaybackPaused(true);
     vttHookedRef.current = false;
   };
 
@@ -2377,8 +2380,10 @@ function App() {
       return;
     }
     if (player.paused?.()) {
-      player.play().catch(() => {});
+      setHlsPlaybackPaused(false);
+      player.play().catch(() => setHlsPlaybackPaused(true));
     } else {
+      setHlsPlaybackPaused(true);
       player.pause?.();
     }
   };
@@ -3113,6 +3118,7 @@ function App() {
     const url = `/hls/${encodeURIComponent(streamId)}/master.m3u8`;
     setHlsMediaLoaded(false);
     setHlsQualityControlAvailable(false);
+    setHlsPlaybackPaused(true);
     setDvrStatus('Connecting...');
     setDvrDiag({
       currentSrc: url,
@@ -3135,6 +3141,7 @@ function App() {
         forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(hasLoadedHlsMedia(window.player));
         setDvrStatus(window.player.paused?.() ? 'Paused' : 'Playing');
+        setHlsPlaybackPaused(Boolean(window.player.paused?.()));
         setDvrDiag((prev) => ({ ...prev, error: null }));
         refreshDvrPlaybackInfo(window.player);
         applyHlsQuality(hlsQualityRef.current);
@@ -3213,6 +3220,7 @@ function App() {
       player.on('loadstart', () => {
         forceHideCaptionTracks(window.player);
         setHlsMediaLoaded(false);
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         setDvrStatus('Loading playlist...');
         setDvrDiag((prev) => ({ ...prev, error: null }));
         refreshDvrPlaybackInfo(player);
@@ -3230,6 +3238,7 @@ function App() {
           seekHlsToLivePosition(player);
         }
         setHlsMediaLoaded(true);
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(player);
         applyHlsQuality(hlsQualityRef.current);
@@ -3240,6 +3249,7 @@ function App() {
         clearHlsStallTimer();
         forceHideCaptionTracks(player);
         setHlsMediaLoaded(true);
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         setDvrStatus('Ready');
         refreshDvrPlaybackInfo(player);
       });
@@ -3247,6 +3257,7 @@ function App() {
         if (window.player !== player) return;
         clearHlsStallTimer();
         setHlsMediaLoaded(true);
+        setHlsPlaybackPaused(false);
         setDvrStatus('Playing');
         setDvrDiag((prev) => ({ ...prev, error: null }));
         refreshDvrPlaybackInfo(player);
@@ -3254,22 +3265,26 @@ function App() {
       player.on('waiting', () => {
         if (window.player !== player) return;
         setDvrStatus('Buffering...');
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         refreshDvrPlaybackInfo(player);
         armHlsStallRecovery(streamId, player);
       });
       player.on('stalled', () => {
         if (window.player !== player) return;
         setDvrStatus('Buffering...');
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         armHlsStallRecovery(streamId, player);
       });
       player.on('seeking', () => {
         if (window.player !== player) return;
         setDvrStatus('Seeking...');
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
       });
       player.on('seeked', () => {
         if (window.player !== player) return;
         clearHlsStallTimer();
         setDvrStatus(player.paused?.() ? 'Paused' : 'Playing');
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         refreshDvrPlaybackInfo(player);
       });
       player.on('timeupdate', () => {
@@ -3279,29 +3294,34 @@ function App() {
       player.on('pause', () => {
         if (window.player !== player) return;
         clearHlsStallTimer();
+        setHlsPlaybackPaused(true);
         if (!player.ended?.()) setDvrStatus('Paused');
       });
       player.on('ended', () => {
         if (window.player !== player) return;
         clearHlsStallTimer();
+        setHlsPlaybackPaused(true);
         setDvrStatus('Ended');
       });
       player.on('emptied', () => {
         if (window.player !== player) return;
         clearHlsStallTimer();
         setHlsMediaLoaded(false);
+        setHlsPlaybackPaused(true);
         setDvrStatus('Idle');
       });
       player.on('dispose', () => {
         clearHlsStallTimer();
         setHlsMediaLoaded(false);
         setHlsQualityControlAvailable(false);
+        setHlsPlaybackPaused(true);
         setDvrStatus('Idle');
       });
 
       player.on('error', () => {
         if (window.player !== player) return;
         setHlsMediaLoaded(false);
+        setHlsPlaybackPaused(Boolean(player.paused?.()));
         const err = player.error?.();
         const msg = err?.message || `code=${String(err?.code || 'n/a')}`;
         setDvrStatus('Playback error. Reconnecting...');
@@ -4365,7 +4385,7 @@ function App() {
                           <Tooltip label="Play from start" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToStart} aria-label="Play from start"><PlaybackControlIcon name="start" /></ActionIcon></Tooltip>
                           <Tooltip label="Rewind 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(-15)} aria-label="Rewind 15 seconds"><PlaybackControlIcon name="rewind" /></ActionIcon></Tooltip>
                           {clipSourceIsActive ? <Tooltip label="Seek to clip start marker" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsToClipMarker('start')} disabled={!clipWidgetReady} aria-label="Seek to clip start marker"><PlaybackControlIcon name="clipStart" /></ActionIcon></Tooltip> : null}
-                          <Tooltip label="Pause or play" withArrow><ActionIcon variant="light" size="lg" onClick={toggleHlsPlayPause} aria-label="Pause or play"><PlaybackControlIcon name="playPause" /></ActionIcon></Tooltip>
+                          <Tooltip label={hlsPlaybackPaused ? 'Play' : 'Pause'} withArrow><ActionIcon variant="light" size="lg" onClick={toggleHlsPlayPause} aria-label={hlsPlaybackPaused ? 'Play' : 'Pause'} aria-pressed={!hlsPlaybackPaused}><PlaybackControlIcon name={hlsPlaybackPaused ? 'play' : 'pause'} /></ActionIcon></Tooltip>
                           {clipSourceIsActive ? <Tooltip label="Seek to clip end marker" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsToClipMarker('end')} disabled={!clipWidgetReady} aria-label="Seek to clip end marker"><PlaybackControlIcon name="clipEnd" /></ActionIcon></Tooltip> : null}
                           <Tooltip label="Fast-forward 15 seconds" withArrow><ActionIcon variant="light" size="lg" onClick={() => seekHlsBySeconds(15)} aria-label="Fast-forward 15 seconds"><PlaybackControlIcon name="forward" /></ActionIcon></Tooltip>
                           <Tooltip label="Go to end" withArrow><ActionIcon variant="light" size="lg" onClick={seekHlsToEnd} aria-label="Go to end"><PlaybackControlIcon name="end" /></ActionIcon></Tooltip>
