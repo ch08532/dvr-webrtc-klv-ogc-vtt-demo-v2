@@ -551,7 +551,7 @@ body,
 
 .clip-target-log-marker:hover,
 .clip-target-log-marker:focus-visible,
-.clip-target-log-marker.is-selected {
+.clip-target-log-marker.is-hovered {
   background: #e5484d;
   outline: 2px solid rgba(231, 236, 239, 0.75);
   outline-offset: 1px;
@@ -640,18 +640,19 @@ body,
 }
 
 .target-log-grid-row:hover,
-.target-log-grid-row:focus-visible {
+.target-log-grid-row:focus-visible,
+.target-log-grid-row.is-hovered {
   background: #171d24;
   outline: none;
 }
 
-.target-log-grid-row:focus-visible {
-  box-shadow: inset 0 0 0 1px #3fc6d1;
+.target-log-grid-row.is-hovered {
+  background: rgba(63, 198, 209, 0.13);
+  box-shadow: inset 3px 0 #3fc6d1;
 }
 
-.target-log-grid-row.is-selected {
-  background: rgba(232, 178, 61, 0.13);
-  box-shadow: inset 3px 0 #e8b23d;
+.target-log-grid-row:focus-visible {
+  box-shadow: inset 0 0 0 1px #3fc6d1;
 }
 
 .target-log-grid-actions {

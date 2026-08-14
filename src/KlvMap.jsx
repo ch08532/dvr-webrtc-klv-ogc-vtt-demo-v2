@@ -72,10 +72,10 @@ const frameGeometryStyle = new Style({
   })
 });
 
-const targetLogStyle = (selected) => new Style({
+const targetLogStyle = new Style({
   image: new CircleStyle({
-    radius: selected ? 9 : 7,
-    fill: new Fill({ color: selected ? '#E5484D' : '#3FC6D1' }),
+    radius: 7,
+    fill: new Fill({ color: '#3FC6D1' }),
     stroke: new Stroke({ color: '#E7ECEF', width: 2 })
   }),
   text: new Text({
@@ -176,8 +176,7 @@ export default function KlvMap({
   onPositionSelect = null,
   onPointerCoordinate = null,
   targetLogEntries = [],
-  selectedTargetLogId = null,
-  onTargetLogSelect = null,
+  onTargetLogActivate = null,
   matchHeightTo = null
 }) {
   const targetRef = useRef(null);
@@ -198,7 +197,7 @@ export default function KlvMap({
   const centerRequestRef = useRef(0);
   const onPositionSelectRef = useRef(onPositionSelect);
   const onPointerCoordinateRef = useRef(onPointerCoordinate);
-  const onTargetLogSelectRef = useRef(onTargetLogSelect);
+  const onTargetLogActivateRef = useRef(onTargetLogActivate);
   const [hasCoordinates, setHasCoordinates] = useState(false);
   const [hasPlatformHistory, setHasPlatformHistory] = useState(false);
   const [hasTargetLogPositions, setHasTargetLogPositions] = useState(false);
@@ -215,8 +214,8 @@ export default function KlvMap({
   }, [onPointerCoordinate]);
 
   useEffect(() => {
-    onTargetLogSelectRef.current = onTargetLogSelect;
-  }, [onTargetLogSelect]);
+    onTargetLogActivateRef.current = onTargetLogActivate;
+  }, [onTargetLogActivate]);
 
   const centerOnPosition = (position) => {
     const map = mapRef.current;
@@ -365,7 +364,7 @@ export default function KlvMap({
         return undefined;
       }, { hitTolerance: 6 });
       if (targetLogId) {
-        onTargetLogSelectRef.current?.(targetLogId);
+        onTargetLogActivateRef.current?.(targetLogId);
         return;
       }
 
@@ -496,13 +495,13 @@ export default function KlvMap({
           geometry: new Point(fromLonLat([Number(entry.position.lon), Number(entry.position.lat)]))
         });
         feature.set('targetLogEntryId', entry.id);
-        feature.setStyle(targetLogStyle(entry.id === selectedTargetLogId));
+        feature.setStyle(targetLogStyle);
         return feature;
       });
     source.addFeatures(features);
     targetLogFeaturesRef.current = features;
     setHasTargetLogPositions(features.length > 0);
-  }, [targetLogEntries, selectedTargetLogId]);
+  }, [targetLogEntries]);
 
   useEffect(() => {
     hasCenteredRef.current = false;

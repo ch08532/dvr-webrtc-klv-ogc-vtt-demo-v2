@@ -563,7 +563,7 @@ function App() {
   const [targetLogFields, setTargetLogFields] = useState([]);
   const [targetLogLoading, setTargetLogLoading] = useState(false);
   const [targetLogInFlight, setTargetLogInFlight] = useState(false);
-  const [selectedTargetLogId, setSelectedTargetLogId] = useState(null);
+  const [hoveredTargetLogId, setHoveredTargetLogId] = useState(null);
   const [targetLogEditor, setTargetLogEditor] = useState(null);
   const [targetLogSchemaOpen, setTargetLogSchemaOpen] = useState(false);
   const [targetLogFieldDraft, setTargetLogFieldDraft] = useState({ key: '', label: '', dataType: 'text', required: false });
@@ -1817,7 +1817,7 @@ function App() {
         // visible in the UI; SQLite data remains available until a reset/new source.
         setTargetLogEntries([]);
         setTargetLogFields([]);
-        setSelectedTargetLogId(null);
+        setHoveredTargetLogId(null);
         setTargetLogEditor(null);
         setTargetLogSchemaOpen(false);
       }
@@ -2004,7 +2004,6 @@ function App() {
       if (!result?.ok) throw new Error(result?.error || 'Could not load the target log.');
       setTargetLogEntries(Array.isArray(result.entries) ? result.entries : []);
       setTargetLogFields(Array.isArray(result.fields) ? result.fields : []);
-      setSelectedTargetLogId((current) => result.entries?.some((entry) => entry.id === current) ? current : null);
     } catch (error) {
       if (!silent) setStatus(`Target log load failed: ${String(error?.message || error)}`);
     } finally {
@@ -2082,7 +2081,6 @@ function App() {
   };
 
   const openEditTargetLogEntry = (entry) => {
-    setSelectedTargetLogId(entry.id);
     setTargetLogEditor({ ...entry, mode: 'edit', missionTimeText: formatMissionTime(entry.missionTimeMs), customFields: { ...(entry.customFields || {}) } });
   };
 
@@ -2218,7 +2216,6 @@ function App() {
         })
       });
       if (!result?.ok || !result?.entry) throw new Error(result?.error || 'Could not save target-log entry.');
-      setSelectedTargetLogId(result.entry.id);
       setTargetLogEditor(null);
       await refreshTargetLog(streamId, { silent: true });
       setStatus(isCreate ? 'Target mark added.' : 'Target mark updated.');
@@ -2235,7 +2232,6 @@ function App() {
     try {
       const result = await api(`/streams/${encodeURIComponent(streamId)}/target-log/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
       if (!result?.ok) throw new Error(result?.error || 'Could not remove target-log entry.');
-      if (selectedTargetLogId === entry.id) setSelectedTargetLogId(null);
       await refreshTargetLog(streamId, { silent: true });
       setStatus('Target mark removed.');
     } catch (error) {
@@ -2246,15 +2242,7 @@ function App() {
   };
 
   const seekTargetLogEntry = (entry) => {
-    if (selectedTargetLogId === entry.id) {
-      setSelectedTargetLogId(null);
-      return;
-    }
-    if (activeTabRef.current === 'live-webrtc') {
-      setSelectedTargetLogId(entry.id);
-      setStatus('Target mark selected. Live WebRTC playback cannot seek to a prior mission time.');
-      return;
-    }
+    if (activeTabRef.current === 'live-webrtc') return;
     const player = getActiveHlsPlayer();
     if (!player) {
       setStatus(`The ${playbackPlayerName} is not ready.`);
@@ -2267,12 +2255,15 @@ function App() {
     }
     const { start, end } = getHlsSeekBounds(player);
     player.currentTime(clampToBounds(videoTimeSeconds, start, end));
-    setSelectedTargetLogId(entry.id);
   };
 
-  const selectTargetLogEntryById = (entryId) => {
+  const seekTargetLogEntryById = (entryId) => {
     const entry = targetLogEntries.find((item) => item.id === entryId);
     if (entry) seekTargetLogEntry(entry);
+  };
+
+  const clearHoveredTargetLogEntry = (entryId) => {
+    setHoveredTargetLogId((current) => current === entryId ? null : current);
   };
 
   const createTargetLogField = async () => {
@@ -3966,7 +3957,7 @@ function App() {
   useEffect(() => {
     setTargetLogEntries([]);
     setTargetLogFields([]);
-    setSelectedTargetLogId(null);
+    setHoveredTargetLogId(null);
     setTargetLogEditor(null);
     if (serverOnline) void refreshTargetLog(streamId, { silent: true });
   }, [streamId, serverOnline]);
@@ -4050,7 +4041,6 @@ function App() {
     ? Object.entries(overlayData)
     : [];
   const targetLogActiveFields = targetLogFields.filter((field) => field.active);
-  const selectedTargetLogEntry = targetLogEntries.find((entry) => entry.id === selectedTargetLogId) || null;
   const missionTimeValidationError = targetLogEditor ? targetLogMissionTimeError(targetLogEditor.missionTimeText) : null;
   const missionTimePickerValue = targetLogEditor && !missionTimeValidationError
     ? new Date(parseTargetLogMissionTime(targetLogEditor.missionTimeText))
@@ -4623,9 +4613,11 @@ function App() {
                                    return <Tooltip key={entry.id} multiline w={280} label={`${formatMissionTime(entry.missionTimeMs)} · ${entry.observation || 'No observation'} · ${positionText}`} withArrow>
                                      <button
                                        type="button"
-                                       className={`clip-target-log-marker${entry.id === selectedTargetLogId ? ' is-selected' : ''}`}
+                                       className={`clip-target-log-marker${entry.id === hoveredTargetLogId ? ' is-hovered' : ''}`}
                                        style={{ left: `calc(${left}% - 6px)` }}
                                        onPointerDown={(event) => event.stopPropagation()}
+                                       onMouseEnter={() => setHoveredTargetLogId(entry.id)}
+                                       onMouseLeave={() => clearHoveredTargetLogEntry(entry.id)}
                                        onClick={() => seekTargetLogEntry(entry)}
                                        aria-label={`Seek to target mark at mission time ${formatMissionTime(entry.missionTimeMs)}`}
                                      />
@@ -4750,8 +4742,7 @@ function App() {
                             onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={dvrFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
-                            selectedTargetLogId={selectedTargetLogId}
-                            onTargetLogSelect={selectTargetLogEntryById}
+                            onTargetLogActivate={seekTargetLogEntryById}
                           />
                           <Group mt="xs" justify="space-between" gap="xs" wrap="nowrap">
                             <Text size="xs" c="dimmed">
@@ -4886,8 +4877,7 @@ function App() {
                             onPositionSelect={canAddTargetMark ? openNewTargetLogEntry : null}
                             onPointerCoordinate={liveFootprintMap.onPointerCoordinate}
                             targetLogEntries={targetLogEntries}
-                            selectedTargetLogId={selectedTargetLogId}
-                            onTargetLogSelect={selectTargetLogEntryById}
+                            onTargetLogActivate={seekTargetLogEntryById}
                           />
                           <Group mt="xs" justify="space-between" gap="xs" wrap="nowrap">
                             <Text size="xs" c="dimmed">
@@ -4940,9 +4930,11 @@ function App() {
                         {targetLogEntries.map((entry) => (
                           <tr
                             key={entry.id}
-                            className={`target-log-grid-row${entry.id === selectedTargetLogId ? ' is-selected' : ''}`}
+                            className={`target-log-grid-row${entry.id === hoveredTargetLogId ? ' is-hovered' : ''}`}
                             onClick={() => seekTargetLogEntry(entry)}
                             onDoubleClick={() => openEditTargetLogEntry(entry)}
+                            onMouseEnter={() => setHoveredTargetLogId(entry.id)}
+                            onMouseLeave={() => clearHoveredTargetLogEntry(entry.id)}
                             onKeyDown={(event) => {
                               if (event.key === 'Enter' || event.key === ' ') {
                                 event.preventDefault();
@@ -4969,7 +4961,6 @@ function App() {
                     </table>
                   </div>
                 ) : <Text size="sm" c="dimmed">No target marks for this stream yet. Add a mark from either playback mode.</Text>}
-                {selectedTargetLogEntry ? <Text size="xs" c="dimmed" mt="xs">Selected mission time: {formatMissionTime(selectedTargetLogEntry.missionTimeMs)}</Text> : null}
               </div>
               </> : <Stack align="center" gap={4} py="xl">
                 <Text fw={600}>No Active Stream Source</Text>

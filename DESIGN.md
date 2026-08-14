@@ -226,6 +226,8 @@ No terrain model is downloaded. There is no terrain correction, terrain target, 
 
 The DVR and live map use one shared base-map preference. The selected `streets`, `dark-openstreetmap`, or `world-imagery` value is persisted in browser `localStorage`, restored on restart, and synchronized between open tabs through the browser `storage` event. It is a device preference, not service-side mission data.
 
+Target marks require a mission timestamp from the active KLV cue or, for a confirmed no-KLV file, the manually configured first-frame UTC anchor. Target pins, clip-filmstrip dots, and Target Log rows do not retain selection state. Hovering a filmstrip dot shows its mark details, while hovering either a filmstrip dot or Target Log row transiently highlights its counterpart. Clicking an aligned marker in the DVR seeks the HLS playhead to its stored video time. Live WebRTC markers remain informational because that playback path cannot seek to historical time.
+
 ### 7.4 Viewer-only image adjustments and snapshots
 
 Each HLS and WebRTC viewer keeps independent browser-only brightness, contrast, and saturation values. The controls affect CSS rendering only; they do not alter FFmpeg ingest, recordings, HLS segments, WebRTC media, KLV, clips, or authoritative FFmpeg snapshots. Reset restores all three adjustments for the current viewer.
