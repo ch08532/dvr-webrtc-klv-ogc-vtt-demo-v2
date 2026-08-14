@@ -939,6 +939,12 @@ function App() {
     && Number.isFinite(clipAvailableEndSeconds)
     && clipAvailableEndSeconds >= MIN_CLIP_DURATION_SECONDS
   );
+  const clipPlaybackPositionPercent = (() => {
+    const playerTimeSeconds = Number(dvrDiag.currentTimeSec);
+    if (!clipWidgetReady || !Number.isFinite(clipTimelineEndSeconds) || clipTimelineEndSeconds <= 0
+      || !Number.isFinite(playerTimeSeconds)) return null;
+    return Math.max(0, Math.min(100, (playerTimeSeconds / clipTimelineEndSeconds) * 100));
+  })();
   const clipExportReady = clipWidgetReady && streamRuntime?.state === 'ready';
   const liveVideoStreaming = liveStatus === 'Playing';
   // File processing intentionally stops its FFmpeg workers after packaging and
@@ -4589,7 +4595,7 @@ function App() {
                                  {targetLogEntries.filter((entry) => {
                                    const seconds = targetLogVideoTimeSeconds(entry);
                                    return Number.isFinite(seconds) && seconds >= 0 && seconds <= clipAvailableEndSeconds;
-                                 }).map((entry, index) => {
+                                 }).map((entry) => {
                                    const left = (targetLogVideoTimeSeconds(entry) / clipTimelineEndSeconds) * 100;
                                    const positionText = entry.position
                                      ? `${entry.position.lat.toFixed(5)}, ${entry.position.lon.toFixed(5)}`
@@ -4598,7 +4604,7 @@ function App() {
                                      <button
                                        type="button"
                                        className={`clip-target-log-marker${entry.id === selectedTargetLogId ? ' is-selected' : ''}`}
-                                       style={{ left: `calc(${left}% - 6px)`, transform: `translateX(${((index % 3) - 1) * 4}px)` }}
+                                       style={{ left: `calc(${left}% - 6px)` }}
                                        onPointerDown={(event) => event.stopPropagation()}
                                        onClick={() => seekTargetLogEntry(entry)}
                                        aria-label={`Seek to target mark at mission time ${formatMissionTime(entry.missionTimeMs)}`}
@@ -4612,6 +4618,13 @@ function App() {
                                      width: `${(clipDurationSeconds / clipTimelineEndSeconds) * 100}%`
                                    }}
                                  />
+                                 {clipPlaybackPositionPercent != null ? (
+                                   <div
+                                     className="clip-playback-marker"
+                                     style={{ left: `${clipPlaybackPositionPercent}%` }}
+                                     aria-hidden="true"
+                                   />
+                                 ) : null}
                                   <button
                                     type="button"
                                     className="clip-drag-handle clip-drag-handle-start"

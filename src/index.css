@@ -487,6 +487,35 @@ body,
   pointer-events: none;
 }
 
+/* Current HLS playback position on the authoritative file timeline. It is
+ * deliberately pointer-transparent so trim handles and target marks retain
+ * their existing interactions. */
+.clip-playback-marker {
+  position: absolute;
+  top: 7px;
+  bottom: 0;
+  z-index: 3;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #3fc66d;
+  box-shadow: 0 0 0 1px rgba(10, 13, 16, 0.8), 0 0 7px rgba(63, 198, 109, 0.8);
+  pointer-events: none;
+}
+
+.clip-playback-marker::before {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 0;
+  height: 0;
+  transform: translateX(-50%);
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 7px solid #3fc66d;
+  filter: drop-shadow(0 1px 0 rgba(10, 13, 16, 0.9));
+}
+
 .clip-drag-handle {
   position: absolute;
   top: 0;
