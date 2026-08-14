@@ -4557,7 +4557,7 @@ function App() {
                             </Menu>
                           ) : <Tooltip label="Download snapshot" withArrow><ActionIcon variant="light" size="lg" onClick={downloadHlsSnapshot} aria-label="Download HLS snapshot"><PlaybackControlIcon name="snapshot" /></ActionIcon></Tooltip>}
                           <Tooltip label={canAddTargetMark ? 'Add target mark' : targetMarkUnavailableMessage} withArrow>
-                            <span><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></span>
+                            <span className="target-mark-action-wrapper"><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></span>
                           </Tooltip>
                         </Group>
                       ) : null}
@@ -4812,7 +4812,7 @@ function App() {
                           </ActionIcon>
                         </Tooltip>
                         <Tooltip label={canAddTargetMark ? 'Add target mark' : targetMarkUnavailableMessage} withArrow>
-                          <span><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></span>
+                          <span className="target-mark-action-wrapper"><ActionIcon variant="light" size="lg" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark} aria-label="Add target mark"><PlaybackControlIcon name="targetMark" /></ActionIcon></span>
                         </Tooltip>
                       </Group> : null}
                     </Paper>
@@ -4908,7 +4908,7 @@ function App() {
                     <Button size="xs" variant="default" onClick={() => setTargetLogSchemaOpen(true)} disabled={!canManageTargetLogFields}>User-Defined Metadata</Button>
                     {showTargetMarkAction ? (
                       <Tooltip label={canAddTargetMark ? 'Add target mark' : targetMarkUnavailableMessage} withArrow>
-                        <span><Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button></span>
+                        <span className="target-mark-action-wrapper"><Button size="xs" onClick={openNewTargetLogEntry} disabled={!canAddTargetMark}>Add Mark</Button></span>
                       </Tooltip>
                     ) : null}
                   </Group>

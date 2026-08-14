@@ -76,6 +76,12 @@ function parseJsonObject(value, fallback = {}) {
 }
 
 function targetEntryFromRow(row) {
+  const hasStoredPosition = row.position_lat != null && row.position_lon != null
+    && String(row.position_lat).trim() !== '' && String(row.position_lon).trim() !== ''
+    && Number.isFinite(Number(row.position_lat)) && Number.isFinite(Number(row.position_lon));
+  const position = hasStoredPosition
+    ? { lat: Number(row.position_lat), lon: Number(row.position_lon) }
+    : null;
   return {
     id: row.id,
     streamId: row.stream_id,
@@ -86,10 +92,8 @@ function targetEntryFromRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     observation: row.observation || "",
-    position: Number.isFinite(Number(row.position_lat)) && Number.isFinite(Number(row.position_lon))
-      ? { lat: Number(row.position_lat), lon: Number(row.position_lon) }
-      : null,
-    positionSource: row.position_source,
+    position,
+    positionSource: position ? (row.position_source || 'UNAVAILABLE') : 'UNAVAILABLE',
     customFields: parseJsonObject(row.custom_fields_json),
     createdBy: row.created_by || null
   };

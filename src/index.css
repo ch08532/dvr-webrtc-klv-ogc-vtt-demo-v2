@@ -549,6 +549,13 @@ body,
   touch-action: manipulation;
 }
 
+/* Tooltips need a wrapper around disabled target-mark actions; keep that
+ * wrapper from introducing an inline baseline offset in playback toolbars. */
+.target-mark-action-wrapper {
+  display: flex;
+  align-items: center;
+}
+
 .clip-target-log-marker:hover,
 .clip-target-log-marker:focus-visible,
 .clip-target-log-marker.is-hovered {

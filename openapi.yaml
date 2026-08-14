@@ -638,7 +638,7 @@ components:
         videoProductId: { type: string }
         missionTimeMs: { type: integer, minimum: 0, description: Current KLV mission timestamp in Unix milliseconds }
         observation: { type: string }
-        position: { $ref: '#/components/schemas/TargetLogPosition' }
+        position: { allOf: [ { $ref: '#/components/schemas/TargetLogPosition' } ], nullable: true, description: Optional spatial position; omit or set null when unavailable. }
         positionSource: { type: string, enum: [FRAME_CENTER, PLATFORM, UNAVAILABLE] }
         customFields: { type: object, additionalProperties: true }
         createdBy: { type: string }
