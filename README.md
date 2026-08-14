@@ -142,7 +142,7 @@ The DVR **Create video clip** control is available only for an uploaded file sou
 
 ### Snapshots
 
-For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame including the active zoom/pan, brightness, and contrast adjustments. Live streams retain the adjusted browser-frame snapshot only.
+For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame including active zoom/pan and image adjustments (brightness, contrast, and saturation). Live streams retain the adjusted browser-frame snapshot only. These controls are browser-only and never change the delivered or recorded media.
 
 For the HLS ABR ladder, the native High rendition retains the source sample aspect ratio when it must be encoded. The Low 360p square-pixel rung scales directly from the source display geometry before padding, preventing side bars for a 1440×1080 source with 4:3 SAR without an extra full-resolution scale. WebRTC itself is not changed.
 

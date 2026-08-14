@@ -71,6 +71,9 @@ const INITIAL_PLAYBACK_VIEW = { zoom: 1, panX: 0.5, panY: 0.5 };
 const IMAGE_ADJUSTMENT_MIN = 50;
 const IMAGE_ADJUSTMENT_MAX = 150;
 const DEFAULT_IMAGE_ADJUSTMENT = 100;
+const IMAGE_SATURATION_MIN = 0;
+const IMAGE_SATURATION_MAX = 200;
+const DEFAULT_IMAGE_SATURATION = 100;
 const MIN_CLIP_DURATION_SECONDS = 0.25;
 const PLATFORM_HISTORY_MAX_POINTS = 5000;
 const LIVE_PLATFORM_HISTORY_WINDOW_MS = 15 * 60 * 1000;
@@ -80,6 +83,23 @@ const VIEWER_SPLIT_MAX_PERCENT = 75;
 
 function clampViewerSplit(value) {
   return Math.min(VIEWER_SPLIT_MAX_PERCENT, Math.max(VIEWER_SPLIT_MIN_PERCENT, Math.round(Number(value))));
+}
+
+function clampImageAdjustment(value, min, max, fallback) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.min(max, Math.max(min, numeric)) : fallback;
+}
+
+/** CSS image controls used by both playback paths and displayed-frame snapshots. */
+function imageColorFilter({
+  brightness = DEFAULT_IMAGE_ADJUSTMENT,
+  contrast = DEFAULT_IMAGE_ADJUSTMENT,
+  saturation = DEFAULT_IMAGE_SATURATION
+} = {}) {
+  const safeBrightness = clampImageAdjustment(brightness, IMAGE_ADJUSTMENT_MIN, IMAGE_ADJUSTMENT_MAX, DEFAULT_IMAGE_ADJUSTMENT);
+  const safeContrast = clampImageAdjustment(contrast, IMAGE_ADJUSTMENT_MIN, IMAGE_ADJUSTMENT_MAX, DEFAULT_IMAGE_ADJUSTMENT);
+  const safeSaturation = clampImageAdjustment(saturation, IMAGE_SATURATION_MIN, IMAGE_SATURATION_MAX, DEFAULT_IMAGE_SATURATION);
+  return `brightness(${safeBrightness}%) contrast(${safeContrast}%) saturate(${safeSaturation}%)`;
 }
 
 /** An accessible, pointer-friendly divider for the video and telemetry panes. */
@@ -274,13 +294,22 @@ function PlaybackZoomControls({ zoom, onZoomChange, disabled = false }) {
 }
 
 /** Browser-only image controls; values are CSS percentages. */
-function ImageAdjustmentMenu({ brightness, contrast, onBrightnessChange, onContrastChange }) {
-  const isDefault = brightness === DEFAULT_IMAGE_ADJUSTMENT && contrast === DEFAULT_IMAGE_ADJUSTMENT;
-  return <Menu shadow="md" width={235} position="top" withArrow closeOnItemClick={false}>
+function ImageAdjustmentMenu({
+  brightness,
+  contrast,
+  saturation,
+  onBrightnessChange,
+  onContrastChange,
+  onSaturationChange
+}) {
+  const isDefault = brightness === DEFAULT_IMAGE_ADJUSTMENT
+    && contrast === DEFAULT_IMAGE_ADJUSTMENT
+    && saturation === DEFAULT_IMAGE_SATURATION;
+  return <Menu shadow="md" width={250} position="top" withArrow closeOnItemClick={false}>
     <Menu.Target>
-      <Tooltip label="Brightness and contrast" withArrow>
-        <ActionIcon variant={isDefault ? 'light' : 'filled'} size="lg" aria-label="Brightness and contrast">
-          <Text size="xs" fw={700}>B/C</Text>
+      <Tooltip label="Image adjustments" withArrow>
+        <ActionIcon variant={isDefault ? 'light' : 'filled'} size="lg" aria-label="Image adjustments">
+          <Text size="xs" fw={700}>IMG</Text>
         </ActionIcon>
       </Tooltip>
     </Menu.Target>
@@ -306,12 +335,23 @@ function ImageAdjustmentMenu({ brightness, contrast, onBrightnessChange, onContr
           label={(value) => `${value}%`}
           aria-label="Contrast"
         />
+        <Text size="xs" fw={600}>Saturation: {saturation}%</Text>
+        <Slider
+          min={IMAGE_SATURATION_MIN}
+          max={IMAGE_SATURATION_MAX}
+          step={1}
+          value={saturation}
+          onChange={onSaturationChange}
+          label={(value) => `${value}%`}
+          aria-label="Saturation"
+        />
         <Button
           size="xs"
           variant="light"
           onClick={() => {
             onBrightnessChange(DEFAULT_IMAGE_ADJUSTMENT);
             onContrastChange(DEFAULT_IMAGE_ADJUSTMENT);
+            onSaturationChange(DEFAULT_IMAGE_SATURATION);
           }}
           disabled={isDefault}
         >
@@ -474,8 +514,10 @@ function App() {
   const [webRtcPanning, setWebRtcPanning] = useState(false);
   const [hlsBrightness, setHlsBrightness] = useState(DEFAULT_IMAGE_ADJUSTMENT);
   const [hlsContrast, setHlsContrast] = useState(DEFAULT_IMAGE_ADJUSTMENT);
+  const [hlsSaturation, setHlsSaturation] = useState(DEFAULT_IMAGE_SATURATION);
   const [webRtcBrightness, setWebRtcBrightness] = useState(DEFAULT_IMAGE_ADJUSTMENT);
   const [webRtcContrast, setWebRtcContrast] = useState(DEFAULT_IMAGE_ADJUSTMENT);
+  const [webRtcSaturation, setWebRtcSaturation] = useState(DEFAULT_IMAGE_SATURATION);
   const [hlsQualityControlAvailable, setHlsQualityControlAvailable] = useState(false);
   const [dvrStatus, setDvrStatus] = useState('Idle');
   const [clipStartSeconds, setClipStartSeconds] = useState(0);
@@ -839,9 +881,14 @@ function App() {
       margin: '0 auto'
     }
     : { width: '100%' };
+  const webRtcImageFilter = imageColorFilter({
+    brightness: webRtcBrightness,
+    contrast: webRtcContrast,
+    saturation: webRtcSaturation
+  });
   const liveVideoStyle = liveDisplayAspect
-    ? { display: 'block', width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` }
-    : { display: 'block', width: '100%', height: 'auto', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: `brightness(${webRtcBrightness}%) contrast(${webRtcContrast}%)` };
+    ? { display: 'block', width: '100%', height: '100%', objectFit: 'fill', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: webRtcImageFilter }
+    : { display: 'block', width: '100%', height: 'auto', transform: playbackViewTransform(webRtcView), transformOrigin: 'top left', filter: webRtcImageFilter };
   const clipWidgetReady = Boolean(
     currentSourceIsFile
     && hlsMediaLoaded
@@ -2413,15 +2460,20 @@ function App() {
     if (!videoEl) return;
     videoEl.style.transform = playbackViewTransform(hlsView) || '';
     videoEl.style.transformOrigin = 'top left';
-    videoEl.style.filter = `brightness(${hlsBrightness}%) contrast(${hlsContrast}%)`;
-  }, [hlsView, hlsBrightness, hlsContrast]);
+    videoEl.style.filter = imageColorFilter({
+      brightness: hlsBrightness,
+      contrast: hlsContrast,
+      saturation: hlsSaturation
+    });
+  }, [hlsView, hlsBrightness, hlsContrast, hlsSaturation]);
 
   /** Captures the currently displayed video view and downloads it as a PNG. */
   const downloadVideoSnapshot = (video, playbackKind, {
     displayAspect = null,
     view = INITIAL_PLAYBACK_VIEW,
     brightness = DEFAULT_IMAGE_ADJUSTMENT,
-    contrast = DEFAULT_IMAGE_ADJUSTMENT
+    contrast = DEFAULT_IMAGE_ADJUSTMENT,
+    saturation = DEFAULT_IMAGE_SATURATION
   } = {}) => {
     const width = Number(video?.videoWidth);
     const height = Number(video?.videoHeight);
@@ -2452,7 +2504,12 @@ function App() {
       const sourceY = (height - sourceHeight) * clampUnit(view?.panY ?? 0.5);
       const snapshotBrightness = Math.min(IMAGE_ADJUSTMENT_MAX, Math.max(IMAGE_ADJUSTMENT_MIN, Number(brightness) || DEFAULT_IMAGE_ADJUSTMENT));
       const snapshotContrast = Math.min(IMAGE_ADJUSTMENT_MAX, Math.max(IMAGE_ADJUSTMENT_MIN, Number(contrast) || DEFAULT_IMAGE_ADJUSTMENT));
-      context.filter = `brightness(${snapshotBrightness}%) contrast(${snapshotContrast}%)`;
+      const snapshotSaturation = clampImageAdjustment(saturation, IMAGE_SATURATION_MIN, IMAGE_SATURATION_MAX, DEFAULT_IMAGE_SATURATION);
+      context.filter = imageColorFilter({
+        brightness: snapshotBrightness,
+        contrast: snapshotContrast,
+        saturation: snapshotSaturation
+      });
       context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, outputWidth, height);
       canvas.toBlob((blob) => {
         if (!blob) {
@@ -2479,13 +2536,15 @@ function App() {
   const downloadHlsSnapshot = () => downloadVideoSnapshot(videoRef.current, 'HLS', {
     view: hlsView,
     brightness: hlsBrightness,
-    contrast: hlsContrast
+    contrast: hlsContrast,
+    saturation: hlsSaturation
   });
   const downloadWebRtcSnapshot = () => downloadVideoSnapshot(liveVideoRef.current, 'WebRTC', {
     displayAspect: liveDisplayAspect,
     view: webRtcView,
     brightness: webRtcBrightness,
-    contrast: webRtcContrast
+    contrast: webRtcContrast,
+    saturation: webRtcSaturation
   });
 
   const downloadKlvExport = async (format) => {
@@ -3078,7 +3137,11 @@ function App() {
         videoEl.style.width = "100%";
         videoEl.style.transform = playbackViewTransform(hlsView) || "";
         videoEl.style.transformOrigin = "top left";
-        videoEl.style.filter = `brightness(${hlsBrightness}%) contrast(${hlsContrast}%)`;
+        videoEl.style.filter = imageColorFilter({
+          brightness: hlsBrightness,
+          contrast: hlsContrast,
+          saturation: hlsSaturation
+        });
         hostEl.appendChild(videoEl);
         videoRef.current = videoEl;
       }
@@ -4271,8 +4334,10 @@ function App() {
                           <ImageAdjustmentMenu
                             brightness={hlsBrightness}
                             contrast={hlsContrast}
+                            saturation={hlsSaturation}
                             onBrightnessChange={setHlsBrightness}
                             onContrastChange={setHlsContrast}
+                            onSaturationChange={setHlsSaturation}
                           />
                           <Menu shadow="md" width={152} position="top" withArrow>
                             <Menu.Target>
@@ -4548,8 +4613,10 @@ function App() {
                         <ImageAdjustmentMenu
                           brightness={webRtcBrightness}
                           contrast={webRtcContrast}
+                          saturation={webRtcSaturation}
                           onBrightnessChange={setWebRtcBrightness}
                           onContrastChange={setWebRtcContrast}
+                          onSaturationChange={setWebRtcSaturation}
                         />
                         <Tooltip label="Download snapshot" withArrow>
                           <ActionIcon variant="light" size="lg" onClick={downloadWebRtcSnapshot} aria-label="Download WebRTC snapshot">
