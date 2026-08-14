@@ -166,6 +166,8 @@ function MapControlIcon({ name }) {
 export default function KlvMap({
   telemetry,
   active,
+  baseMap = 'streets',
+  onBaseMapChange = () => {},
   platformHistory = null,
   platformHistoryUntilMs = null,
   showPlatformHistory = false,
@@ -203,7 +205,6 @@ export default function KlvMap({
   const [hasFrameCenterPosition, setHasFrameCenterPosition] = useState(false);
   const [followFrameCenter, setFollowFrameCenter] = useState(false);
   const [showLegend, setShowLegend] = useState(true);
-  const [baseMap, setBaseMap] = useState('streets');
 
   useEffect(() => {
     onPositionSelectRef.current = onPositionSelect;
@@ -584,7 +585,7 @@ export default function KlvMap({
       <div ref={targetRef} className="klv-map" aria-label="KLV telemetry map" />
       <label className="klv-map-basemap-control">
         <span>Base map</span>
-        <select value={baseMap} onChange={(event) => setBaseMap(event.target.value)}>
+        <select value={baseMap} onChange={(event) => onBaseMapChange(event.target.value)}>
           <option value="streets">OpenStreetMap</option>
           <option value="dark-openstreetmap">Dark mode (Alidade)</option>
           <option value="world-imagery">World Imagery</option>

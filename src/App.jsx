@@ -80,9 +80,25 @@ const LIVE_PLATFORM_HISTORY_WINDOW_MS = 15 * 60 * 1000;
 const PLATFORM_HISTORY_REFRESH_MS = 5000;
 const VIEWER_SPLIT_MIN_PERCENT = 25;
 const VIEWER_SPLIT_MAX_PERCENT = 75;
+const TELEMETRY_BASE_MAP_STORAGE_KEY = 'midas-play:telemetry-base-map';
+const DEFAULT_TELEMETRY_BASE_MAP = 'streets';
+const TELEMETRY_BASE_MAP_VALUES = new Set(['streets', 'dark-openstreetmap', 'world-imagery']);
 
 function clampViewerSplit(value) {
   return Math.min(VIEWER_SPLIT_MAX_PERCENT, Math.max(VIEWER_SPLIT_MIN_PERCENT, Math.round(Number(value))));
+}
+
+function normalizeTelemetryBaseMap(value) {
+  return TELEMETRY_BASE_MAP_VALUES.has(value) ? value : DEFAULT_TELEMETRY_BASE_MAP;
+}
+
+function loadTelemetryBaseMapPreference() {
+  if (typeof window === 'undefined') return DEFAULT_TELEMETRY_BASE_MAP;
+  try {
+    return normalizeTelemetryBaseMap(window.localStorage.getItem(TELEMETRY_BASE_MAP_STORAGE_KEY));
+  } catch {
+    return DEFAULT_TELEMETRY_BASE_MAP;
+  }
 }
 
 function clampImageAdjustment(value, min, max, fallback) {
@@ -503,6 +519,7 @@ function App() {
   const [activeTab, setActiveTab] = useState('dvr');
   const [dvrTelemetryTab, setDvrTelemetryTab] = useState('map');
   const [liveTelemetryTab, setLiveTelemetryTab] = useState('map');
+  const [telemetryBaseMap, setTelemetryBaseMap] = useState(loadTelemetryBaseMapPreference);
   const [autoAttachOnDvr, setAutoAttachOnDvr] = useState(false);
   const [hlsMediaLoaded, setHlsMediaLoaded] = useState(false);
   const [hlsQuality, setHlsQuality] = useState('auto');
@@ -625,6 +642,28 @@ function App() {
   const livePlatformHistoryUntilMsRef = useRef(null);
   const offlinePollTimerRef = useRef(null);
   const offlinePollTokenRef = useRef(0);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TELEMETRY_BASE_MAP_STORAGE_KEY, telemetryBaseMap);
+    } catch {
+      // Storage can be blocked by browser privacy settings. The in-memory
+      // preference still keeps both telemetry maps synchronized.
+    }
+  }, [telemetryBaseMap]);
+
+  useEffect(() => {
+    const handleStorage = (event) => {
+      if (event.key !== TELEMETRY_BASE_MAP_STORAGE_KEY && event.key !== null) return;
+      setTelemetryBaseMap(normalizeTelemetryBaseMap(event.newValue));
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  const changeTelemetryBaseMap = (value) => {
+    setTelemetryBaseMap(normalizeTelemetryBaseMap(value));
+  };
 
   const clearOfflinePollLoop = () => {
     if (offlinePollTimerRef.current) {
@@ -4544,6 +4583,8 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'dvr-vtt' ? overlayData : null}
                             active={activeTab === 'dvr' && dvrTelemetryTab === 'map'}
+                            baseMap={telemetryBaseMap}
+                            onBaseMapChange={changeTelemetryBaseMap}
                             matchHeightTo={dvrViewerVideoPanelRef}
                             platformHistory={Number.isFinite(dvrPlatformHistoryUntilMs) ? dvrPlatformHistory : null}
                             platformHistoryUntilMs={dvrPlatformHistoryUntilMs}
@@ -4672,6 +4713,8 @@ function App() {
                           <KlvMap
                             telemetry={overlayData?.mode === 'live-ws' ? overlayData : null}
                             active={activeTab === 'live-webrtc' && liveTelemetryTab === 'map'}
+                            baseMap={telemetryBaseMap}
+                            onBaseMapChange={changeTelemetryBaseMap}
                             matchHeightTo={liveViewerVideoPanelRef}
                             platformHistory={Number.isFinite(livePlatformHistoryUntilMs) ? livePlatformHistory : null}
                             platformHistoryUntilMs={livePlatformHistoryUntilMs}
