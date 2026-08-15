@@ -28,9 +28,10 @@ paths:
   /metrics/runtime:
     get:
       tags: [Health]
-      summary: Read host and runtime metrics, including disk I/O and network throughput when available
+      summary: Read host, runtime, and SQLite storage metrics, including disk I/O and network throughput when available
       responses:
-        '200': { description: Runtime metrics payload }
+        '200':
+          description: Runtime metrics payload. The `sqlite` member includes main/WAL/shared-memory file footprints, page allocation and freelist usage, plus cached per-table and index accounting when SQLite `dbstat` is available.
   /ogc:
     get:
       tags: [OGC Processes]

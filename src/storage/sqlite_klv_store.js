@@ -1,10 +1,12 @@
 /** Persists decoded KLV records and supplies time-window queries via SQLite. */
 import sqlite3 from "sqlite3";
+import { stat } from "node:fs/promises";
 import { createServiceLogger, serializeError } from "../service_logger.js";
 
 const log = createServiceLogger("sqlite_klv_store");
 const SQLITE_BUSY_TIMEOUT_MS = Math.max(1000, Number(process.env.SQLITE_BUSY_TIMEOUT_MS || 15000));
 const SQLITE_BUSY_RETRIES = Math.max(0, Number(process.env.SQLITE_BUSY_RETRIES || 5));
+const SQLITE_STORAGE_METRICS_CACHE_MS = 15_000;
 
 /** Returns true for SQLite's transient inter-process writer-contention errors. */
 function isSqliteBusy(error) {
@@ -61,6 +63,20 @@ function closeDb(db) {
   return new Promise((resolve, reject) => {
     db.close((err) => err ? reject(err) : resolve());
   });
+}
+
+/** Reads an optional SQLite sidecar's size without treating its absence as an error. */
+async function optionalFileSize(filePath) {
+  try {
+    return (await stat(filePath)).size;
+  } catch (error) {
+    if (error?.code === "ENOENT") return 0;
+    throw error;
+  }
+}
+
+function quoteIdentifier(identifier) {
+  return `"${String(identifier).replaceAll('"', '""')}"`;
 }
 
 const TARGET_POSITION_SOURCES = new Set(["FRAME_CENTER", "PLATFORM", "UNAVAILABLE"]);
@@ -164,6 +180,8 @@ export class SqliteKlvStore {
   constructor({ dbPath }) {
     this.dbPath = dbPath;
     this.db = null;
+    this.storageMetricsCache = null;
+    this.storageMetricsPending = null;
   }
 
   /** Opens the database and creates the telemetry table and index. */
@@ -673,6 +691,108 @@ export class SqliteKlvStore {
       lastMissionTimeMs: telemetry?.last_mission_time_ms == null ? null : Number(telemetry.last_mission_time_ms),
       targetLogEntryCount: Number(targetEntries?.entry_count || 0),
       activeTargetLogFieldCount: Number(targetFields?.field_count || 0)
+    };
+  }
+
+  /**
+   * Returns a lightweight, read-only accounting of the SQLite files and schema.
+   * `dbstat` yields exact SQLite page usage for tables and their indexes; the
+   * result is cached because walking every B-tree is more work than file stats.
+   */
+  async getStorageMetrics() {
+    const now = Date.now();
+    if (this.storageMetricsCache && now - this.storageMetricsCache.collectedAtMs < SQLITE_STORAGE_METRICS_CACHE_MS) {
+      return this.storageMetricsCache.snapshot;
+    }
+    if (this.storageMetricsPending) return this.storageMetricsPending;
+
+    this.storageMetricsPending = this.collectStorageMetrics(now)
+      .then((snapshot) => {
+        this.storageMetricsCache = { collectedAtMs: now, snapshot };
+        return snapshot;
+      })
+      .finally(() => { this.storageMetricsPending = null; });
+    return this.storageMetricsPending;
+  }
+
+  async collectStorageMetrics(collectedAtMs) {
+    const collectedAt = new Date(collectedAtMs).toISOString();
+    const [databaseBytes, walBytes, shmBytes, pageSizeRow, pageCountRow, freelistRow] = await Promise.all([
+      optionalFileSize(this.dbPath),
+      optionalFileSize(`${this.dbPath}-wal`),
+      optionalFileSize(`${this.dbPath}-shm`),
+      get(this.db, "PRAGMA page_size"),
+      get(this.db, "PRAGMA page_count"),
+      get(this.db, "PRAGMA freelist_count")
+    ]);
+    const pageSizeBytes = Number(pageSizeRow?.page_size || 0);
+    const pageCount = Number(pageCountRow?.page_count || 0);
+    const freelistPageCount = Number(freelistRow?.freelist_count || 0);
+    const allocatedBytes = pageSizeBytes * pageCount;
+    const reclaimableBytes = pageSizeBytes * freelistPageCount;
+    const usedPageBytes = Math.max(0, allocatedBytes - reclaimableBytes);
+    const tables = [];
+    let tableBreakdownAvailable = true;
+    let tableBreakdownError = null;
+
+    try {
+      const [schemaObjects, dbstatRows] = await Promise.all([
+        all(this.db, `SELECT name, type, tbl_name FROM sqlite_schema
+          WHERE type IN ('table', 'index') AND tbl_name NOT LIKE 'sqlite_%'
+          ORDER BY type, name`),
+        all(this.db, `SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name`)
+      ]);
+      const tableDefinitions = schemaObjects.filter((object) => object.type === "table");
+      const objectBytes = new Map(dbstatRows.map((row) => [row.name, Number(row.bytes || 0)]));
+      const indexTableByName = new Map(schemaObjects
+        .filter((object) => object.type === "index")
+        .map((object) => [object.name, object.tbl_name]));
+      const rowCounts = await Promise.all(tableDefinitions.map(async (table) => ({
+        name: table.name,
+        rowCount: Number((await get(this.db, `SELECT COUNT(*) AS row_count FROM ${quoteIdentifier(table.name)}`))?.row_count || 0)
+      })));
+      const rowCountByTable = new Map(rowCounts.map((row) => [row.name, row.rowCount]));
+      const bytesByTable = new Map(tableDefinitions.map((table) => [table.name, { tableBytes: objectBytes.get(table.name) || 0, indexBytes: 0 }]));
+      for (const [indexName, tableName] of indexTableByName) {
+        const accounting = bytesByTable.get(tableName);
+        if (accounting) accounting.indexBytes += objectBytes.get(indexName) || 0;
+      }
+      tables.push(...tableDefinitions.map((table) => {
+        const accounting = bytesByTable.get(table.name);
+        return {
+          name: table.name,
+          rowCount: rowCountByTable.get(table.name) || 0,
+          tableBytes: accounting.tableBytes,
+          indexBytes: accounting.indexBytes,
+          totalBytes: accounting.tableBytes + accounting.indexBytes
+        };
+      }).sort((left, right) => right.totalBytes - left.totalBytes || left.name.localeCompare(right.name)));
+    } catch (error) {
+      tableBreakdownAvailable = false;
+      tableBreakdownError = String(error?.message || error);
+      log.warn("sqlite_storage_metrics_table_breakdown_unavailable", { error: serializeError(error) });
+    }
+
+    return {
+      available: true,
+      collectedAt,
+      cacheTtlMs: SQLITE_STORAGE_METRICS_CACHE_MS,
+      files: {
+        databaseBytes,
+        walBytes,
+        shmBytes,
+        totalBytes: databaseBytes + walBytes + shmBytes
+      },
+      pages: {
+        pageSizeBytes,
+        pageCount,
+        allocatedBytes,
+        freelistPageCount,
+        reclaimableBytes,
+        usedPageBytes,
+        utilizationPercent: allocatedBytes > 0 ? (usedPageBytes / allocatedBytes) * 100 : 0
+      },
+      tableBreakdown: { available: tableBreakdownAvailable, error: tableBreakdownError, tables }
     };
   }
 

@@ -726,6 +726,65 @@ body,
   border-color: #232b33;
 }
 
+.sqlite-storage-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #232b33;
+  border-radius: 4px;
+}
+
+.sqlite-storage-accordion .mantine-Accordion-item {
+  background: #171d24;
+  border-color: #232b33;
+}
+
+.sqlite-storage-accordion .mantine-Accordion-control {
+  color: #e7ecef;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.sqlite-storage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sqlite-storage-table th,
+.sqlite-storage-table td {
+  padding: 0.48rem 0.65rem;
+  border-bottom: 1px solid #232b33;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.sqlite-storage-table th {
+  color: #8a97a3;
+  background: #171d24;
+  font-family: "IBM Plex Sans Condensed", Arial Narrow, sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sqlite-storage-table th:first-child,
+.sqlite-storage-table td:first-child {
+  text-align: left;
+}
+
+.sqlite-storage-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.sqlite-table-info {
+  color: #3fc6d1;
+  cursor: help;
+  font-family: Arial, sans-serif;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
 .throughput-widget {
   min-height: 104px;
   background: #171d24;

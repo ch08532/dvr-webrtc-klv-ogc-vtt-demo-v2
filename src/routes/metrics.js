@@ -8,13 +8,22 @@ import { Router } from "express";
  */
 export function createMetricsRouter({
   getRuntimeMetricsSnapshot, getGpuMetrics, sfuClient, sources, sourceStates,
-  isProcessRunning, getProcessCpuPercents, httpPort, wsPath, mediaTools
+  isProcessRunning, getProcessCpuPercents, httpPort, wsPath, mediaTools, store
 }) {
   const router = Router();
   // Sample GPU, SFU, and process data on demand so values remain current.
   router.get("/metrics/runtime", async (_req, res) => {
     const runtime = getRuntimeMetricsSnapshot();
     runtime.host.gpu = await getGpuMetrics();
+    try {
+      runtime.sqlite = await store.getStorageMetrics();
+    } catch (error) {
+      runtime.sqlite = {
+        available: false,
+        collectedAt: new Date().toISOString(),
+        error: String(error?.message || error)
+      };
+    }
     let sfuHealth = null; let sfuError = null;
     try { sfuHealth = await sfuClient.health(); } catch (error) { sfuError = String(error?.message || error); }
     const klvWorkers = [...sources.values()].map((source) => ({

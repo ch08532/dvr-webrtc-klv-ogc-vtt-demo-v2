@@ -84,6 +84,19 @@ const TARGET_LOG_OBSERVATION_PREVIEW_MAX_LENGTH = 140;
 const TELEMETRY_BASE_MAP_STORAGE_KEY = 'midas-play:telemetry-base-map';
 const DEFAULT_TELEMETRY_BASE_MAP = 'streets';
 const TELEMETRY_BASE_MAP_VALUES = new Set(['streets', 'dark-openstreetmap', 'world-imagery']);
+const SQLITE_TABLE_DESCRIPTIONS = Object.freeze({
+  klv_events: 'Stores every decoded KLV telemetry event with its stream and mission timestamp. This is the primary telemetry dataset used by exports and OGC queries.',
+  platform_track_points: 'Stores one compact platform position per completed HLS segment for efficient platform-history map rendering.',
+  frame_center_track_points: 'Stores one compact frame-center position per completed HLS segment for efficient frame-center-history map rendering.',
+  target_log_entries: 'Stores operator-created target marks, including observations, positions, timing, and custom-field values.',
+  target_log_fields: 'Stores the stream-specific custom-field definitions used by Target Log entries.',
+  stream_mission_timeline: 'Stores the mission-time to video-time alignment used to synchronize telemetry, DVR playback, and target marks.',
+  stream_manual_video_time_anchor: 'Stores a manually configured first-frame UTC time for video sources that have no KLV timestamp.'
+});
+
+function sqliteTableDescription(tableName) {
+  return SQLITE_TABLE_DESCRIPTIONS[tableName] || 'Application-managed SQLite table used to support mission playback and telemetry workflows.';
+}
 
 function clampViewerSplit(value) {
   return Math.min(VIEWER_SPLIT_MAX_PERCENT, Math.max(VIEWER_SPLIT_MIN_PERCENT, Math.round(Number(value))));
@@ -613,6 +626,7 @@ function App() {
   const [hostMetrics, setHostMetrics] = useState(null);
   const [throughputHistory, setThroughputHistory] = useState({ diskRead: [], diskWrite: [], networkDown: [], networkUp: [] });
   const [processMetrics, setProcessMetrics] = useState([]);
+  const [sqliteMetrics, setSqliteMetrics] = useState(null);
   const [mediaTools, setMediaTools] = useState(null);
   const hlsRuntimeIsActive = !['stopped', 'stopping', 'error', 'offline'].includes(streamRuntime?.state);
   const dvrFootprintMap = useFootprintMap();
@@ -1896,6 +1910,7 @@ function App() {
     const result = await api('/metrics/runtime');
     if (result?.host) setHostMetrics({ ...result.host, sampledAt: result.timestampIso || Date.now() });
     if (Array.isArray(result?.processes)) setProcessMetrics(result.processes);
+    if (result?.sqlite) setSqliteMetrics(result.sqlite);
     if (result?.mediaTools) setMediaTools(result.mediaTools);
   };
 
@@ -5217,6 +5232,91 @@ function App() {
                           ))}
                         </SimpleGrid>
                       ) : <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="dimmed">Process CPU metrics are unavailable.</Text></Paper>}
+                    </div>
+
+                    <div>
+                      <Group justify="space-between" align="flex-start" gap="sm" mb="xs">
+                        <div>
+                          <Text className="utilization-section-label">SQLite storage</Text>
+                          <Text size="xs" c="dimmed">
+                            {sqliteMetrics?.collectedAt
+                              ? `Storage accounting sampled ${new Date(sqliteMetrics.collectedAt).toLocaleTimeString()} and cached for 15 seconds.`
+                              : 'Waiting for SQLite storage accounting.'}
+                          </Text>
+                        </div>
+                        <Badge variant="dot" color={sqliteMetrics?.available ? 'healthy' : sqliteMetrics ? 'critical' : 'gray'}>
+                          {sqliteMetrics?.available ? 'Storage reporting' : sqliteMetrics ? 'Unavailable' : 'Waiting for sample'}
+                        </Badge>
+                      </Group>
+                      {!sqliteMetrics ? (
+                        <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="dimmed">SQLite storage metrics are loading.</Text></Paper>
+                      ) : !sqliteMetrics.available ? (
+                        <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="red">SQLite storage metrics are unavailable: {sqliteMetrics.error || 'Unknown error'}</Text></Paper>
+                      ) : (
+                        <Stack gap="sm">
+                          <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+                            <UtilizationWidget
+                              label="SQLite footprint"
+                              value={sqliteMetrics.pages?.utilizationPercent}
+                              valueText={formatBytes(sqliteMetrics.files?.totalBytes)}
+                              sub={`${formatBytes(sqliteMetrics.files?.databaseBytes)} database · ${formatBytes(sqliteMetrics.files?.walBytes)} WAL`}
+                            />
+                            <UtilizationWidget
+                              label="Live pages"
+                              value={sqliteMetrics.pages?.utilizationPercent}
+                              valueText={formatBytes(sqliteMetrics.pages?.usedPageBytes)}
+                              sub={`${Number(sqliteMetrics.pages?.utilizationPercent || 0).toFixed(1)}% of ${formatBytes(sqliteMetrics.pages?.allocatedBytes)} allocated`}
+                            />
+                            <UtilizationWidget
+                              label="Reclaimable"
+                              value={100 - Number(sqliteMetrics.pages?.utilizationPercent || 0)}
+                              valueText={formatBytes(sqliteMetrics.pages?.reclaimableBytes)}
+                              sub={`${Number(sqliteMetrics.pages?.freelistPageCount || 0).toLocaleString()} free pages`}
+                            />
+                            <UtilizationWidget
+                              label="Write-ahead log"
+                              valueText={formatBytes(sqliteMetrics.files?.walBytes)}
+                              sub={`${formatBytes(sqliteMetrics.files?.shmBytes)} shared memory`}
+                            />
+                          </SimpleGrid>
+
+                          {sqliteMetrics.tableBreakdown?.available ? (
+                            sqliteMetrics.tableBreakdown.tables?.length ? (
+                              <Accordion variant="separated" className="sqlite-storage-accordion">
+                                <Accordion.Item value="table-breakdown">
+                                  <Accordion.Control>
+                                    Database storage breakdown ({sqliteMetrics.tableBreakdown.tables.length})
+                                  </Accordion.Control>
+                                  <Accordion.Panel>
+                                    <Text size="xs" c="dimmed" mb="xs">Table and index page usage; hover ⓘ beside a table for its purpose.</Text>
+                                    <div className="sqlite-storage-table-wrap">
+                                      <table className="sqlite-storage-table">
+                                        <thead><tr><th>Table</th><th>Rows</th><th>Table</th><th>Indexes</th><th>Total</th></tr></thead>
+                                        <tbody>{sqliteMetrics.tableBreakdown.tables.map((table) => (
+                                          <tr key={table.name}>
+                                            <td>
+                                              <Group gap={5} wrap="nowrap">
+                                                <span>{table.name}</span>
+                                                <Tooltip label={sqliteTableDescription(table.name)} multiline w={300} withArrow>
+                                                  <span className="sqlite-table-info" role="img" aria-label={`About ${table.name}`}>ⓘ</span>
+                                                </Tooltip>
+                                              </Group>
+                                            </td>
+                                            <td>{Number(table.rowCount || 0).toLocaleString()}</td>
+                                            <td>{formatBytes(table.tableBytes)}</td>
+                                            <td>{formatBytes(table.indexBytes)}</td>
+                                            <td>{formatBytes(table.totalBytes)}</td>
+                                          </tr>
+                                        ))}</tbody>
+                                      </table>
+                                    </div>
+                                  </Accordion.Panel>
+                                </Accordion.Item>
+                              </Accordion>
+                            ) : <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="dimmed">SQLite contains no application tables.</Text></Paper>
+                          ) : <Paper className="utilization-empty" p="sm" withBorder><Text size="sm" c="dimmed">Per-table accounting is unavailable: {sqliteMetrics.tableBreakdown?.error || 'SQLite dbstat is not available.'}</Text></Paper>}
+                        </Stack>
+                      )}
                     </div>
                   </Stack>
                 </Tabs.Panel>

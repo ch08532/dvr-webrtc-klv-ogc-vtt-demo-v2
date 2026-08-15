@@ -2565,7 +2565,8 @@ app.use(createMetricsRouter({
   getProcessCpuPercents,
   httpPort,
   wsPath: WS_PATH,
-  mediaTools
+  mediaTools,
+  store
 }));
 // This is intentionally a local, token-authenticated control endpoint used by
 // `npm run stop`.  It is not part of the public API and cannot be used when the
