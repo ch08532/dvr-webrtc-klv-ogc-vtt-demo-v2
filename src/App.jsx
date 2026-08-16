@@ -670,6 +670,12 @@ function App() {
   const hlsRecoveryPendingRef = useRef(false);
   const hlsQualityRef = useRef('auto');
   const hlsPlaybackRateRef = useRef(1);
+  const hlsViewerSettingsRef = useRef({
+    view: INITIAL_PLAYBACK_VIEW,
+    brightness: DEFAULT_IMAGE_ADJUSTMENT,
+    contrast: DEFAULT_IMAGE_ADJUSTMENT,
+    saturation: DEFAULT_IMAGE_SATURATION
+  });
   const appliedHlsQualityRef = useRef({ player: null, quality: null, representations: null });
   const clipRangeStreamRef = useRef(null);
   const clipAvailableEndRef = useRef(null);
@@ -742,6 +748,29 @@ function App() {
       error: null
     });
     setLiveStatus('Not connected (start source)');
+  };
+
+  /** A newly provisioned FMV source always starts with neutral viewer controls. */
+  const resetViewerSettingsForNewSource = () => {
+    hlsPlaybackRateRef.current = 1;
+    hlsViewerSettingsRef.current = {
+      view: INITIAL_PLAYBACK_VIEW,
+      brightness: DEFAULT_IMAGE_ADJUSTMENT,
+      contrast: DEFAULT_IMAGE_ADJUSTMENT,
+      saturation: DEFAULT_IMAGE_SATURATION
+    };
+    setHlsPlaybackRate(1);
+    try { window.player?.playbackRate?.(1); } catch {}
+    setHlsView({ ...INITIAL_PLAYBACK_VIEW });
+    setWebRtcView({ ...INITIAL_PLAYBACK_VIEW });
+    setHlsPanning(false);
+    setWebRtcPanning(false);
+    setHlsBrightness(DEFAULT_IMAGE_ADJUSTMENT);
+    setHlsContrast(DEFAULT_IMAGE_ADJUSTMENT);
+    setHlsSaturation(DEFAULT_IMAGE_SATURATION);
+    setWebRtcBrightness(DEFAULT_IMAGE_ADJUSTMENT);
+    setWebRtcContrast(DEFAULT_IMAGE_ADJUSTMENT);
+    setWebRtcSaturation(DEFAULT_IMAGE_SATURATION);
   };
 
   const markServerOnline = () => {
@@ -1732,6 +1761,14 @@ function App() {
     startRequestInFlightRef.current = true;
     provisioningStreamRef.current = streamId;
     setStartRequestInFlight(true);
+    resetViewerSettingsForNewSource();
+    // A replacement source keeps the same HLS URL for its stream id. Dispose
+    // the old Video.js instance instead of letting attachHlsDvr mistake it for
+    // the new source and preserve stale live/control-bar state.
+    setAutoAttachOnDvr(false);
+    clearHlsRetryLoop();
+    clearDvrPlayerInstance();
+    cleanupWebRtcPlayback();
     setOverlayData(null);
     setDvrPlatformHistory(null);
     setLivePlatformHistory(null);
@@ -2649,6 +2686,12 @@ function App() {
   }, [hasActiveViewerSource, activeTab]);
 
   useEffect(() => {
+    hlsViewerSettingsRef.current = {
+      view: hlsView,
+      brightness: hlsBrightness,
+      contrast: hlsContrast,
+      saturation: hlsSaturation
+    };
     const videoEl = videoRef.current;
     if (!videoEl) return;
     videoEl.style.transform = playbackViewTransform(hlsView) || '';
@@ -3336,6 +3379,7 @@ function App() {
       }
 
       if (!videoRef.current || !hostEl.contains(videoRef.current)) {
+        const viewerSettings = hlsViewerSettingsRef.current;
         hostEl.innerHTML = "";
         const videoEl = document.createElement("video");
         videoEl.id = "video-player";
@@ -3344,12 +3388,12 @@ function App() {
         videoEl.muted = true;
         videoEl.playsInline = true;
         videoEl.style.width = "100%";
-        videoEl.style.transform = playbackViewTransform(hlsView) || "";
+        videoEl.style.transform = playbackViewTransform(viewerSettings.view) || "";
         videoEl.style.transformOrigin = "top left";
         videoEl.style.filter = imageColorFilter({
-          brightness: hlsBrightness,
-          contrast: hlsContrast,
-          saturation: hlsSaturation
+          brightness: viewerSettings.brightness,
+          contrast: viewerSettings.contrast,
+          saturation: viewerSettings.saturation
         });
         hostEl.appendChild(videoEl);
         videoRef.current = videoEl;
