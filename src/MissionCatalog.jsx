@@ -54,7 +54,7 @@ function clampMissionContextSplit(value) {
   return Math.min(MISSION_CONTEXT_SPLIT_MAX_PERCENT, Math.max(MISSION_CONTEXT_SPLIT_MIN_PERCENT, Math.round(Number(value))));
 }
 
-function MissionContextSplitHandle({ value, onChange }) {
+function MissionContextSplitHandle({ value, onChange, label = 'Resize mission list and map' }) {
   const beginDrag = (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -99,7 +99,7 @@ function MissionContextSplitHandle({ value, onChange }) {
     type="button"
     className="mission-context-split-handle"
     role="separator"
-    aria-label="Resize mission list and map"
+    aria-label={label}
     aria-orientation="vertical"
     aria-valuemin={MISSION_CONTEXT_SPLIT_MIN_PERCENT}
     aria-valuemax={MISSION_CONTEXT_SPLIT_MAX_PERCENT}
@@ -117,6 +117,14 @@ function CatalogActionIcon({ name }) {
   const stroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
   if (name === 'edit') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 3.5-.8L18 8.7a2.1 2.1 0 0 0-3-3l-9.5 9.5z" {...stroke} /><path d="m13.5 7.2 3.3 3.3" {...stroke} /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v5m4-5v5M9 7l1-2h4l1 2m-8 0 1 12h8l1-12" {...stroke} /></svg>;
+}
+
+function SearchIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="m15 15 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>;
+}
+
+function ZoomToIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H5a1 1 0 0 0-1 1v4m11-5h4a1 1 0 0 1 1 1v4M4 15v4a1 1 0 0 0 1 1h4m11-5v4a1 1 0 0 1-1 1h-4M9 12h6M12 9v6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
 function DraggableModal({ title, children, styles, ...props }) {
@@ -168,6 +176,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
   const [from, setFrom] = useState(null);
   const [to, setTo] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
+  const [productFitRequest, setProductFitRequest] = useState(0);
   const [viewer, setViewer] = useState(null);
   const [operationTitle, setOperationTitle] = useState('');
   const [operationDescription, setOperationDescription] = useState('');
@@ -187,6 +196,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [contextSplit, setContextSplit] = useState(35);
+  const [productSplit, setProductSplit] = useState(35);
   const selectedMissionCardRef = useRef(null);
 
   const report = (message, color = 'green') => {
@@ -376,6 +386,11 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
     }
   };
 
+  const zoomToProduct = (productId) => {
+    setSelectedId(productId);
+    setProductFitRequest((requestKey) => requestKey + 1);
+  };
+
   if (page === 'context') {
     const canSubmitMission = !!operationId && !!missionTitle.trim() && !!missionBbox && !busy;
     const selectContextMission = (id) => {
@@ -499,7 +514,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
     </Stack>;
   }
 
-  return <Stack gap="sm" className="catalog-workspace">
+  return <Stack gap="sm" className="catalog-workspace mission-products-page">
     <Text size="xl" fw={700}>Mission Products</Text>
     <Group align="end" className="catalog-filters">
       <TextInput label="Search" placeholder="Title, description, mission, operation" value={q} onChange={(event) => setQ(event.currentTarget.value)} />
@@ -508,10 +523,13 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
       <Select label="Type" data={productTypes} value={type} onChange={(value) => setType(value || '')} />
       <DateTimePicker label="From" value={from} onChange={setFrom} clearable />
       <DateTimePicker label="To" value={to} onChange={setTo} clearable />
-      <Button onClick={search}>Search</Button>
+      <Tooltip label="Search mission products" withArrow>
+        <span className="catalog-search-action"><ActionIcon variant="subtle" color="gray" size="md" onClick={search} aria-label="Search mission products"><SearchIcon /></ActionIcon></span>
+      </Tooltip>
     </Group>
-    <div className="catalog-results-layout">
-      <Stack gap="xs" className="catalog-results">
+    <div className="catalog-products-workspace" style={{ '--catalog-products-list-width': `${productSplit}%` }}>
+      <div className="catalog-products-list-pane">
+        <Stack gap="xs" className="catalog-results catalog-product-results">
         {products.length ? products.map((product) => <Paper key={product.id} p="sm" withBorder className={product.id === selectedId ? 'catalog-result is-selected' : 'catalog-result'} onClick={() => setSelectedId(product.id)}>
           <Group justify="space-between" wrap="nowrap">
             <Stack gap={2}>
@@ -519,12 +537,21 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
               <Text size="xs" c="dimmed">{product.operationTitle} / {product.missionTitle}</Text>
               <Text size="sm" lineClamp={2}>{product.description || 'No description'}</Text>
             </Stack>
-            <Badge>{product.type}</Badge>
+            <Badge variant="outline">{product.type}</Badge>
           </Group>
-          <Button size="xs" mt="xs" variant="subtle" onClick={(event) => { event.stopPropagation(); void openProduct(product); }}>Open product</Button>
-        </Paper>) : <Text c="dimmed" p="md">No published mission products match the current filters.</Text>}
+          <Group gap={4} mt="xs">
+            <Tooltip label={product.geometry ? 'Zoom to feature on map' : 'Product has no map geometry'} withArrow>
+              <span><ActionIcon variant="subtle" color="gray" size="sm" onClick={(event) => { event.stopPropagation(); zoomToProduct(product.id); }} disabled={!product.geometry} aria-label="Zoom to product"><ZoomToIcon /></ActionIcon></span>
+            </Tooltip>
+            <Button size="xs" variant="subtle" onClick={(event) => { event.stopPropagation(); void openProduct(product); }}>Open product</Button>
+          </Group>
+        </Paper>) : <Text className="catalog-products-empty" c="dimmed" p="md">No published mission products match the current filters.</Text>}
       </Stack>
-      <CatalogMap products={products} selectedId={selectedId} onSelect={setSelectedId} />
+      </div>
+      <MissionContextSplitHandle value={productSplit} onChange={setProductSplit} label="Resize mission product results and map" />
+      <div className="catalog-products-map-pane">
+        <CatalogMap products={products} selectedId={selectedId} fitRequestKey={productFitRequest} onSelect={setSelectedId} baseMap={baseMap} onBaseMapChange={onBaseMapChange} />
+      </div>
     </div>
     <Modal opened={!!viewer} onClose={() => setViewer(null)} size="xl" title={viewer?.title}>
       {viewer?.type === 'snapshot' && viewer.thumbnailUrl ? <img className="catalog-image-viewer" src={viewer.thumbnailUrl} alt={viewer.title} /> : <Stack>

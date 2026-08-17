@@ -29,6 +29,7 @@ function ViewAllMissionsIcon() {
 export default function CatalogMap({
   products = EMPTY_PRODUCTS,
   selectedId = null,
+  fitRequestKey = 0,
   onSelect = () => {},
   coverageAreas = EMPTY_COVERAGE_AREAS,
   selectedCoverageAreaId = null,
@@ -138,16 +139,17 @@ export default function CatalogMap({
       : selectedCoverageAreaId != null
         ? `coverage:${selectedCoverageAreaId}`
         : null;
-    if (!selectionKey) lastFittedSelectionRef.current = null;
+    const fitKey = selectionKey ? `${selectionKey}:${fitRequestKey}` : null;
+    if (!fitKey) lastFittedSelectionRef.current = null;
     const selected = source.getFeatures().find((feature) => (
       (selectedId != null && feature.get('productId') === selectedId)
       || (selectedCoverageAreaId != null && feature.get('coverageAreaId') === selectedCoverageAreaId)
     ));
-    if (selected?.getGeometry() && selectionKey && lastFittedSelectionRef.current !== selectionKey) {
+    if (selected?.getGeometry() && fitKey && lastFittedSelectionRef.current !== fitKey) {
       map.getView().fit(selected.getGeometry().getExtent(), { padding: [48, 48, 48, 48], maxZoom: 13, duration: 250 });
-      lastFittedSelectionRef.current = selectionKey;
+      lastFittedSelectionRef.current = fitKey;
     }
-  }, [products, selectedId, coverageAreas, selectedCoverageAreaId, draftCoverageArea]);
+  }, [products, selectedId, fitRequestKey, coverageAreas, selectedCoverageAreaId, draftCoverageArea]);
 
   useEffect(() => {
     const map = mapRef.current; const source = sourceRef.current; if (!map || !source) return;
