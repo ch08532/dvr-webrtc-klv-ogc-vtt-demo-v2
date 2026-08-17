@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 function parseBbox(value) {
   if (value == null || value === '') return null;
@@ -46,8 +48,49 @@ function sendCatalogError(res, error) {
   res.status(error?.statusCode || 400).json({ error: String(error?.message || error) });
 }
 
+function productAssetDirectory(root, productId) {
+  const resolvedRoot = path.resolve(root);
+  const relative = path.relative(resolvedRoot, path.resolve(resolvedRoot, String(productId)));
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.includes(path.sep)) {
+    throw new Error('invalid managed mission product asset path');
+  }
+  return path.join(resolvedRoot, relative);
+}
+
+async function stageManagedProductAssets(root, productIds) {
+  const resolvedRoot = path.resolve(root);
+  const stagingRoot = path.join(resolvedRoot, `.deleting-${randomUUID()}`);
+  const moved = [];
+  await fs.mkdir(stagingRoot, { recursive: true });
+  try {
+    for (const productId of productIds) {
+      const source = productAssetDirectory(resolvedRoot, productId);
+      const destination = productAssetDirectory(stagingRoot, productId);
+      try {
+        await fs.rename(source, destination);
+        moved.push({ source, destination });
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+  } catch (error) {
+    await Promise.all(moved.reverse().map(({ source, destination }) => fs.rename(destination, source).catch(() => {})));
+    await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  return {
+    async restore() {
+      await Promise.all(moved.reverse().map(({ source, destination }) => fs.rename(destination, source).catch(() => {})));
+      await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+    },
+    async remove() {
+      await fs.rm(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  };
+}
+
 /** Application CRUD and OGC API - Records endpoints backed by SpatiaLite. */
-export function createMissionCatalogRouter({ store }) {
+export function createMissionCatalogRouter({ store, sources, stopSourceRuntime, missionProductRoot }) {
   const router = Router();
   router.get('/ogc/conformance', (_req, res) => res.json({ conformsTo: [
     'http://www.opengis.net/spec/ogcapi-records-1/1.0/conf/record-api',
@@ -100,6 +143,31 @@ export function createMissionCatalogRouter({ store }) {
   router.post('/mission-products', async (req, res) => {
     try { res.status(201).json(await store.createMissionProduct({ id: randomUUID(), ...req.body })); }
     catch (error) { res.status(400).json({ error: String(error?.message || error) }); }
+  });
+  router.put('/mission-products/:productId', async (req, res) => {
+    try { res.json(await store.updateMissionProduct({ id: req.params.productId, title: req.body?.title, description: req.body?.description })); }
+    catch (error) { sendCatalogError(res, error); }
+  });
+  router.delete('/mission-products/:productId', async (req, res) => {
+    try {
+      const group = await store.getMissionProductDeletionGroup(req.params.productId);
+      const activeFmvProductIds = new Set(group.products.filter((product) => product.product_type === 'fmv').map((product) => product.id));
+      if (sources && stopSourceRuntime && activeFmvProductIds.size) {
+        const matchingStreamIds = [...sources.entries()]
+          .filter(([, source]) => activeFmvProductIds.has(source?.missionProductId))
+          .map(([streamId]) => streamId);
+        for (const streamId of matchingStreamIds) await stopSourceRuntime(streamId);
+      }
+      const stagedAssets = await stageManagedProductAssets(missionProductRoot, group.productIds);
+      try {
+        await store.deleteMissionProductGroup(group.productIds);
+      } catch (error) {
+        await stagedAssets.restore();
+        throw error;
+      }
+      await stagedAssets.remove();
+      res.json({ deletedProductIds: group.productIds });
+    } catch (error) { sendCatalogError(res, error); }
   });
 
   // OGC API - Records collection and item search.

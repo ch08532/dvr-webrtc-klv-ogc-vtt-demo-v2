@@ -1353,7 +1353,7 @@ app.use("/mission-products-assets", express.static(MISSION_PRODUCT_ROOT, { fallt
 registerOgcMovingFeaturesRoutes(app, { sources, store });
 
 // ---------- Mission catalog and OGC API - Records ----------
-app.use(createMissionCatalogRouter({ store }));
+app.use(createMissionCatalogRouter({ store, sources, stopSourceRuntime, missionProductRoot: MISSION_PRODUCT_ROOT }));
 
 // ---------- OGC API - Processes ----------
 // Process jobs provision source sessions through the same lifecycle service as

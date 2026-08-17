@@ -1151,6 +1151,51 @@ export class SqliteKlvStore {
     return this.getMissionProduct(id);
   }
 
+  async updateMissionProduct({ id, title, description = '' }) {
+    const cleanTitle = String(title || '').trim();
+    if (!cleanTitle) throw new Error('product name is required');
+    const result = await retryBusyWrite('update_mission_product', () => run(this.db,
+      'UPDATE mission_products SET title=?, description=?, updated_at=? WHERE id=?',
+      [cleanTitle, String(description || '').trim(), new Date().toISOString(), id]
+    ));
+    if (!result.changes) {
+      const error = new Error('mission product not found');
+      error.statusCode = 404;
+      throw error;
+    }
+    return this.getMissionProduct(id);
+  }
+
+  async getMissionProductDeletionGroup(id) {
+    const products = await all(this.db, `WITH RECURSIVE product_tree(id, parent_product_id, source_stream_id, product_type, depth) AS (
+      SELECT id, parent_product_id, source_stream_id, product_type, 0 FROM mission_products WHERE id=?
+      UNION ALL
+      SELECT child.id, child.parent_product_id, child.source_stream_id, child.product_type, product_tree.depth + 1
+      FROM mission_products child JOIN product_tree ON child.parent_product_id=product_tree.id
+    ) SELECT id, parent_product_id, source_stream_id, product_type, depth FROM product_tree ORDER BY depth DESC`, [id]);
+    if (!products.length) {
+      const error = new Error('mission product not found');
+      error.statusCode = 404;
+      throw error;
+    }
+    return { productIds: products.map((product) => product.id), products };
+  }
+
+  async deleteMissionProductGroup(productIds) {
+    const ids = Array.from(new Set(productIds || []));
+    if (!ids.length) return;
+    await retryBusyWrite('delete_mission_product_group', async () => {
+      await run(this.db, 'BEGIN IMMEDIATE');
+      try {
+        for (const id of ids) await run(this.db, 'DELETE FROM mission_products WHERE id=?', [id]);
+        await run(this.db, 'COMMIT');
+      } catch (error) {
+        await run(this.db, 'ROLLBACK').catch(() => {});
+        throw error;
+      }
+    });
+  }
+
   async getMissionProduct(id) {
     const row = await get(this.db, `SELECT p.*, m.title AS mission_title, m.description AS mission_description, m.operation_id, o.title AS operation_title,
       AsGeoJSON(p.coverage_geom) AS coverage_geojson

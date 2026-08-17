@@ -178,6 +178,10 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
   const [selectedId, setSelectedId] = useState(null);
   const [productFitRequest, setProductFitRequest] = useState(0);
   const [viewer, setViewer] = useState(null);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [productTitle, setProductTitle] = useState('');
+  const [productDescription, setProductDescription] = useState('');
+  const [productPendingDelete, setProductPendingDelete] = useState(null);
   const [operationTitle, setOperationTitle] = useState('');
   const [operationDescription, setOperationDescription] = useState('');
   const [missionTitle, setMissionTitle] = useState('');
@@ -198,6 +202,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
   const [contextSplit, setContextSplit] = useState(35);
   const [productSplit, setProductSplit] = useState(35);
   const selectedMissionCardRef = useRef(null);
+  const selectedProductCardRef = useRef(null);
 
   const report = (message, color = 'green') => {
     setNotice({ message, color });
@@ -235,6 +240,10 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
     if (page !== 'context' || !selectedContextMissionId) return;
     selectedMissionCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [page, selectedContextMissionId, missions]);
+  useEffect(() => {
+    if (page !== 'catalog' || !selectedId) return;
+    selectedProductCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [page, selectedId, products]);
 
   const missionOptions = useMemo(() => missions
     .filter((mission) => !operationId || mission.operationId === operationId)
@@ -391,6 +400,60 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
     setProductFitRequest((requestKey) => requestKey + 1);
   };
 
+  const openProductEditor = (product) => {
+    setEditingProduct(product);
+    setProductTitle(product.title || '');
+    setProductDescription(product.description || '');
+    setNotice(null);
+  };
+
+  const closeProductEditor = () => {
+    setEditingProduct(null);
+    setProductTitle('');
+    setProductDescription('');
+  };
+
+  const submitProductMetadata = async () => {
+    if (!editingProduct || !productTitle.trim()) return;
+    setBusy(true);
+    try {
+      const updated = await request(`/mission-products/${editingProduct.id}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: productTitle, description: productDescription })
+      });
+      setProducts((current) => current.map((product) => product.id === updated.id ? updated : product));
+      setViewer((current) => current?.id === updated.id ? updated : current);
+      setSelectedId(updated.id);
+      closeProductEditor();
+      await search();
+      report('Mission product updated.');
+    } catch (error) {
+      report(error.message, 'red');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteProduct = async () => {
+    if (!productPendingDelete) return;
+    setBusy(true);
+    try {
+      const result = await request(`/mission-products/${productPendingDelete.id}`, { method: 'DELETE' });
+      const deletedIds = new Set(result.deletedProductIds || [productPendingDelete.id]);
+      setProducts((current) => current.filter((product) => !deletedIds.has(product.id)));
+      setViewer((current) => deletedIds.has(current?.id) ? null : current);
+      if (deletedIds.has(selectedId)) setSelectedId(null);
+      setProductPendingDelete(null);
+      await search();
+      report('Mission product deleted.');
+    } catch (error) {
+      report(error.message, 'red');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (page === 'context') {
     const canSubmitMission = !!operationId && !!missionTitle.trim() && !!missionBbox && !busy;
     const selectContextMission = (id) => {
@@ -477,7 +540,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
         <Stack gap="sm">
           <Group align="end" wrap="nowrap">
             <Select className="mission-operation-select" label="Operation" placeholder="Select an operation" data={operations.map((operation) => ({ value: operation.id, label: operation.title }))} value={operationId || null} onChange={(value) => { setOperationId(value || ''); setMissionId(''); }} />
-            <Button aria-label="Add operation" title="Add operation" variant="light" size="sm" onClick={() => openOperationModal({ returnToMission: true })} disabled={busy}><AddIcon /></Button>
+            <ActionIcon aria-label="Add operation" title="Add operation" variant="light" size="md" onClick={() => openOperationModal({ returnToMission: true })} disabled={busy}><AddIcon /></ActionIcon>
           </Group>
           <TextInput label="Name" value={missionTitle} onChange={(event) => setMissionTitle(event.currentTarget.value)} />
           <Textarea label="Description" value={missionDescription} onChange={(event) => setMissionDescription(event.currentTarget.value)} />
@@ -516,6 +579,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
 
   return <Stack gap="sm" className="catalog-workspace mission-products-page">
     <Text size="xl" fw={700}>Mission Products</Text>
+    {notice ? <Text size="sm" c={notice.color}>{notice.message}</Text> : null}
     <Group align="end" className="catalog-filters">
       <TextInput label="Search" placeholder="Title, description, mission, operation" value={q} onChange={(event) => setQ(event.currentTarget.value)} />
       <Select label="Operation" clearable data={operations.map((operation) => ({ value: operation.id, label: operation.title }))} value={operationId || null} onChange={(value) => { setOperationId(value || ''); setMissionId(''); }} />
@@ -530,18 +594,27 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
     <div className="catalog-products-workspace" style={{ '--catalog-products-list-width': `${productSplit}%` }}>
       <div className="catalog-products-list-pane">
         <Stack gap="xs" className="catalog-results catalog-product-results">
-        {products.length ? products.map((product) => <Paper key={product.id} p="sm" withBorder className={product.id === selectedId ? 'catalog-result is-selected' : 'catalog-result'} onClick={() => setSelectedId(product.id)}>
+        {products.length ? products.map((product) => <Paper key={product.id} ref={product.id === selectedId ? selectedProductCardRef : null} p="sm" withBorder aria-selected={product.id === selectedId} className={product.id === selectedId ? 'catalog-result catalog-product-result is-selected' : 'catalog-result catalog-product-result'} onClick={() => setSelectedId(product.id)}>
           <Group justify="space-between" wrap="nowrap">
-            <Stack gap={2}>
-              <Text fw={600}>{product.title}</Text>
-              <Text size="xs" c="dimmed">{product.operationTitle} / {product.missionTitle}</Text>
-              <Text size="sm" lineClamp={2}>{product.description || 'No description'}</Text>
-            </Stack>
+            <div className="catalog-product-summary">
+              {product.type === 'fmv' && product.thumbnailUrl ? <img className="catalog-product-thumbnail" src={product.thumbnailUrl} alt="" /> : null}
+              <Stack gap={2} className="catalog-product-copy">
+                <Text fw={600}>{product.title}</Text>
+                <Text size="xs" c="dimmed">{product.operationTitle} / {product.missionTitle}</Text>
+                <Text size="sm" lineClamp={2}>{product.description || 'No description'}</Text>
+              </Stack>
+            </div>
             <Badge variant="outline">{product.type}</Badge>
           </Group>
           <Group gap={4} mt="xs">
             <Tooltip label={product.geometry ? 'Zoom to feature on map' : 'Product has no map geometry'} withArrow>
               <span><ActionIcon variant="subtle" color="gray" size="sm" onClick={(event) => { event.stopPropagation(); zoomToProduct(product.id); }} disabled={!product.geometry} aria-label="Zoom to product"><ZoomToIcon /></ActionIcon></span>
+            </Tooltip>
+            <Tooltip label="Edit mission product" withArrow>
+              <ActionIcon variant="subtle" size="sm" aria-label="Edit mission product" onClick={(event) => { event.stopPropagation(); openProductEditor(product); }} onKeyDown={(event) => event.stopPropagation()} disabled={busy}><CatalogActionIcon name="edit" /></ActionIcon>
+            </Tooltip>
+            <Tooltip label="Delete mission product" withArrow>
+              <ActionIcon variant="subtle" color="red" size="sm" aria-label="Delete mission product" onClick={(event) => { event.stopPropagation(); setProductPendingDelete(product); }} onKeyDown={(event) => event.stopPropagation()} disabled={busy}><CatalogActionIcon name="remove" /></ActionIcon>
             </Tooltip>
             <Button size="xs" variant="subtle" onClick={(event) => { event.stopPropagation(); void openProduct(product); }}>Open product</Button>
           </Group>
@@ -561,6 +634,26 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
         {viewer?.assets?.map((asset) => <Button key={asset.href} component="a" href={asset.href} target="_blank" variant="light">Open {asset.type}</Button>)}
         {viewer?.geometry ? <Text size="sm">Coverage is displayed on the catalog map.</Text> : null}
       </Stack>}
+    </Modal>
+    <DraggableModal opened={!!editingProduct} onClose={() => { if (!busy) closeProductEditor(); }} title="Edit Mission Product" centered>
+      <Stack gap="sm">
+        <TextInput label="Name" value={productTitle} onChange={(event) => setProductTitle(event.currentTarget.value)} />
+        <Textarea label="Description" value={productDescription} onChange={(event) => setProductDescription(event.currentTarget.value)} />
+        <Group justify="flex-end">
+          <Button variant="default" onClick={closeProductEditor} disabled={busy}>Cancel</Button>
+          <Button onClick={() => void submitProductMetadata()} loading={busy} disabled={!productTitle.trim()}>Save</Button>
+        </Group>
+      </Stack>
+    </DraggableModal>
+    <Modal opened={!!productPendingDelete} onClose={() => { if (!busy) setProductPendingDelete(null); }} closeOnClickOutside={!busy} closeOnEscape={!busy} title="Delete mission product" centered>
+      <Stack gap="sm">
+        <Text>Are you sure you want to delete mission product “{productPendingDelete?.title}”?</Text>
+        <Text size="sm" c="dimmed">Derived products and managed catalog assets will also be removed. An active FMV source will be stopped first.</Text>
+        <Group justify="flex-end">
+          <Button variant="default" onClick={() => setProductPendingDelete(null)} disabled={busy}>No</Button>
+          <Button color="red" onClick={() => void deleteProduct()} loading={busy}>Yes, delete</Button>
+        </Group>
+      </Stack>
     </Modal>
   </Stack>;
 }
