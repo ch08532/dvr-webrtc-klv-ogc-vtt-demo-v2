@@ -8,6 +8,7 @@ import '@mantine/dates/styles.css';
 import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
+import MissionCatalog from './MissionCatalog.jsx';
 import { useFootprintMap } from './hooks/useFootprintMap.js';
 
 const theme = createTheme({
@@ -82,8 +83,18 @@ const VIEWER_SPLIT_MIN_PERCENT = 25;
 const VIEWER_SPLIT_MAX_PERCENT = 75;
 const TARGET_LOG_OBSERVATION_PREVIEW_MAX_LENGTH = 140;
 const TELEMETRY_BASE_MAP_STORAGE_KEY = 'midas-play:telemetry-base-map';
+const SIDEBAR_EXPANDED_STORAGE_KEY = 'midas-play:sidebar-expanded';
 const DEFAULT_TELEMETRY_BASE_MAP = 'streets';
 const TELEMETRY_BASE_MAP_VALUES = new Set(['streets', 'dark-openstreetmap', 'world-imagery']);
+const SIDEBAR_EXPANDED_WIDTH = 248;
+const SIDEBAR_COLLAPSED_WIDTH = 76;
+const WORKSPACE_NAVIGATION = Object.freeze([
+  { value: 'sources', label: 'Sources', icon: 'sources' },
+  { value: 'playback', label: 'Playback', icon: 'playback' },
+  { value: 'catalog', label: 'Mission Products', icon: 'catalog' },
+  { value: 'context', label: 'Mission Context', icon: 'context' },
+  { value: 'system', label: 'System', icon: 'system' }
+]);
 const SQLITE_TABLE_DESCRIPTIONS = Object.freeze({
   klv_events: 'Stores every decoded KLV telemetry event with its stream and mission timestamp. This is the primary telemetry dataset used by exports and OGC queries.',
   platform_track_points: 'Stores one compact platform position per completed HLS segment for efficient platform-history map rendering.',
@@ -121,6 +132,16 @@ function loadTelemetryBaseMapPreference() {
     return normalizeTelemetryBaseMap(window.localStorage.getItem(TELEMETRY_BASE_MAP_STORAGE_KEY));
   } catch {
     return DEFAULT_TELEMETRY_BASE_MAP;
+  }
+}
+
+function loadSidebarExpandedPreference() {
+  if (typeof window === 'undefined') return true;
+  try {
+    const saved = window.localStorage.getItem(SIDEBAR_EXPANDED_STORAGE_KEY);
+    return saved === null ? true : saved === 'true';
+  } catch {
+    return true;
   }
 }
 
@@ -502,6 +523,20 @@ function ThroughputWidget({ label, primaryLabel, primaryValue, primarySamples, p
   );
 }
 
+/** Navigation glyphs kept inline to avoid adding a dependency for five icons. */
+function WorkspaceNavigationIcon({ name }) {
+  const stroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  if (name === 'sources') return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" {...stroke} /><path d="M8 8h8M8 12h5M8 16h3" {...stroke} /></svg>;
+  if (name === 'playback') return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" {...stroke} /><path d="m10 9 5 3-5 3z" fill="currentColor" /></svg>;
+  if (name === 'catalog') return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1" {...stroke} /><rect x="14" y="4" width="6" height="6" rx="1" {...stroke} /><rect x="4" y="14" width="6" height="6" rx="1" {...stroke} /><rect x="14" y="14" width="6" height="6" rx="1" {...stroke} /></svg>;
+  if (name === 'context') return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 5-7 10-7 10S5 15 5 10a7 7 0 1 1 14 0Z" {...stroke} /><circle cx="12" cy="10" r="2.5" {...stroke} /></svg>;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" {...stroke} /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.1 2.1-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2h-3v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L6.6 17l.1-.1A1.7 1.7 0 0 0 7 15a1.7 1.7 0 0 0-1.5-1H5.3v-3h.2A1.7 1.7 0 0 0 7 10a1.7 1.7 0 0 0-.3-1.9l-.1-.1 2.1-2.1.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5v-.2h3v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.1 2.1-.1.1A1.7 1.7 0 0 0 19.4 10a1.7 1.7 0 0 0 1.5 1h.2v3h-.2a1.7 1.7 0 0 0-1.5 1Z" {...stroke} /></svg>;
+}
+
+function KebabIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.65" fill="currentColor" /><circle cx="12" cy="12" r="1.65" fill="currentColor" /><circle cx="12" cy="19" r="1.65" fill="currentColor" /></svg>;
+}
+
 /** Compact SVG icons for video transport and capture actions. */
 function PlaybackControlIcon({ name }) {
   const common = { fill: 'currentColor' };
@@ -522,7 +557,11 @@ function PlaybackControlIcon({ name }) {
 }
 
 function App() {
+  const [appPage, setAppPage] = useState('sources');
+  const [sidebarExpanded, setSidebarExpanded] = useState(loadSidebarExpandedPreference);
   const [streamId, setStreamId] = useState('stream1');
+  const [catalogMissions, setCatalogMissions] = useState([]);
+  const [catalogMissionId, setCatalogMissionId] = useState('');
   const [sourceType, setSourceType] = useState('stream');
   const [inputUrl, setInputUrl] = useState('udp://239.1.2.3:5000');
   const [videoFile, setVideoFile] = useState(null);
@@ -710,6 +749,24 @@ function App() {
     const handleStorage = (event) => {
       if (event.key !== TELEMETRY_BASE_MAP_STORAGE_KEY && event.key !== null) return;
       setTelemetryBaseMap(normalizeTelemetryBaseMap(event.newValue));
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_EXPANDED_STORAGE_KEY, String(sidebarExpanded));
+    } catch {
+      // The preference remains available for the current page when browser
+      // storage is unavailable.
+    }
+  }, [sidebarExpanded]);
+
+  useEffect(() => {
+    const handleStorage = (event) => {
+      if (event.key !== SIDEBAR_EXPANDED_STORAGE_KEY) return;
+      setSidebarExpanded(event.newValue !== 'false');
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
@@ -927,7 +984,7 @@ function App() {
     : sourceType === 'local-file'
       ? !!String(localServerPath || '').trim()
       : !!String(inputUrl || '').trim();
-  const canStartSource = serverOnline && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
+  const canStartSource = serverOnline && !!catalogMissionId && hasSelectedInput && !startRequestInFlight && !stopRequestInFlight && !isStartBlockedByState;
   const canStopSource = serverOnline && !startRequestInFlight && !stopRequestInFlight && !isStopBlockedByState;
   const currentSourceIsFile = streamRuntime?.sourceType === 'file';
   const rawManualVideoStartUtcMs = streamRuntime?.manualVideoStartUtcMs;
@@ -1124,6 +1181,15 @@ function App() {
       if (updateStatus) setStatus(JSON.stringify(result, null, 2));
     }
   };
+
+  const refreshCatalogMissions = async () => {
+    try {
+      const result = await api('/missions');
+      if (Array.isArray(result?.missions)) setCatalogMissions(result.missions);
+    } catch {}
+  };
+
+  useEffect(() => { void refreshCatalogMissions(); }, []);
 
   // Provisioning jobs are finite OGC Process resources. Their associated
   // source session stays alive after success, so monitor both job and source
@@ -1830,6 +1896,7 @@ function App() {
         body: JSON.stringify({
           inputs: {
             streamId,
+            missionId: catalogMissionId,
             inputUrl: sourceType === 'stream' ? inputUrl : undefined,
             assetId,
             hlsMode,
@@ -4250,6 +4317,7 @@ function App() {
     <MantineProvider theme={theme} forceColorScheme="dark">
       <AppShell
         header={{ height: 60 }}
+        navbar={{ width: sidebarExpanded ? SIDEBAR_EXPANDED_WIDTH : SIDEBAR_COLLAPSED_WIDTH, breakpoint: 'sm' }}
         padding="md"
       >
         <AppShell.Header>
@@ -4261,7 +4329,52 @@ function App() {
           </Group>
         </AppShell.Header>
 
+        <AppShell.Navbar p="xs" className={`dashboard-sidebar ${sidebarExpanded ? 'is-expanded' : 'is-collapsed'}`} aria-label="Workspace navigation">
+          <div className="dashboard-sidebar-header">
+            <Text className="dashboard-sidebar-section-label" size="xs" fw={700} c="dimmed">Workspaces</Text>
+            <Tooltip label={sidebarExpanded ? 'Collapse navigation' : 'Expand navigation'} position="right" withArrow>
+              <ActionIcon
+                className="dashboard-sidebar-toggle"
+                variant="subtle"
+                color="gray"
+                size="lg"
+                onClick={() => setSidebarExpanded((expanded) => !expanded)}
+                aria-label={sidebarExpanded ? 'Collapse navigation' : 'Expand navigation'}
+                aria-expanded={sidebarExpanded}
+                aria-controls="workspace-navigation"
+              >
+                <KebabIcon />
+              </ActionIcon>
+            </Tooltip>
+          </div>
+          <Stack id="workspace-navigation" gap={4} mt="xs" className="dashboard-sidebar-nav">
+            {WORKSPACE_NAVIGATION.map(({ value, label, icon }) => {
+              const active = appPage === value;
+              return <Tooltip key={value} label={label} position="right" withArrow disabled={sidebarExpanded}>
+                <Button
+                  className="dashboard-sidebar-link"
+                  variant={active ? 'filled' : 'subtle'}
+                  color={active ? 'signal' : 'gray'}
+                  justify={sidebarExpanded ? 'flex-start' : 'center'}
+                  onClick={() => {
+                    setAppPage(value);
+                    if (value === 'sources' || value === 'playback') setTimeout(() => document.getElementById(value)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+                  }}
+                  aria-current={active ? 'page' : undefined}
+                  aria-label={sidebarExpanded ? undefined : label}
+                >
+                  <span className="dashboard-sidebar-link-content">
+                    <span className="dashboard-sidebar-link-icon"><WorkspaceNavigationIcon name={icon} /></span>
+                    <span className="dashboard-sidebar-link-label">{label}</span>
+                  </span>
+                </Button>
+              </Tooltip>;
+            })}
+          </Stack>
+        </AppShell.Navbar>
+
         <AppShell.Main>
+          {appPage === 'catalog' ? <MissionCatalog page="catalog" onStatus={setStatus} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} /> : appPage === 'context' ? <MissionCatalog page="context" onStatus={setStatus} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} /> : (
           <Stack spacing="md">
             {!serverOnline ? (
               <Paper shadow="xs" p="md" withBorder>
@@ -4271,7 +4384,8 @@ function App() {
                 </Text>
               </Paper>
             ) : null}
-            <Paper shadow="xs" p="md">
+            {appPage === 'system' ? null : <>
+            <Paper id="sources" shadow="xs" p="md">
               <Text size="lg" fw={500}>Start Source</Text>
               <Group mt="xs" align="end" wrap="nowrap">
                 <TextInput
@@ -4279,6 +4393,16 @@ function App() {
                   label="Stream ID"
                   value={streamId}
                   onChange={(e) => setStreamId(e.target.value)}
+                />
+                <Select
+                  w={230}
+                  label="Mission"
+                  placeholder="Select mission"
+                  value={catalogMissionId || null}
+                  onChange={(value) => setCatalogMissionId(value || '')}
+                  data={catalogMissions.map((mission) => ({ value: mission.id, label: `${mission.operationTitle} / ${mission.title}` }))}
+                  searchable
+                  nothingFoundMessage="Create a mission in Mission Context"
                 />
                 <Select
                   w={230}
@@ -4568,7 +4692,7 @@ function App() {
               </Stack>
             </Paper>
 
-            <Paper shadow="xs" p="md">
+            <Paper id="playback" shadow="xs" p="md">
               <Text size="lg" fw={500}>FMV Viewer</Text>
               {hasActiveViewerSource ? <>
               <Tabs value={activeTab} onChange={setActiveTab}>
@@ -5187,7 +5311,8 @@ function App() {
               </Stack>}
             </Paper>
 
-            <Paper shadow="xs" p="md">
+            </>}
+            {appPage === 'system' ? <Paper id="system" shadow="xs" p="md">
               <Text size="lg" fw={500}>System</Text>
               <Tabs defaultValue="utilization" mt="xs">
                 <Tabs.List>
@@ -5365,8 +5490,9 @@ function App() {
                   </Stack>
                 </Tabs.Panel>
               </Tabs>
-            </Paper>
+            </Paper> : null}
           </Stack>
+          )}
         </AppShell.Main>
         <Modal
           opened={!!targetLogEditor}

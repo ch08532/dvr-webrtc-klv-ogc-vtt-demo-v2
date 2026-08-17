@@ -19,6 +19,9 @@ For a short overview of how the pieces fit together, see [DESIGN.md](DESIGN.md).
 - Node.js 18+
 - `ffmpeg` installed and on PATH
 - `ffprobe` installed and on PATH (normally distributed with FFmpeg)
+- Mission Products requires the Windows x64 SpatiaLite 5.1.0 extension. Set
+  `SPATIALITE_EXTENSION_PATH` to `mod_spatialite.dll`; see
+  [`vendor/spatialite/win-x64`](vendor/spatialite/win-x64/README.md).
 - For GPU encode (default), install FFmpeg with hardware encoder support (for example `h264_nvenc`).
 
 ### FFmpeg GPU settings

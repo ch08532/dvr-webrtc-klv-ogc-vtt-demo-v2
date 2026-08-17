@@ -8,11 +8,25 @@ import { randomUUID } from "node:crypto";
  * module globals. Entries retain a mission timestamp and, when known, its
  * matching playable video offset.
  */
-export function createTargetLogRouter({ store, log, serializeError, resolveStreamRecordingDir }) {
+export function createTargetLogRouter({ store, log, serializeError, resolveStreamRecordingDir, sources }) {
   const router = Router();
   const validateStreamId = (streamId) => {
     resolveStreamRecordingDir(streamId);
     return streamId;
+  };
+  const publishCatalogEntry = async (streamId, entry) => {
+    const source = sources?.get(streamId);
+    if (!source?.missionId || !source?.missionProductId) return;
+    let targetLog = await store.getTargetLogProductForFmv(source.missionProductId);
+    if (!targetLog) {
+      const product = await store.createMissionProduct({
+        id: randomUUID(), missionId: source.missionId, parentProductId: source.missionProductId,
+        sourceStreamId: streamId, type: 'target-log', title: `Target Log ${streamId}`,
+        description: `Auto-published target log associated with FMV ${streamId}.`
+      });
+      targetLog = { id: product.id };
+    }
+    await store.upsertCatalogTargetLogEntry({ id: entry.id, productId: targetLog.id, entry });
   };
   const hasValue = (value) => value !== undefined && value !== null && value !== "";
 
@@ -79,6 +93,7 @@ export function createTargetLogRouter({ store, log, serializeError, resolveStrea
         position: req.body?.position, positionSource: req.body?.positionSource,
         customFields, createdBy: req.body?.createdBy == null ? null : String(req.body.createdBy)
       });
+      await publishCatalogEntry(streamId, entry);
       log.info("target_log_entry_created", { streamId, entryId: entry.id, missionTimeMs: entry.missionTimeMs, videoTimeMs: entry.videoTimeMs });
       res.status(201).json({ ok: true, entry });
     } catch (error) {
@@ -100,6 +115,7 @@ export function createTargetLogRouter({ store, log, serializeError, resolveStrea
         observation: req.body?.observation, customFields, position: req.body?.position, positionSource: req.body?.positionSource,
         missionTimeMs, videoTimeMs: missionTimeMs === undefined ? undefined : await videoTimeForMissionTime(streamId, missionTimeMs)
       });
+      await publishCatalogEntry(streamId, entry);
       res.json({ ok: true, entry });
     } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
   });

@@ -1,6 +1,7 @@
 /** Persists decoded KLV records and supplies time-window queries via SQLite. */
 import sqlite3 from "sqlite3";
 import { stat } from "node:fs/promises";
+import { dirname, delimiter } from "node:path";
 import { createServiceLogger, serializeError } from "../service_logger.js";
 
 const log = createServiceLogger("sqlite_klv_store");
@@ -62,6 +63,13 @@ function get(db, sql, params = []) {
 function closeDb(db) {
   return new Promise((resolve, reject) => {
     db.close((err) => err ? reject(err) : resolve());
+  });
+}
+
+/** Loads the mandatory SpatiaLite extension through node-sqlite3's native hook. */
+function loadExtension(db, extensionPath) {
+  return new Promise((resolve, reject) => {
+    db.loadExtension(extensionPath, (err) => err ? reject(err) : resolve());
   });
 }
 
@@ -139,6 +147,29 @@ function normalizeTargetPosition(position) {
   return { lat, lon };
 }
 
+function polygonWktFromBbox(bbox) {
+  const values = Array.isArray(bbox) ? bbox.map(Number) : [];
+  if (values.length !== 4 || !values.every(Number.isFinite)) throw new Error("bbox must contain west,south,east,north");
+  const [west, south, east, north] = values;
+  if (west < -180 || east > 180 || south < -90 || north > 90 || west >= east || south >= north) throw new Error("bbox must be a valid WGS84 extent");
+  return `POLYGON((${west} ${south},${east} ${south},${east} ${north},${west} ${north},${west} ${south}))`;
+}
+
+function productFromRow(row) {
+  let geometry = null;
+  try { geometry = row.coverage_geojson ? JSON.parse(row.coverage_geojson) : null; } catch {}
+  return {
+    id: row.id, missionId: row.mission_id, operationId: row.operation_id,
+    parentProductId: row.parent_product_id || null, sourceStreamId: row.source_stream_id || null,
+    type: row.product_type, title: row.title, description: row.description || '', status: row.status,
+    temporalStart: row.temporal_start_ms == null ? null : new Date(Number(row.temporal_start_ms)).toISOString(),
+    temporalEnd: row.temporal_end_ms == null ? null : new Date(Number(row.temporal_end_ms)).toISOString(),
+    thumbnailUrl: row.thumbnail_url || null, geometry, missionTitle: row.mission_title,
+    missionDescription: row.mission_description || '', operationTitle: row.operation_title,
+    createdAt: row.created_at, updatedAt: row.updated_at
+  };
+}
+
 /**
  * Validates one compact platform-history point derived from a completed HLS
  * segment. `sequence` is the browser HLS ordering key; `tMs` is retained
@@ -177,8 +208,9 @@ function reduceTrackPoints(points, maxPoints) {
 /** Owns the telemetry schema, writes, and query operations. */
 export class SqliteKlvStore {
   /** Prepares the store; call init before issuing database operations. */
-  constructor({ dbPath }) {
+  constructor({ dbPath, spatialiteExtensionPath = process.env.SPATIALITE_EXTENSION_PATH }) {
     this.dbPath = dbPath;
+    this.spatialiteExtensionPath = spatialiteExtensionPath;
     this.db = null;
     this.storageMetricsCache = null;
     this.storageMetricsPending = null;
@@ -188,9 +220,34 @@ export class SqliteKlvStore {
   async init() {
     log.info("init_start", { dbPath: this.dbPath });
     this.db = await openDb(this.dbPath);
+    if (!this.spatialiteExtensionPath) {
+      throw new Error("SPATIALITE_EXTENSION_PATH is required; the mission catalog has no plain-SQLite fallback");
+    }
+    try {
+      // Windows resolves a loadable extension's dependent DLLs through the
+      // process search path, not consistently through the absolute extension
+      // path. Make the bundled module directory available before loading it.
+      const extensionDir = dirname(this.spatialiteExtensionPath);
+      const currentPath = process.env.PATH || process.env.Path || '';
+      if (!currentPath.split(delimiter).some((entry) => entry.toLowerCase() === extensionDir.toLowerCase())) {
+        process.env.PATH = `${extensionDir}${delimiter}${currentPath}`;
+      }
+      await loadExtension(this.db, this.spatialiteExtensionPath);
+      await get(this.db, "SELECT spatialite_version() AS version");
+    } catch (error) {
+      try { await closeDb(this.db); } catch {}
+      this.db = null;
+      throw new Error(`Unable to load mandatory SpatiaLite extension at ${this.spatialiteExtensionPath}: ${String(error?.message || error)}`);
+    }
     await run(this.db, `PRAGMA journal_mode=WAL;`);
     await run(this.db, `PRAGMA synchronous=NORMAL;`);
     await run(this.db, `PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS};`);
+    await run(this.db, "SELECT InitSpatialMetaData(1);").catch(async (error) => {
+      // Existing databases may already have SpatiaLite metadata. Verify it
+      // rather than treating that idempotent state as a startup failure.
+      const metadata = await get(this.db, "SELECT name FROM sqlite_master WHERE type='table' AND name='geometry_columns'");
+      if (!metadata) throw error;
+    });
     await run(this.db, `
       CREATE TABLE IF NOT EXISTS klv_events (
         stream_id TEXT NOT NULL,
@@ -279,7 +336,54 @@ export class SqliteKlvStore {
         updated_at TEXT NOT NULL
       );
     `);
+    await this.initMissionCatalog();
     log.info("init_complete", { dbPath: this.dbPath });
+  }
+
+  async ensureSpatialColumn(table, column, geometryType) {
+    const existing = await get(this.db, `SELECT f_geometry_column FROM geometry_columns WHERE Lower(f_table_name)=Lower(?) AND Lower(f_geometry_column)=Lower(?)`, [table, column]);
+    if (!existing) {
+      await get(this.db, "SELECT AddGeometryColumn(?, ?, 4326, ?, 'XY') AS added", [table, column, geometryType]);
+    }
+    const indexName = `idx_${table}_${column}`;
+    const index = await get(this.db, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, [`${indexName}`]);
+    if (!index) await get(this.db, "SELECT CreateSpatialIndex(?, ?) AS created", [table, column]);
+  }
+
+  /** Creates the persistent OGC Records catalog beside the existing KLV data. */
+  async initMissionCatalog() {
+    await run(this.db, `CREATE TABLE IF NOT EXISTS mission_operations (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`);
+    await run(this.db, `CREATE TABLE IF NOT EXISTS missions (
+      id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES mission_operations(id),
+      title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE(operation_id, title)
+    )`);
+    await run(this.db, `CREATE TABLE IF NOT EXISTS mission_products (
+      id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id),
+      parent_product_id TEXT REFERENCES mission_products(id), source_stream_id TEXT,
+      product_type TEXT NOT NULL CHECK(product_type IN ('fmv','snapshot','clip','target-log')),
+      title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'published',
+      temporal_start_ms INTEGER, temporal_end_ms INTEGER, thumbnail_url TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`);
+    await run(this.db, `CREATE TABLE IF NOT EXISTS mission_product_assets (
+      id TEXT PRIMARY KEY, product_id TEXT NOT NULL REFERENCES mission_products(id) ON DELETE CASCADE,
+      asset_type TEXT NOT NULL, relative_path TEXT NOT NULL, media_type TEXT, created_at TEXT NOT NULL
+    )`);
+    await run(this.db, `CREATE TABLE IF NOT EXISTS catalog_target_log_entries (
+      id TEXT PRIMARY KEY, product_id TEXT NOT NULL REFERENCES mission_products(id) ON DELETE CASCADE,
+      source_entry_id TEXT, mission_time_ms INTEGER, observation TEXT NOT NULL DEFAULT '',
+      properties_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`);
+    await run(this.db, "CREATE INDEX IF NOT EXISTS idx_missions_operation ON missions(operation_id)");
+    await run(this.db, "CREATE INDEX IF NOT EXISTS idx_products_mission ON mission_products(mission_id, product_type, created_at)");
+    await run(this.db, "CREATE INDEX IF NOT EXISTS idx_products_stream ON mission_products(source_stream_id, product_type)");
+    await this.ensureSpatialColumn('missions', 'area_geom', 'POLYGON');
+    await this.ensureSpatialColumn('mission_products', 'coverage_geom', 'GEOMETRY');
+    await this.ensureSpatialColumn('catalog_target_log_entries', 'position_geom', 'POINT');
   }
 
   /** Stores one decoded telemetry event using its source timestamp when present. */
@@ -343,7 +447,7 @@ export class SqliteKlvStore {
 
     // Five bound variables per row; remain well below SQLite's common 999 limit.
     const rowsPerStatement = 150;
-    return retryBusyWrite("upsert_platform_track_samples", async () => {
+    const written = await retryBusyWrite("upsert_platform_track_samples", async () => {
       let transactionOpen = false;
       try {
         await run(this.db, "BEGIN IMMEDIATE");
@@ -370,6 +474,8 @@ export class SqliteKlvStore {
         throw error;
       }
     });
+    void this.syncMissionProductCoverageForStream(streamId).catch((error) => log.warn('catalog_platform_track_sync_error', { streamId, error: serializeError(error) }));
+    return written;
   }
 
   /**
@@ -384,7 +490,7 @@ export class SqliteKlvStore {
     if (!rows.length) return 0;
 
     const rowsPerStatement = 150;
-    return retryBusyWrite("upsert_frame_center_track_samples", async () => {
+    const written = await retryBusyWrite("upsert_frame_center_track_samples", async () => {
       let transactionOpen = false;
       try {
         await run(this.db, "BEGIN IMMEDIATE");
@@ -411,6 +517,8 @@ export class SqliteKlvStore {
         throw error;
       }
     });
+    void this.syncMissionProductCoverageForStream(streamId).catch((error) => log.warn('catalog_frame_track_sync_error', { streamId, error: serializeError(error) }));
+    return written;
   }
 
   /**
@@ -954,6 +1062,178 @@ export class SqliteKlvStore {
     });
     log.warn("purge_all_mission_data_complete", { dbPath: this.dbPath, ...result });
     return result;
+  }
+
+  async listMissionOperations() {
+    return (await all(this.db, "SELECT * FROM mission_operations ORDER BY title COLLATE NOCASE")).map((row) => ({
+      id: row.id, title: row.title, description: row.description || '', createdAt: row.created_at, updatedAt: row.updated_at
+    }));
+  }
+
+  async createMissionOperation({ id, title, description = '' }) {
+    const now = new Date().toISOString();
+    if (!id || !String(title || '').trim()) throw new Error('operation title is required');
+    await run(this.db, "INSERT INTO mission_operations(id,title,description,created_at,updated_at) VALUES(?,?,?,?,?)", [id, String(title).trim(), String(description || '').trim(), now, now]);
+    return { id, title: String(title).trim(), description: String(description || '').trim(), createdAt: now, updatedAt: now };
+  }
+
+  async updateMissionOperation({ id, title, description = '' }) {
+    const now = new Date().toISOString();
+    if (!id || !String(title || '').trim()) throw new Error('operation title is required');
+    const result = await run(this.db, "UPDATE mission_operations SET title=?, description=?, updated_at=? WHERE id=?", [String(title).trim(), String(description || '').trim(), now, id]);
+    if (!result.changes) throw new Error('operation not found');
+    return (await this.listMissionOperations()).find((operation) => operation.id === id);
+  }
+
+  async deleteMissionOperation(id) {
+    const mission = await get(this.db, "SELECT id FROM missions WHERE operation_id=? LIMIT 1", [id]);
+    if (mission) {
+      const error = new Error('Delete the operation’s missions before deleting the operation.');
+      error.statusCode = 409;
+      throw error;
+    }
+    const result = await run(this.db, "DELETE FROM mission_operations WHERE id=?", [id]);
+    if (!result.changes) throw new Error('operation not found');
+  }
+
+  async listMissions(operationId = null) {
+    const where = operationId ? "WHERE m.operation_id=?" : "";
+    const rows = await all(this.db, `SELECT m.*, o.title AS operation_title, AsGeoJSON(m.area_geom) AS area_geojson
+      FROM missions m JOIN mission_operations o ON o.id=m.operation_id ${where} ORDER BY o.title COLLATE NOCASE, m.title COLLATE NOCASE`, operationId ? [operationId] : []);
+    return rows.map((row) => ({
+      id: row.id, operationId: row.operation_id, operationTitle: row.operation_title, title: row.title,
+      description: row.description || '', area: row.area_geojson ? JSON.parse(row.area_geojson) : null,
+      createdAt: row.created_at, updatedAt: row.updated_at
+    }));
+  }
+
+  async createMission({ id, operationId, title, description = '', bbox }) {
+    const now = new Date().toISOString();
+    if (!id || !operationId || !String(title || '').trim()) throw new Error('operation and mission title are required');
+    if (!await get(this.db, "SELECT id FROM mission_operations WHERE id=?", [operationId])) throw new Error('operation not found');
+    const wkt = polygonWktFromBbox(bbox);
+    await run(this.db, `INSERT INTO missions(id,operation_id,title,description,created_at,updated_at,area_geom)
+      VALUES(?,?,?,?,?,?,GeomFromText(?,4326))`, [id, operationId, String(title).trim(), String(description || '').trim(), now, now, wkt]);
+    return (await this.listMissions(operationId)).find((mission) => mission.id === id);
+  }
+
+  async updateMission({ id, operationId, title, description = '', bbox = null }) {
+    const now = new Date().toISOString();
+    if (!id || !operationId || !String(title || '').trim()) throw new Error('operation and mission title are required');
+    if (!await get(this.db, "SELECT id FROM mission_operations WHERE id=?", [operationId])) throw new Error('operation not found');
+    const wkt = bbox == null ? null : polygonWktFromBbox(bbox);
+    const result = await run(this.db, `UPDATE missions
+      SET operation_id=?, title=?, description=?, updated_at=?, area_geom=CASE WHEN ? IS NULL THEN area_geom ELSE GeomFromText(?,4326) END
+      WHERE id=?`, [operationId, String(title).trim(), String(description || '').trim(), now, wkt, wkt, id]);
+    if (!result.changes) throw new Error('mission not found');
+    return (await this.listMissions()).find((mission) => mission.id === id);
+  }
+
+  async deleteMission(id) {
+    const product = await get(this.db, "SELECT id FROM mission_products WHERE mission_id=? LIMIT 1", [id]);
+    if (product) {
+      const error = new Error('Mission products exist for this mission and must be removed first.');
+      error.statusCode = 409;
+      throw error;
+    }
+    const result = await run(this.db, "DELETE FROM missions WHERE id=?", [id]);
+    if (!result.changes) throw new Error('mission not found');
+  }
+
+  async createMissionProduct({ id, missionId, parentProductId = null, sourceStreamId = null, type, title, description = '', status = 'published', geometryWkt = null, temporalStartMs = null, temporalEndMs = null, thumbnailUrl = null }) {
+    const now = new Date().toISOString();
+    if (!id || !missionId || !['fmv', 'snapshot', 'clip', 'target-log'].includes(type) || !String(title || '').trim()) throw new Error('valid product id, mission, type, and title are required');
+    await run(this.db, `INSERT INTO mission_products(id,mission_id,parent_product_id,source_stream_id,product_type,title,description,status,temporal_start_ms,temporal_end_ms,thumbnail_url,created_at,updated_at,coverage_geom)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? IS NULL THEN (SELECT area_geom FROM missions WHERE id=?) ELSE GeomFromText(?,4326) END)`, [
+      id, missionId, parentProductId, sourceStreamId, type, String(title).trim(), String(description || '').trim(), status,
+      temporalStartMs, temporalEndMs, thumbnailUrl, now, now, geometryWkt, missionId, geometryWkt
+    ]);
+    return this.getMissionProduct(id);
+  }
+
+  async getMissionProduct(id) {
+    const row = await get(this.db, `SELECT p.*, m.title AS mission_title, m.description AS mission_description, m.operation_id, o.title AS operation_title,
+      AsGeoJSON(p.coverage_geom) AS coverage_geojson
+      FROM mission_products p JOIN missions m ON m.id=p.mission_id JOIN mission_operations o ON o.id=m.operation_id WHERE p.id=?`, [id]);
+    if (!row) return null;
+    const product = productFromRow(row);
+    const assets = await all(this.db, "SELECT asset_type, relative_path, media_type FROM mission_product_assets WHERE product_id=? ORDER BY created_at", [id]);
+    product.assets = assets.map((asset) => ({ type: asset.asset_type, mediaType: asset.media_type || null, href: `/mission-products-assets/${asset.relative_path}` }));
+    return product;
+  }
+
+  async addMissionProductAsset({ id, productId, assetType, relativePath, mediaType = null }) {
+    if (!id || !productId || !assetType || !relativePath) throw new Error('asset id, product, type, and path are required');
+    await run(this.db, `INSERT INTO mission_product_assets(id,product_id,asset_type,relative_path,media_type,created_at) VALUES(?,?,?,?,?,?)`, [id, productId, assetType, relativePath, mediaType, new Date().toISOString()]);
+  }
+
+  async getTargetLogProductForFmv(parentProductId) {
+    return get(this.db, "SELECT id FROM mission_products WHERE parent_product_id=? AND product_type='target-log' ORDER BY created_at DESC LIMIT 1", [parentProductId]);
+  }
+
+  async upsertCatalogTargetLogEntry({ id, productId, entry }) {
+    const now = new Date().toISOString();
+    const position = entry?.position;
+    const pointWkt = position ? `POINT(${Number(position.lon)} ${Number(position.lat)})` : null;
+    await run(this.db, `INSERT INTO catalog_target_log_entries(id,product_id,source_entry_id,mission_time_ms,observation,properties_json,created_at,updated_at,position_geom)
+      VALUES(?,?,?,?,?,?,?,?,CASE WHEN ? IS NULL THEN NULL ELSE GeomFromText(?,4326) END)
+      ON CONFLICT(id) DO UPDATE SET observation=excluded.observation, mission_time_ms=excluded.mission_time_ms, properties_json=excluded.properties_json, updated_at=excluded.updated_at, position_geom=excluded.position_geom`, [
+      id, productId, entry.id, entry.missionTimeMs ?? null, entry.observation || '', JSON.stringify(entry.customFields || {}), now, now, pointWkt, pointWkt
+    ]);
+  }
+
+  async listMissionProducts({ q = '', type = null, operationId = null, missionId = null, bbox = null, datetime = null, limit = 50, offset = 0 } = {}) {
+    const where = ["p.status='published'"];
+    const params = [];
+    if (type) { where.push('p.product_type=?'); params.push(type); }
+    if (operationId) { where.push('m.operation_id=?'); params.push(operationId); }
+    if (missionId) { where.push('p.mission_id=?'); params.push(missionId); }
+    if (String(q).trim()) {
+      where.push("LOWER(p.title || ' ' || p.description || ' ' || m.title || ' ' || m.description || ' ' || o.title || ' ' || o.description) LIKE ?");
+      params.push(`%${String(q).trim().toLowerCase()}%`);
+    }
+    if (datetime?.fromMs != null || datetime?.toMs != null) {
+      // OGC API - Features/Records permits records without temporal geometry
+      // to remain in a datetime response; only known extents are filtered.
+      where.push('(p.temporal_start_ms IS NULL OR p.temporal_end_ms IS NULL OR (p.temporal_end_ms>=? AND p.temporal_start_ms<=?))');
+      params.push(datetime.fromMs ?? -8640000000000000, datetime.toMs ?? 8640000000000000);
+    }
+    if (bbox) {
+      const [west, south, east, north] = bbox.map(Number);
+      const mbr = "BuildMbr(?,?,?, ?,4326)";
+      where.push(`p.rowid IN (SELECT rowid FROM SpatialIndex WHERE f_table_name='mission_products' AND f_geometry_column='coverage_geom' AND search_frame=${mbr}) AND ST_Intersects(p.coverage_geom, ${mbr})`);
+      params.push(west, south, east, north, west, south, east, north);
+    }
+    const safeLimit = Math.max(1, Math.min(200, Math.trunc(Number(limit) || 50)));
+    const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+    const select = `FROM mission_products p JOIN missions m ON m.id=p.mission_id JOIN mission_operations o ON o.id=m.operation_id WHERE ${where.join(' AND ')}`;
+    const [countRow, rows] = await Promise.all([
+      get(this.db, `SELECT COUNT(*) AS total ${select}`, params),
+      all(this.db, `SELECT p.*, m.title AS mission_title, m.description AS mission_description, m.operation_id, o.title AS operation_title, AsGeoJSON(p.coverage_geom) AS coverage_geojson ${select} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`, [...params, safeLimit, safeOffset])
+    ]);
+    return { total: Number(countRow?.total || 0), limit: safeLimit, offset: safeOffset, products: rows.map(productFromRow) };
+  }
+
+  async updateMissionProductTemporalExtentForStream(streamId, firstFrameUtcMs, durationSeconds) {
+    const start = Math.round(Number(firstFrameUtcMs));
+    const end = Number.isFinite(Number(durationSeconds)) ? start + Math.round(Number(durationSeconds) * 1000) : null;
+    if (!Number.isFinite(start)) throw new Error('first frame time must be valid');
+    await run(this.db, "UPDATE mission_products SET temporal_start_ms=?, temporal_end_ms=?, updated_at=? WHERE source_stream_id=? AND temporal_start_ms IS NULL", [start, end, new Date().toISOString(), streamId]);
+  }
+
+  /** Keeps the published FMV geometry current as compact KLV track history arrives. */
+  async syncMissionProductCoverageForStream(streamId) {
+    const products = await all(this.db, "SELECT id FROM mission_products WHERE source_stream_id=? AND product_type='fmv'", [streamId]);
+    if (!products.length) return;
+    const [platform, frameCenter] = await Promise.all([
+      this.listPlatformTrackPoints(streamId, { maxPoints: 5000 }),
+      this.listFrameCenterTrackPoints(streamId, { maxPoints: 5000 })
+    ]);
+    const toLine = (points) => points.length >= 2 ? `LINESTRING(${points.map((point) => `${point.lon} ${point.lat}`).join(',')})` : null;
+    const members = [toLine(platform.points), toLine(frameCenter.points)].filter(Boolean);
+    if (!members.length) return;
+    const wkt = `GEOMETRYCOLLECTION(${members.join(',')})`;
+    await run(this.db, "UPDATE mission_products SET coverage_geom=GeomFromText(?,4326), updated_at=? WHERE source_stream_id=? AND product_type='fmv'", [wkt, new Date().toISOString(), streamId]);
   }
 
   /** Closes the database connection. */

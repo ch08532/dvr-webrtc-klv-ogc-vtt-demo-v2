@@ -76,6 +76,7 @@ export function registerOgcMovingFeaturesRoutes(app, { sources, store }) {
       title: "OGC API – Moving Features and Processes (demo subset)",
       links: [
         { rel: "collections", href: "/ogc/collections" },
+        { rel: "collection", href: "/ogc/collections/mission-products", type: "application/json", title: "Mission Products (OGC API - Records)" },
         { rel: "processes", href: "/ogc/processes", type: "application/json" },
         { rel: "conformance", href: "/ogc/conformance", type: "application/json" }
       ]
@@ -89,11 +90,19 @@ export function registerOgcMovingFeaturesRoutes(app, { sources, store }) {
       description: "Derived from MISB ST0601 decoded telemetry stored in SQLite.",
       links: [{ rel: "items", href: `/ogc/collections/${encodeURIComponent(s.streamId)}/items` }]
     }));
+    collections.unshift({
+      id: 'mission-products',
+      title: 'Mission Products',
+      description: 'SpatiaLite-backed OGC API - Records catalog for FMV, snapshots, clips, and target logs.',
+      itemType: 'record',
+      links: [{ rel: 'items', href: '/ogc/collections/mission-products/items', type: 'application/geo+json' }]
+    });
     res.json({ collections, links: [{ rel: "self", href: "/ogc/collections" }] });
   });
 
-  app.get("/ogc/collections/:collectionId/items", (req, res) => {
+  app.get("/ogc/collections/:collectionId/items", (req, res, next) => {
     const collectionId = req.params.collectionId;
+    if (collectionId === 'mission-products') return next();
     if (!sources.has(collectionId)) {
       return res.status(404).json({ error: "collection not found (streamId not running)" });
     }

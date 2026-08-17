@@ -24,6 +24,7 @@ import { createUploadsRouter } from "./src/routes/uploads.js";
 import { createKlvRouter } from "./src/routes/klv.js";
 import { createSourcesRouter } from "./src/routes/sources.js";
 import { createOgcProcessesRouter } from "./src/routes/ogc_processes.js";
+import { createMissionCatalogRouter } from "./src/routes/mission_catalog.js";
 import { getProcessCpuPercents, getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
 import { getGpuMetrics } from "./src/gpu_metrics.js";
 import { checkMediaTools } from "./src/media_tool_preflight.js";
@@ -58,6 +59,7 @@ log[mediaTools.ok ? "info" : "warn"]("media_tools_checked", mediaTools);
 
 const RECORD_ROOT = path.resolve("./recordings");
 const DB_DIR = path.resolve("./db");
+const MISSION_PRODUCT_ROOT = path.resolve(process.env.MISSION_PRODUCT_ROOT || "./mission-products");
 const SOURCE_ASSET_DIRNAME = "source";
 const SOURCE_UPLOAD_DIRNAME = ".uploads";
 const MAX_UPLOAD_BYTES = Math.max(1, Number(process.env.MAX_VIDEO_UPLOAD_MB || 10_240)) * 1024 * 1024;
@@ -91,6 +93,7 @@ const PLATFORM_HISTORY_MAX_POINTS = Math.max(2, Math.min(10_000, Number(process.
 
 fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
+fs.mkdirSync(MISSION_PRODUCT_ROOT, { recursive: true });
 if (!process.env.LOCAL_VIDEO_SOURCE_ROOTS) fs.mkdirSync(DEFAULT_LOCAL_VIDEO_SOURCE_ROOT, { recursive: true });
 
 /** Removes generated recording artifacts before a new service session begins. */
@@ -140,7 +143,10 @@ server.on("connection", (socket) => {
 
 // ---------- Storage ----------
 await purgeRecordingsOnStartup();
-const store = new SqliteKlvStore({ dbPath: path.join(DB_DIR, "klv.sqlite") });
+const store = new SqliteKlvStore({
+  dbPath: path.join(DB_DIR, "klv.sqlite"),
+  spatialiteExtensionPath: process.env.SPATIALITE_EXTENSION_PATH
+});
 await store.init();
 const startupDatabasePurge = await store.purgeAllMissionData();
 log.info("startup_database_purge_complete", startupDatabasePurge);
@@ -1340,8 +1346,14 @@ app.use("/hls", (_req, res) => {
   res.status(404).type("text/plain").send("hls artifact not found");
 });
 
+// Published product assets deliberately live outside the transient HLS tree.
+app.use("/mission-products-assets", express.static(MISSION_PRODUCT_ROOT, { fallthrough: false }));
+
 // ---------- OGC Moving Features subset ----------
 registerOgcMovingFeaturesRoutes(app, { sources, store });
+
+// ---------- Mission catalog and OGC API - Records ----------
+app.use(createMissionCatalogRouter({ store }));
 
 // ---------- OGC API - Processes ----------
 // Process jobs provision source sessions through the same lifecycle service as
@@ -1543,6 +1555,42 @@ app.get("/sources/:streamId/clip-thumbnails/:assetKey/:filename", async (req, re
 // ---------- API: file-backed clips ----------
 // Clips seek directly in the authoritative uploaded file. The export stream-copies
 // every source stream, including KLV/data, into a new MPEG-TS container.
+async function publishDerivedMissionProduct({ source, streamId, type, sourcePath, filename, mediaType, title, temporalStartMs = null, temporalEndMs = null }) {
+  if (!source?.missionId || !source?.missionProductId) return null;
+  const productId = randomUUID();
+  const relativePath = path.posix.join(productId, filename);
+  const destination = path.join(MISSION_PRODUCT_ROOT, productId, filename);
+  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+  await fs.promises.copyFile(sourcePath, destination);
+  const product = await store.createMissionProduct({
+    id: productId, missionId: source.missionId, parentProductId: source.missionProductId,
+    sourceStreamId: streamId, type, title, description: `Auto-published ${type} derived from FMV ${streamId}.`,
+    temporalStartMs, temporalEndMs,
+    thumbnailUrl: type === 'snapshot' ? `/mission-products-assets/${relativePath}` : null
+  });
+  await store.addMissionProductAsset({ id: randomUUID(), productId, assetType: type === 'snapshot' ? 'image' : 'original', relativePath, mediaType });
+  return product;
+}
+
+async function archiveFmvMissionProduct(source, streamId) {
+  if (!source?.missionProductId) return;
+  const productDir = path.join(MISSION_PRODUCT_ROOT, source.missionProductId);
+  const hlsDir = path.join(productDir, 'hls');
+  const sourceDir = resolveStreamRecordingDir(streamId);
+  await fs.promises.mkdir(productDir, { recursive: true });
+  // The archive is copied before transient artifacts are torn down. Upload
+  // chunks are intentionally excluded; the source file itself is copied below.
+  await fs.promises.cp(sourceDir, hlsDir, { recursive: true, filter: (entry) => !entry.includes(`${path.sep}.uploads${path.sep}`) });
+  await store.addMissionProductAsset({ id: randomUUID(), productId: source.missionProductId, assetType: 'hls', relativePath: path.posix.join(source.missionProductId, 'hls', 'master.m3u8'), mediaType: 'application/vnd.apple.mpegurl' });
+  if (source.sourceType === 'file' && source.inputUrl && fs.existsSync(source.inputUrl)) {
+    const originalName = path.basename(source.inputUrl);
+    const originalPath = path.join(productDir, 'original', originalName);
+    await fs.promises.mkdir(path.dirname(originalPath), { recursive: true });
+    await fs.promises.copyFile(source.inputUrl, originalPath);
+    await store.addMissionProductAsset({ id: randomUUID(), productId: source.missionProductId, assetType: 'original', relativePath: path.posix.join(source.missionProductId, 'original', originalName), mediaType: 'video/*' });
+  }
+}
+
 async function createFileClipRuntime(streamId, requestBody) {
   const source = sources.get(streamId);
   if (!source || source.sourceType !== "file") {
@@ -1637,11 +1685,16 @@ async function createFileClipRuntime(streamId, requestBody) {
     };
     if (!source.clips) source.clips = new Map();
     source.clips.set(clipId, clip);
+    const clipProduct = await publishDerivedMissionProduct({
+      source, streamId, type: 'clip', sourcePath: outputPath, filename, mediaType: 'video/mp2t',
+      title: `Clip ${streamId} · ${requestedRange.start.toFixed(1)}s–${requestedRange.end.toFixed(1)}s`
+    });
     log.info("clip_export_complete", { streamId, clipId, durationSeconds: clip.durationSeconds, klvEmbedded: clip.klvEmbedded });
     return {
       ok: true,
       clip: {
         ...clip,
+        missionProductId: clipProduct?.id || null,
         downloadUrl: `/sources/${encodeURIComponent(streamId)}/clips/${encodeURIComponent(clipId)}/download`
       }
     };
@@ -1722,6 +1775,12 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
       outputPath
     ], { label: "authoritative snapshot", timeoutMs: AUTHORITATIVE_SNAPSHOT_TIMEOUT_MS });
 
+    const baseMs = Number(sourceStates.get(streamId)?.manualVideoStartUtcMs);
+    const snapshotTimeMs = Number.isFinite(baseMs) ? Math.round(baseMs + normalizedTimeSeconds * 1000) : null;
+    const snapshotProduct = await publishDerivedMissionProduct({
+      source, streamId, type: 'snapshot', sourcePath: outputPath, filename, mediaType: 'image/jpeg',
+      title: `Snapshot ${streamId} · ${normalizedTimeSeconds.toFixed(1)}s`, temporalStartMs: snapshotTimeMs, temporalEndMs: snapshotTimeMs
+    });
     log.info("authoritative_snapshot_ready", { streamId, snapshotId, sourceInputPath, timeSeconds: normalizedTimeSeconds });
     return res.download(outputPath, filename, (error) => {
       void fs.promises.rm(outputPath, { force: true }).catch(() => {});
@@ -1752,6 +1811,7 @@ async function startSourceRuntime(requestBody, requestId) {
   inputUrl,
   sourceType: requestedSourceType = "stream",
   assetId,
+  missionId,
   hlsMode: requestedHlsMode = "passthrough",
   webRtcMode: requestedWebRtcMode = "auto",
   hlsSegmentSeconds = 1,
@@ -1769,7 +1829,7 @@ async function startSourceRuntime(requestBody, requestId) {
       ? resolveUploadedVideo(streamId, assetId)
       : (typeof inputUrl === "string" ? inputUrl.trim() : "");
     requestedStreamId = streamId;
-    if (!streamId || !resolvedInputUrl) throw new Error("streamId and inputUrl required");
+    if (!streamId || !resolvedInputUrl || !missionId) throw new Error("streamId, inputUrl, and missionId are required");
 
     let sourceProbe = null;
     let fileDurationSeconds = null;
@@ -1849,6 +1909,7 @@ async function startSourceRuntime(requestBody, requestId) {
       ingestRunning: false,
       inputUrl: resolvedInputUrl,
       sourceType,
+      missionId,
       webRtcAvailable: sourceType !== "file",
       hlsMode,
       hlsEffectiveMode,
@@ -2063,10 +2124,19 @@ async function startSourceRuntime(requestBody, requestId) {
       });
     }
 
+    const catalogProduct = await store.createMissionProduct({
+      id: randomUUID(), missionId, sourceStreamId: streamId, type: 'fmv',
+      title: `FMV ${streamId}`, description: `Auto-published ${sourceType} FMV source.`,
+      temporalStartMs: null, temporalEndMs: null,
+      thumbnailUrl: `/hls/${encodeURIComponent(streamId)}/poster.jpg`
+    });
+    await store.syncMissionProductCoverageForStream(streamId);
     sources.set(streamId, {
       streamId,
       inputUrl: resolvedInputUrl,
       sourceType,
+      missionId,
+      missionProductId: catalogProduct.id,
       mode,
       hlsMode,
       hlsEffectiveMode,
@@ -2302,6 +2372,8 @@ async function stopSourceRuntime(streamId) {
     etaSeconds: null
   });
   sources.delete(streamId);
+
+  await archiveFmvMissionProduct(s, streamId).catch((error) => log.warn('mission_product_fmv_archive_error', { streamId, error: serializeError(error) }));
 
   await stopKlvStreamWorker(s.klvWorker);
   await stopHlsRecorder(s.hls);
@@ -2553,7 +2625,7 @@ app.use(createKlvRouter({
   serializeError
 }));
 // ---------- API routers ----------
-app.use(createTargetLogRouter({ store, log, serializeError, resolveStreamRecordingDir }));
+app.use(createTargetLogRouter({ store, log, serializeError, resolveStreamRecordingDir, sources }));
 app.use(createWebrtcRouter({ sfuClient, log, serializeError, sleep }));
 app.use(createMetricsRouter({
   getRuntimeMetricsSnapshot,

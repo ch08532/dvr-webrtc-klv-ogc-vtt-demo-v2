@@ -22,6 +22,7 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
       description: "Starts live ingest, HLS/KLV processing, and a WebRTC producer. The job completes once the source is running.",
       inputs: {
         streamId: { schema: { type: "string" } },
+        missionId: { schema: { type: "string", format: "uuid", description: "Catalog mission that owns this FMV and its derived products." } },
         inputUrl: { schema: { type: "string", format: "uri" } },
         hlsMode: { schema: { type: "string", enum: ["passthrough", "abr"], default: "passthrough" } },
         webRtcMode: { schema: { type: "string", enum: ["auto", "copy", "transcode"], default: "auto" } },
@@ -39,6 +40,7 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
       description: "Packages an uploaded FMV asset into HLS, VTT, and Moving Features resources. The job completes when finalization is ready.",
       inputs: {
         streamId: { schema: { type: "string" } },
+        missionId: { schema: { type: "string", format: "uuid", description: "Catalog mission that owns this FMV and its derived products." } },
         assetId: { schema: { type: "string" } },
         hlsMode: { schema: { type: "string", enum: ["passthrough", "abr"], default: "passthrough" } },
         hlsSegmentSeconds: { schema: { type: "number", default: 1 } },
@@ -198,7 +200,7 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
     const definition = processDefinitions[req.params.processId];
     if (!definition) return res.status(404).json({ detail: "Process not found" });
     const inputs = req.body?.inputs && typeof req.body.inputs === "object" ? req.body.inputs : req.body || {};
-    if (!inputs.streamId || (definition.id === "provision-live-fmv" && !inputs.inputUrl) || (definition.id === "package-fmv-file" && !inputs.assetId)) {
+    if (!inputs.streamId || !inputs.missionId || (definition.id === "provision-live-fmv" && !inputs.inputUrl) || (definition.id === "package-fmv-file" && !inputs.assetId)) {
       return res.status(400).json({ detail: "Required process inputs are missing" });
     }
     const job = { id: randomUUID(), processId: definition.id, inputs, streamId: String(inputs.streamId), requestId: req.requestId, status: "accepted", message: "Job accepted", progress: 0, created: new Date().toISOString(), started: null, finished: null, results: null };

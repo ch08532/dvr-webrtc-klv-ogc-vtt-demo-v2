@@ -82,6 +82,7 @@ router.put("/sources/:streamId/manual-video-time-anchor", async (req, res) => {
       return res.status(409).json({ ok: false, error: "mission timestamp is available once the file is playable" });
     }
     const anchor = await store.setManualVideoTimeAnchor(streamId, req.body?.firstFrameUtcMs);
+    await store.updateMissionProductTemporalExtentForStream(streamId, anchor.firstFrameUtcMs, state?.durationSeconds ?? source?.durationSeconds ?? null);
     setSourceState(streamId, { manualVideoStartUtcMs: anchor.firstFrameUtcMs });
     res.json({ ok: true, streamId, manualVideoStartUtcMs: anchor.firstFrameUtcMs, updatedAt: anchor.updatedAt, state: getSourceRuntime(streamId) });
   } catch (error) {

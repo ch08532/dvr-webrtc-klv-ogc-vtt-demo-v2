@@ -92,6 +92,7 @@ Thumbs.db
 # Project specific
 .runtime/
 recordings/
+mission-products/
 videos/
 db/
 public/

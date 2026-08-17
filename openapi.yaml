@@ -18,7 +18,64 @@ tags:
   - name: Target Log
   - name: WebRTC
   - name: OGC Processes
+  - name: Mission Catalog
+  - name: OGC Records
 paths:
+  /mission-operations:
+    get:
+      tags: [Mission Catalog]
+      summary: List operations used to organize mission products
+      responses: { '200': { description: Operation list } }
+    post:
+      tags: [Mission Catalog]
+      summary: Create an operation
+      responses: { '201': { description: Operation created } }
+  /missions:
+    get:
+      tags: [Mission Catalog]
+      summary: List missions and their SpatiaLite coverage areas
+      responses: { '200': { description: Mission list } }
+    post:
+      tags: [Mission Catalog]
+      summary: Create a mission with a required WGS84 bounding box
+      responses: { '201': { description: Mission created } }
+  /mission-operations/{operationId}:
+    put:
+      tags: [Mission Catalog]
+      summary: Update an operation title or description
+      responses: { '200': { description: Operation updated } }
+    delete:
+      tags: [Mission Catalog]
+      summary: Delete an empty operation
+      responses: { '204': { description: Operation deleted }, '409': { description: Operation still has missions } }
+  /missions/{missionId}:
+    put:
+      tags: [Mission Catalog]
+      summary: Update a mission, its operation, or its WGS84 coverage area
+      responses: { '200': { description: Mission updated } }
+    delete:
+      tags: [Mission Catalog]
+      summary: Delete a mission with no mission products
+      responses: { '204': { description: Mission deleted }, '409': { description: Mission still has products } }
+  /mission-products:
+    get:
+      tags: [Mission Catalog]
+      summary: Search application catalog products by metadata, time, and spatial extent
+      responses: { '200': { description: Product search result } }
+    post:
+      tags: [Mission Catalog]
+      summary: Publish a catalog product
+      responses: { '201': { description: Product created } }
+  /ogc/collections/mission-products:
+    get:
+      tags: [OGC Records]
+      summary: Describe the Mission Products OGC API - Records collection
+      responses: { '200': { description: Record collection } }
+  /ogc/collections/mission-products/items:
+    get:
+      tags: [OGC Records]
+      summary: Search Mission Products records using bbox, datetime, q, type, operationId, and missionId
+      responses: { '200': { description: GeoJSON FeatureCollection } }
   /healthz:
     get:
       tags: [Health]

@@ -7,12 +7,11 @@ import LineString from 'ol/geom/LineString.js';
 import Polygon from 'ol/geom/Polygon.js';
 import TileLayer from 'ol/layer/Tile.js';
 import VectorLayer from 'ol/layer/Vector.js';
-import OSM from 'ol/source/OSM.js';
-import XYZ from 'ol/source/XYZ.js';
 import VectorSource from 'ol/source/Vector.js';
 import { fromLonLat, toLonLat } from 'ol/proj.js';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style, Text } from 'ol/style.js';
 import 'ol/ol.css';
+import { BASE_MAP_OPTIONS, baseMapAttribution, createBaseMapSource } from './map_base_layers.js';
 
 // Renders KLV geometry carried by the active cue, including the decoder's
 // computed-flat fallback footprint. Terrain correction and terrain-derived
@@ -105,23 +104,6 @@ const getKlvFrameCorners = (telemetry) => {
   }));
   if (!corners.every((corner) => isCoordinate(corner.lat, corner.lon))) return null;
   return corners.some((corner) => Number(corner.lat) !== 0 || Number(corner.lon) !== 0) ? corners : null;
-};
-
-const createBaseMapSource = (baseMap) => {
-  if (baseMap === 'world-imagery') {
-    return new XYZ({
-      url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      attributions: 'Tiles © Esri'
-    });
-  }
-  if (baseMap === 'dark-openstreetmap') {
-    return new XYZ({
-      url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}@2x.png',
-      attributions: '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors',
-      maxZoom: 20
-    });
-  }
-  return new OSM();
 };
 
 /** Compact, dependency-free map-control icons. */
@@ -675,17 +657,11 @@ export default function KlvMap({
       <label className="klv-map-basemap-control">
         <span>Base map</span>
         <select value={baseMap} onChange={(event) => onBaseMapChange(event.target.value)}>
-          <option value="streets">OpenStreetMap</option>
-          <option value="dark-openstreetmap">Dark mode (Alidade)</option>
-          <option value="world-imagery">World Imagery</option>
+          {BASE_MAP_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       </label>
       <div className="klv-map-attribution">
-        {baseMap === 'world-imagery'
-          ? 'Tiles © Esri'
-          : baseMap === 'dark-openstreetmap'
-            ? '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors'
-            : '© OpenStreetMap contributors'}
+        {baseMapAttribution(baseMap)}
       </div>
       {showLegend ? <div className="klv-map-legend" aria-label="Telemetry map legend">
         <div className="klv-map-legend-title">Telemetry layers</div>
