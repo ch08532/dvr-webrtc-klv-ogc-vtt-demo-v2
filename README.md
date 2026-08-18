@@ -148,6 +148,10 @@ The DVR clip control is available only for an uploaded file source. It builds a 
 
 **Download clip** stream-copies the selected range into a temporary downloadable MPEG-TS file and does not create a mission product. **Download & create product** also stores a managed copy and publishes a child clip product. When the selected range has KLV location data, its catalog coverage and time extent are derived from that range; otherwise the product inherits its mission coverage bbox. FFmpeg preserves source video, audio, and KLV/data streams, and the start can move to a nearby preceding decodable keyframe. There is no re-encode or fixed maximum duration by default; set `MAX_CLIP_DURATION_SECONDS` to impose one.
 
+### Multi-FMV Playback
+
+In **Mission Products**, published FMV search results have an **Add to Playback** action. It adds that FMV to the browser-session-only **Playback** workspace without starting, stopping, or changing the source. The workspace provides independent HLS tiles and source-specific clip, snapshot, target-log, and telemetry-export controls, together with one shared KLV map. The map draws each selected FMV in a stable distinct color and limits its trails to that tile's own playhead. The most recently used tile is focused for shared-map clicks and follow behavior. **Remove from Playback** disposes only that browser tile; it never deletes the mission product or its files.
+
 ### Snapshots
 
 For an uploaded file, the playback snapshot button offers **Authoritative uploaded source (FFmpeg)**, which seeks directly in the uploaded file for a fast capture at the nearest decodable keyframe at or before the current playback time, and **Displayed HLS player frame**, which captures the browser-decoded frame including active zoom/pan and image adjustments (brightness, contrast, and saturation). Live streams retain the adjusted browser-frame snapshot only. These controls are browser-only and never change the delivered or recorded media.

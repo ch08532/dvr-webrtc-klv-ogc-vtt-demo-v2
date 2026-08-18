@@ -209,6 +209,10 @@ The Data tab renders fields from the active WebVTT cue, including `missionId` wh
 
 The **Platform history** and **Frame-center history** controls are independent compact GeoJSON layers. For a file source, the client loads each bounded route and displays only coordinates at or before the active WebVTT cue's mission timestamp. For time-shifted HLS and live WebRTC, it requests the most recent 15 mission minutes and refreshes every five seconds while the relevant map is active. The map appends the active platform or frame-center coordinate in memory to bridge the normal one-segment delay before the next persisted history sample; this does not add a row to SQLite or alter either GeoJSON response.
 
+### 7.1.1 Catalog multi-FMV workspace
+
+Mission Product result cards offer **Add to Playback** only for published FMV products. The client retrieves the full product first and requires a `sourceStreamId` and registered HLS asset, then keeps a de-duplicated product-ID selection in browser memory only. The Playback workspace creates one Video.js instance per item in a responsive grid, so playheads and per-source authoring controls remain independent. A single OpenLayers map overlays all selected platform and frame-center histories, filtered by each tile's current KLV mission time. Product-ID-derived colors remain stable in its legend. The focused tile (last clicked or controlled) receives follow and map-click target authoring; removal disposes its player and removes its map layers without affecting its catalog product, source runtime, or files. Catalog deletion notifies the workspace so any deleted item is removed safely.
+
 ### 7.2 Live WebRTC
 
 For live sources, the browser obtains router RTP capabilities, creates/connects a mediasoup transport, and consumes the RTP producer. A browser Web Worker reconnects to the live KLV WebSocket (`/ws`) without blocking the UI. Clients subscribe by stream ID and receive the latest stored event immediately after subscribing, then new decoded events as they arrive.

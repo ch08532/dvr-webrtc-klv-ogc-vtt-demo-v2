@@ -1016,3 +1016,120 @@ body,
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
+
+.multi-fmv-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(330px, 0.85fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.multi-fmv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.multi-fmv-tile {
+  min-width: 0;
+  border-color: #2b3742;
+}
+
+.multi-fmv-tile.is-focused {
+  border-color: #3fc6d1;
+  box-shadow: 0 0 0 1px rgb(63 198 209 / 28%);
+}
+
+.multi-fmv-video .video-js {
+  width: 100%;
+  background: #080b0f;
+}
+
+.multi-fmv-map-panel {
+  position: sticky;
+  top: 0.75rem;
+  min-height: 480px;
+}
+
+.multi-klv-map-shell {
+  position: relative;
+  min-height: 460px;
+  height: min(68vh, 760px);
+  overflow: hidden;
+  background: #111820;
+}
+
+.multi-klv-map {
+  width: 100%;
+  height: 100%;
+}
+
+.multi-klv-map-tools,
+.multi-klv-map-basemap,
+.multi-klv-map-legend,
+.multi-klv-map-attribution {
+  position: absolute;
+  z-index: 1;
+  color: #e7ecef;
+  background: rgb(10 13 16 / 88%);
+  border: 1px solid #34414d;
+  font-size: 0.75rem;
+}
+
+.multi-klv-map-tools {
+  top: 0.5rem;
+  left: 0.5rem;
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.35rem;
+}
+
+.multi-klv-map-tools button,
+.multi-klv-map-basemap select {
+  color: #e7ecef;
+  background: #19232c;
+  border: 1px solid #42515e;
+  border-radius: 3px;
+  padding: 0.22rem 0.4rem;
+  font: inherit;
+}
+
+.multi-klv-map-tools button.is-active { border-color: #3fc6d1; color: #8ce5eb; }
+
+.multi-klv-map-basemap {
+  top: 0.5rem;
+  right: 0.5rem;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.35rem;
+}
+
+.multi-klv-map-legend {
+  right: 0.5rem;
+  bottom: 1.65rem;
+  max-width: 60%;
+  padding: 0.35rem 0.5rem;
+}
+
+.multi-klv-map-legend > div {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  line-height: 1.45;
+}
+
+.multi-klv-map-legend span { width: 0.65rem; height: 0.65rem; border-radius: 50%; flex: 0 0 auto; }
+
+.multi-klv-map-attribution { right: 0; bottom: 0; padding: 0.15rem 0.35rem; border-width: 1px 0 0 1px; font-size: 0.65rem; }
+
+@media (max-width: 1100px) {
+  .multi-fmv-workspace { grid-template-columns: 1fr; }
+  .multi-fmv-map-panel { position: relative; top: auto; }
+  .multi-klv-map-shell { height: min(62vh, 600px); }
+}
+
+@media (max-width: 520px) {
+  .multi-fmv-grid { grid-template-columns: minmax(0, 1fr); }
+  .multi-klv-map-shell { min-height: 360px; }
+}

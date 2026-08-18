@@ -9,6 +9,7 @@ import { Device } from 'mediasoup-client';
 import { HLS_RENDITIONS } from './hls_ladder.js';
 import KlvMap from './KlvMap.jsx';
 import MissionCatalog from './MissionCatalog.jsx';
+import MultiFmvPlayback from './MultiFmvPlayback.jsx';
 import { useFootprintMap } from './hooks/useFootprintMap.js';
 
 const theme = createTheme({
@@ -558,6 +559,7 @@ function PlaybackControlIcon({ name }) {
 
 function App() {
   const [appPage, setAppPage] = useState('sources');
+  const [playbackProducts, setPlaybackProducts] = useState([]);
   const [sidebarExpanded, setSidebarExpanded] = useState(loadSidebarExpandedPreference);
   const [streamId, setStreamId] = useState('');
   const [catalogMissions, setCatalogMissions] = useState([]);
@@ -948,6 +950,41 @@ function App() {
       markServerOffline(error);
       throw error;
     }
+  };
+
+  const addCatalogProductToPlayback = async (summary) => {
+    if (!summary?.id || playbackProducts.some((product) => product.productId === summary.id)) return;
+    try {
+      const response = await fetch(`/mission-products/${encodeURIComponent(summary.id)}`);
+      const product = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(product.error || `Could not load product (${response.status})`);
+      const hlsAsset = product.assets?.find((asset) => asset.type === 'hls' && /\.m3u8(?:$|[?#])/i.test(asset.href || ''));
+      if (product.type !== 'fmv') throw new Error('Only FMV products can be added to Playback.');
+      if (!product.sourceStreamId) throw new Error('This FMV product has no playback stream.');
+      if (!hlsAsset?.href) throw new Error('This FMV product has no HLS playback asset.');
+      const playbackItem = {
+        productId: product.id,
+        title: product.title,
+        sourceStreamId: product.sourceStreamId,
+        hlsUrl: hlsAsset.href,
+        missionId: product.missionId,
+        missionTitle: product.missionTitle,
+        metadata: product
+      };
+      setPlaybackProducts((current) => current.some((item) => item.productId === product.id) ? current : [...current, playbackItem]);
+      setStatus(`${product.title} was added to Playback.`);
+    } catch (error) {
+      setStatus(`Could not add FMV to Playback: ${error.message}`);
+    }
+  };
+
+  const removePlaybackProduct = (productId) => {
+    setPlaybackProducts((current) => current.filter((product) => product.productId !== productId));
+  };
+
+  const removeDeletedPlaybackProducts = (productIds) => {
+    const removed = new Set(productIds || []);
+    setPlaybackProducts((current) => current.filter((product) => !removed.has(product.productId)));
   };
 
   const stateColor = (state) => {
@@ -4387,7 +4424,7 @@ function App() {
         </AppShell.Navbar>
 
         <AppShell.Main>
-          {appPage === 'catalog' ? <MissionCatalog page="catalog" onStatus={setStatus} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} /> : appPage === 'context' ? <MissionCatalog page="context" onStatus={setStatus} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} /> : (
+          {appPage === 'catalog' ? <MissionCatalog page="catalog" onStatus={setStatus} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} onAddToPlayback={addCatalogProductToPlayback} playbackProductIds={playbackProducts.map((product) => product.productId)} onProductsDeleted={removeDeletedPlaybackProducts} /> : appPage === 'context' ? <MissionCatalog page="context" onStatus={setStatus} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} /> : appPage === 'playback' ? <MultiFmvPlayback products={playbackProducts} onRemove={removePlaybackProduct} baseMap={telemetryBaseMap} onBaseMapChange={changeTelemetryBaseMap} onStatus={setStatus} /> : (
           <Stack spacing="md">
             {!serverOnline ? (
               <Paper shadow="xs" p="md" withBorder>

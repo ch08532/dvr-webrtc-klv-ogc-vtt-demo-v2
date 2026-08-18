@@ -165,7 +165,7 @@ function DraggableModal({ title, children, styles, ...props }) {
   >{children}</Modal>;
 }
 
-export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, baseMap = 'streets', onBaseMapChange = () => {} }) {
+export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, baseMap = 'streets', onBaseMapChange = () => {}, onAddToPlayback = null, playbackProductIds = [], onProductsDeleted = () => {} }) {
   const [operations, setOperations] = useState([]);
   const [missions, setMissions] = useState([]);
   const [products, setProducts] = useState([]);
@@ -445,6 +445,7 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
       setViewer((current) => deletedIds.has(current?.id) ? null : current);
       if (deletedIds.has(selectedId)) setSelectedId(null);
       setProductPendingDelete(null);
+      onProductsDeleted([...deletedIds]);
       await search();
       report('Mission product deleted.');
     } catch (error) {
@@ -607,6 +608,9 @@ export default function MissionCatalog({ page = 'catalog', onStatus = () => {}, 
             <Badge variant="outline">{product.type}</Badge>
           </Group>
           <Group gap={4} mt="xs">
+            {product.type === 'fmv' && onAddToPlayback ? <Button size="xs" variant="light" disabled={playbackProductIds.includes(product.id)} onClick={(event) => { event.stopPropagation(); void onAddToPlayback(product); }}>
+              {playbackProductIds.includes(product.id) ? 'In Playback' : 'Add to Playback'}
+            </Button> : null}
             <Tooltip label={product.geometry ? 'Zoom to feature on map' : 'Product has no map geometry'} withArrow>
               <span><ActionIcon variant="subtle" color="gray" size="sm" onClick={(event) => { event.stopPropagation(); zoomToProduct(product.id); }} disabled={!product.geometry} aria-label="Zoom to product"><ZoomToIcon /></ActionIcon></span>
             </Tooltip>
