@@ -8,18 +8,14 @@ import { Router } from "express";
  */
 export function createSourcesRouter({
   sources, sourceStates, getSourceRuntime, currentSourceState, store,
-  setSourceState, resolveStreamRecordingDir
+  setSourceState, validateStreamId
 }) {
   const router = Router();
-  const validateStreamId = (streamId) => {
-    // Use the recording-root guard before any storage operation.
-    resolveStreamRecordingDir(streamId);
-    return streamId;
-  };
 // Includes transient start/stop entries that have not yet created a source.
 router.get("/sources", (req, res) => {
   const list = [...sources.values()].map((s) => ({
     streamId: s.streamId,
+    productId: s.productId || null,
     inputUrl: s.inputUrl,
     sourceType: s.sourceType,
     webRtcAvailable: s.sourceType !== "file",
@@ -44,6 +40,7 @@ router.get("/sources", (req, res) => {
     if (tracked?.state !== "starting" && tracked?.state !== "stopping") continue;
     list.push({
       streamId,
+      productId: tracked?.productId || null,
       inputUrl: tracked?.inputUrl || null,
       sourceType: tracked?.sourceType || "stream",
       webRtcAvailable: tracked?.webRtcAvailable !== false,

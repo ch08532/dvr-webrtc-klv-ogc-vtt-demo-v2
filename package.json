@@ -4,10 +4,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node scripts/service-manager.mjs start",
+    "start": "set \"SPATIALITE_EXTENSION_PATH=%CD%\\vendor\\spatialite\\win-x64\\mod_spatialite.dll\" && node scripts/service-manager.mjs start",
     "stop": "node scripts/service-manager.mjs stop",
     "status": "node scripts/service-manager.mjs status",
     "start:direct": "node server.js",
+    "test": "node --test",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

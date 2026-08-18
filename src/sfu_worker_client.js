@@ -179,8 +179,8 @@ export async function startSfuWorkerClient({ config, onEvent }) {
       call("connectWebRtcTransport", { transportId, dtlsParameters }),
     consume: (streamId, transportId, rtpCapabilities) =>
       call("consume", { streamId, transportId, rtpCapabilities }),
-    startIngest: ({ streamId, inputUrl, mode, requestId }) =>
-      call("startIngest", { streamId, inputUrl, mode, requestId }, 30000),
+    startIngest: ({ streamId, inputUrl, mode, sdpFile, requestId }) =>
+      call("startIngest", { streamId, inputUrl, mode, sdpFile, requestId }, 30000),
     stopIngest: (streamId) => call("stopIngest", { streamId }, 10000),
     health: () => call("health"),
     debugSnapshot: () => call("debugSnapshot")

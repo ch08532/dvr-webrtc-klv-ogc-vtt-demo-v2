@@ -158,11 +158,12 @@ function waitForExit(proc, timeoutMs) {
 }
 
 /** Starts FFmpeg RTP output and attaches it to the SFU as a video producer. */
-export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, requestId }) {
+export async function startFfmpegRtpIngest({ inputUrl, sfu, streamId, mode, sdpFile: requestedSdpFile, requestId }) {
   const { ip, bindIp, port, rtcpPort } = sfu.ingestInfo(streamId);
 
-  const sdpDir = path.resolve("./db");
-  const sdpFile = path.join(sdpDir, `${streamId}.sdp`);
+  const sdpFile = requestedSdpFile || path.resolve("./db", `${streamId}.sdp`);
+  const sdpDir = path.dirname(sdpFile);
+  await fs.mkdir(sdpDir, { recursive: true });
   await fs.unlink(sdpFile).catch(() => {});
 
   const { args, videoProfile, bufferedInput } = buildArgs({ inputUrl, ip, port, rtcpPort, sdpFile, mode });

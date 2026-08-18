@@ -90,6 +90,7 @@ async function rpc(method, params) {
       const streamId = params?.streamId;
       const inputUrl = params?.inputUrl;
       const mode = params?.mode;
+      const sdpFile = params?.sdpFile;
       const requestId = params?.requestId;
       if (!streamId || !inputUrl) throw new Error("streamId and inputUrl required");
 
@@ -105,6 +106,7 @@ async function rpc(method, params) {
         inputUrl,
         sfu,
         streamId,
+        sdpFile,
         mode,
         requestId
       });

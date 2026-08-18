@@ -89,6 +89,10 @@ async function stageManagedProductAssets(root, productIds) {
   };
 }
 
+function validSourceStreamId(streamId) {
+  return typeof streamId === 'string' && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(streamId);
+}
+
 /** Application CRUD and OGC API - Records endpoints backed by SpatiaLite. */
 export function createMissionCatalogRouter({ store, sources, stopSourceRuntime, missionProductRoot }) {
   const router = Router();
@@ -154,13 +158,23 @@ export function createMissionCatalogRouter({ store, sources, stopSourceRuntime, 
       const activeFmvProductIds = new Set(group.products.filter((product) => product.product_type === 'fmv').map((product) => product.id));
       if (sources && stopSourceRuntime && activeFmvProductIds.size) {
         const matchingStreamIds = [...sources.entries()]
-          .filter(([, source]) => activeFmvProductIds.has(source?.missionProductId))
+          .filter(([, source]) => activeFmvProductIds.has(source?.productId))
           .map(([streamId]) => streamId);
         for (const streamId of matchingStreamIds) await stopSourceRuntime(streamId);
       }
+      const fmvStreamIds = group.products
+        .filter((product) => product.product_type === 'fmv' && validSourceStreamId(product.source_stream_id))
+        .map((product) => product.source_stream_id);
+      const targetLogStreamIds = group.products
+        .filter((product) => product.product_type === 'target-log' && validSourceStreamId(product.source_stream_id))
+        .map((product) => product.source_stream_id);
       const stagedAssets = await stageManagedProductAssets(missionProductRoot, group.productIds);
       try {
-        await store.deleteMissionProductGroup(group.productIds);
+        await store.deleteMissionProductGroupAndSourceData({
+          productIds: group.productIds,
+          purgeSourceStreamIds: fmvStreamIds,
+          purgeTargetLogStreamIds: targetLogStreamIds
+        });
       } catch (error) {
         await stagedAssets.restore();
         throw error;

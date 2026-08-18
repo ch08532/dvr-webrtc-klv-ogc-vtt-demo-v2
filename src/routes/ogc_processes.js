@@ -11,7 +11,7 @@ const jsonLink = (href, title) => ({ href, rel: "item", type: "application/json"
  * service lifetime: a completed provisioning job describes the session it
  * created, but is never the owner of that continuing source session.
  */
-export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime, createFileClipRuntime, getSourceRuntime, subscribeSourceState }) {
+export function createOgcProcessesRouter({ startSourceRuntime, allocateStreamId, allocateSourcePreparation, stopSourceRuntime, createFileClipRuntime, getSourceRuntime, subscribeSourceState }) {
   const router = Router();
   const jobs = new Map();
 
@@ -21,7 +21,7 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
       title: "Provision live FMV",
       description: "Starts live ingest, HLS/KLV processing, and a WebRTC producer. The job completes once the source is running.",
       inputs: {
-        streamId: { schema: { type: "string" } },
+        streamId: { schema: { type: "string", readOnly: true, description: "Service-generated backing ID returned by source allocation." } },
         missionId: { schema: { type: "string", format: "uuid", description: "Catalog mission that owns this FMV and its derived products." } },
         inputUrl: { schema: { type: "string", format: "uri" } },
         hlsMode: { schema: { type: "string", enum: ["passthrough", "abr"], default: "passthrough" } },
@@ -39,7 +39,7 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
       title: "Package FMV file",
       description: "Packages an uploaded FMV asset into HLS, VTT, and Moving Features resources. The job completes when finalization is ready.",
       inputs: {
-        streamId: { schema: { type: "string" } },
+        streamId: { schema: { type: "string", readOnly: true, description: "Service-generated backing ID returned by source allocation." } },
         missionId: { schema: { type: "string", format: "uuid", description: "Catalog mission that owns this FMV and its derived products." } },
         assetId: { schema: { type: "string" } },
         hlsMode: { schema: { type: "string", enum: ["passthrough", "abr"], default: "passthrough" } },
@@ -61,8 +61,13 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
     "export-clip": {
       id: "export-clip",
       title: "Export FMV clip",
-      description: "Creates an exported clip from the existing source clip service.",
-      inputs: { streamId: { schema: { type: "string" } }, startSeconds: { schema: { type: "number" } }, endSeconds: { schema: { type: "number" } } },
+      description: "Creates an exported clip; optionally publishes it as a mission product.",
+      inputs: {
+        streamId: { schema: { type: "string" } },
+        startSeconds: { schema: { type: "number" } },
+        endSeconds: { schema: { type: "number" } },
+        createProduct: { schema: { type: "boolean", default: false, description: "When true, stores a managed clip asset and publishes a child mission product." } }
+      },
       outputs: { clip: { schema: { type: "object" } } }
     }
   };
@@ -70,9 +75,10 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
   const base = "/ogc";
   const jobUrl = (id) => `${base}/jobs/${encodeURIComponent(id)}`;
   const sourceUrl = (streamId) => `/sources/${encodeURIComponent(streamId)}/state`;
-  const sessionResult = (streamId, { live }) => ({
+  const sessionResult = (streamId, { live, productId = null }) => ({
     sourceSession: {
       streamId,
+      productId,
       sourceState: jsonLink(sourceUrl(streamId), "Source lifecycle state"),
       hlsMaster: { href: `/hls/${encodeURIComponent(streamId)}/master.m3u8`, rel: "enclosure", type: "application/vnd.apple.mpegurl", title: "HLS master playlist" },
       subtitles: { href: `/hls/${encodeURIComponent(streamId)}/subtitles.m3u8`, rel: "alternate", type: "application/vnd.apple.mpegurl", title: "KLV WebVTT subtitles" },
@@ -103,6 +109,8 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
     created: job.created,
     started: job.started || null,
     finished: job.finished || null,
+    streamId: job.streamId || null,
+    productId: job.productId || null,
     links: linksForJob(job)
   });
   const setStatus = (job, status, { message, progress, results } = {}) => {
@@ -118,7 +126,10 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
   const finishSourceJob = (job, state) => {
     const live = job.processId === "provision-live-fmv";
     const ready = live ? state.state === "running" : state.state === "ready";
-    if (ready) setStatus(job, "successful", { message: "Source session is ready", progress: 100, results: sessionResult(job.streamId, { live }) });
+    if (ready) {
+      job.productId = state.productId || job.productId || null;
+      setStatus(job, "successful", { message: "Source session is ready", progress: 100, results: sessionResult(job.streamId, { live, productId: job.productId }) });
+    }
     else if (["degraded", "error", "stopped"].includes(state.state)) fail(job, state.lastError || `Source entered ${state.state}`);
   };
   const executeSourceJob = async (job) => {
@@ -129,6 +140,7 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
       if (!live) delete body.webRtcMode;
       const created = await startSourceRuntime(body, job.requestId);
       job.streamId = created.streamId;
+      job.productId = created.productId || created.state?.productId || job.productId || null;
       // Dismissal can arrive while FFmpeg/SFU startup is awaiting.  In that
       // case the source was not yet stoppable at DELETE time, so stop it now.
       if (job.status === "dismissed") {
@@ -196,14 +208,32 @@ export function createOgcProcessesRouter({ startSourceRuntime, stopSourceRuntime
     if (!definition) return res.status(404).json({ detail: "Process not found" });
     res.json({ ...definition, jobControlOptions: ["async-execute"], outputTransmission: ["value", "reference"], links: [{ href: `${base}/processes/${definition.id}/execution`, rel: "execute", type: "application/json" }] });
   });
-  router.post("/processes/:processId/execution", (req, res) => {
+  router.post("/processes/:processId/execution", async (req, res) => {
     const definition = processDefinitions[req.params.processId];
     if (!definition) return res.status(404).json({ detail: "Process not found" });
-    const inputs = req.body?.inputs && typeof req.body.inputs === "object" ? req.body.inputs : req.body || {};
-    if (!inputs.streamId || !inputs.missionId || (definition.id === "provision-live-fmv" && !inputs.inputUrl) || (definition.id === "package-fmv-file" && !inputs.assetId)) {
+    const inputs = { ...(req.body?.inputs && typeof req.body.inputs === "object" ? req.body.inputs : req.body || {}) };
+    const requiresMission = SOURCE_PROCESS_IDS.has(definition.id);
+    try {
+      if (requiresMission && !inputs.streamId) {
+        if (allocateSourcePreparation) {
+          const preparation = await allocateSourcePreparation({
+            missionId: inputs.missionId,
+            sourceType: definition.id === 'package-fmv-file' ? 'file' : 'stream'
+          });
+          inputs.streamId = preparation.streamId;
+          inputs.productId = preparation.productId;
+        } else {
+          if (!allocateStreamId) return res.status(503).json({ detail: "Source allocation is unavailable" });
+          inputs.streamId = await allocateStreamId();
+        }
+      }
+    } catch (error) {
+      return res.status(500).json({ detail: String(error?.message || error) });
+    }
+    if (!inputs.streamId || (requiresMission && !inputs.missionId) || (definition.id === "provision-live-fmv" && !inputs.inputUrl) || (definition.id === "package-fmv-file" && !inputs.assetId)) {
       return res.status(400).json({ detail: "Required process inputs are missing" });
     }
-    const job = { id: randomUUID(), processId: definition.id, inputs, streamId: String(inputs.streamId), requestId: req.requestId, status: "accepted", message: "Job accepted", progress: 0, created: new Date().toISOString(), started: null, finished: null, results: null };
+    const job = { id: randomUUID(), processId: definition.id, inputs, streamId: String(inputs.streamId), productId: inputs.productId || null, requestId: req.requestId, status: "accepted", message: "Job accepted", progress: 0, created: new Date().toISOString(), started: null, finished: null, results: null };
     jobs.set(job.id, job);
     execute(job);
     res.status(201).location(jobUrl(job.id)).json(publicJob(job));

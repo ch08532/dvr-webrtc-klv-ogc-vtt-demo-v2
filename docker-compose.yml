@@ -5,6 +5,6 @@ services:
     build: .
     network_mode: host
     volumes:
-      - ./recordings:/app/recordings
+      - ./mission-products:/app/mission-products
       - ./db:/app/db
     restart: unless-stopped

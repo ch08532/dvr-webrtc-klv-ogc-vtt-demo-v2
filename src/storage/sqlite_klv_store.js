@@ -369,6 +369,17 @@ export class SqliteKlvStore {
       temporal_start_ms INTEGER, temporal_end_ms INTEGER, thumbnail_url TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     )`);
+    // A source preparation owns the on-disk workspace before it becomes a
+    // visible catalog product.  This lets large uploads survive a service
+    // restart without publishing a product before it is actually ready.
+    await run(this.db, `CREATE TABLE IF NOT EXISTS source_preparations (
+      product_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL UNIQUE,
+      mission_id TEXT NOT NULL REFERENCES missions(id),
+      source_type TEXT NOT NULL CHECK(source_type IN ('file','stream')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
     await run(this.db, `CREATE TABLE IF NOT EXISTS mission_product_assets (
       id TEXT PRIMARY KEY, product_id TEXT NOT NULL REFERENCES mission_products(id) ON DELETE CASCADE,
       asset_type TEXT NOT NULL, relative_path TEXT NOT NULL, media_type TEXT, created_at TEXT NOT NULL
@@ -381,6 +392,7 @@ export class SqliteKlvStore {
     await run(this.db, "CREATE INDEX IF NOT EXISTS idx_missions_operation ON missions(operation_id)");
     await run(this.db, "CREATE INDEX IF NOT EXISTS idx_products_mission ON mission_products(mission_id, product_type, created_at)");
     await run(this.db, "CREATE INDEX IF NOT EXISTS idx_products_stream ON mission_products(source_stream_id, product_type)");
+    await run(this.db, "CREATE INDEX IF NOT EXISTS idx_source_preparations_stream ON source_preparations(stream_id)");
     await this.ensureSpatialColumn('missions', 'area_geom', 'POLYGON');
     await this.ensureSpatialColumn('mission_products', 'coverage_geom', 'GEOMETRY');
     await this.ensureSpatialColumn('catalog_target_log_entries', 'position_geom', 'POINT');
@@ -707,28 +719,6 @@ export class SqliteKlvStore {
     return { tMs: row.t_ms, data: JSON.parse(row.json) };
   }
 
-  /** Deletes all persisted telemetry associated with a source. */
-  async purgeStream(streamId) {
-    const result = await retryBusyWrite("purge_stream", async () => {
-      await run(this.db, "BEGIN IMMEDIATE");
-      try {
-        const events = await run(this.db, `DELETE FROM klv_events WHERE stream_id=?`, [streamId]);
-        await run(this.db, `DELETE FROM platform_track_points WHERE stream_id=?`, [streamId]);
-        await run(this.db, `DELETE FROM frame_center_track_points WHERE stream_id=?`, [streamId]);
-        await run(this.db, `DELETE FROM stream_mission_timeline WHERE stream_id=?`, [streamId]);
-        await run(this.db, `DELETE FROM stream_manual_video_time_anchor WHERE stream_id=?`, [streamId]);
-        await run(this.db, "COMMIT");
-        return events;
-      } catch (error) {
-        try { await run(this.db, "ROLLBACK"); } catch {}
-        throw error;
-      }
-    });
-    const deleted = result?.changes ?? 0;
-    log.info("purge_stream", { streamId, deleted });
-    return deleted;
-  }
-
   /** Returns the optional operator-supplied UTC time for the first video frame. */
   async getManualVideoTimeAnchor(streamId) {
     const row = await get(this.db, `SELECT first_frame_utc_ms, updated_at FROM stream_manual_video_time_anchor WHERE stream_id=?`, [streamId]);
@@ -1019,51 +1009,6 @@ export class SqliteKlvStore {
     return (result?.changes ?? 0) > 0;
   }
 
-  /** Removes all target-log data when a stream is explicitly reset for a new source. */
-  async purgeTargetLog(streamId) {
-    return retryBusyWrite("target_log_purge_stream", async () => {
-      await run(this.db, "BEGIN IMMEDIATE");
-      try {
-        const entries = await run(this.db, `DELETE FROM target_log_entries WHERE stream_id=?`, [streamId]);
-        const fields = await run(this.db, `DELETE FROM target_log_fields WHERE stream_id=?`, [streamId]);
-        await run(this.db, "COMMIT");
-        return { entries: entries?.changes ?? 0, fields: fields?.changes ?? 0 };
-      } catch (error) {
-        try { await run(this.db, "ROLLBACK"); } catch {}
-        throw error;
-      }
-    });
-  }
-
-  /** Clears telemetry and target-log data for every stream in one startup transaction. */
-  async purgeAllMissionData() {
-    log.warn("purge_all_mission_data_start", { dbPath: this.dbPath });
-    const result = await retryBusyWrite("startup_purge_all_mission_data", async () => {
-      await run(this.db, "BEGIN IMMEDIATE");
-      try {
-        const telemetry = await run(this.db, `DELETE FROM klv_events`);
-        await run(this.db, `DELETE FROM platform_track_points`);
-        await run(this.db, `DELETE FROM frame_center_track_points`);
-        await run(this.db, `DELETE FROM stream_mission_timeline`);
-        await run(this.db, `DELETE FROM stream_manual_video_time_anchor`);
-        const entries = await run(this.db, `DELETE FROM target_log_entries`);
-        const fields = await run(this.db, `DELETE FROM target_log_fields`);
-        await run(this.db, "COMMIT");
-        const deleted = {
-          telemetry: telemetry?.changes ?? 0,
-          targetLog: { entries: entries?.changes ?? 0, fields: fields?.changes ?? 0 }
-        };
-        log.info("startup_purge_all_mission_data", deleted);
-        return deleted;
-      } catch (error) {
-        try { await run(this.db, "ROLLBACK"); } catch {}
-        throw error;
-      }
-    });
-    log.warn("purge_all_mission_data_complete", { dbPath: this.dbPath, ...result });
-    return result;
-  }
-
   async listMissionOperations() {
     return (await all(this.db, "SELECT * FROM mission_operations ORDER BY title COLLATE NOCASE")).map((row) => ({
       id: row.id, title: row.title, description: row.description || '', createdAt: row.created_at, updatedAt: row.updated_at
@@ -1151,6 +1096,38 @@ export class SqliteKlvStore {
     return this.getMissionProduct(id);
   }
 
+  async createSourcePreparation({ productId, streamId, missionId, sourceType }) {
+    if (!productId || !streamId || !missionId || !['file', 'stream'].includes(sourceType)) {
+      throw new Error('valid product ID, stream ID, mission, and source type are required');
+    }
+    const now = new Date().toISOString();
+    await run(this.db, `INSERT INTO source_preparations(product_id,stream_id,mission_id,source_type,created_at,updated_at)
+      VALUES(?,?,?,?,?,?)`, [productId, streamId, missionId, sourceType, now, now]);
+    return { productId, streamId, missionId, sourceType, createdAt: now, updatedAt: now };
+  }
+
+  async getSourcePreparationForStream(streamId) {
+    const row = await get(this.db, `SELECT product_id, stream_id, mission_id, source_type, created_at, updated_at
+      FROM source_preparations WHERE stream_id=?`, [streamId]);
+    return row ? {
+      productId: row.product_id, streamId: row.stream_id, missionId: row.mission_id,
+      sourceType: row.source_type, createdAt: row.created_at, updatedAt: row.updated_at
+    } : null;
+  }
+
+  async listSourcePreparations() {
+    const rows = await all(this.db, `SELECT product_id, stream_id, mission_id, source_type, created_at, updated_at
+      FROM source_preparations ORDER BY created_at`);
+    return rows.map((row) => ({
+      productId: row.product_id, streamId: row.stream_id, missionId: row.mission_id,
+      sourceType: row.source_type, createdAt: row.created_at, updatedAt: row.updated_at
+    }));
+  }
+
+  async deleteSourcePreparation(streamId) {
+    await run(this.db, 'DELETE FROM source_preparations WHERE stream_id=?', [streamId]);
+  }
+
   async updateMissionProduct({ id, title, description = '' }) {
     const cleanTitle = String(title || '').trim();
     if (!cleanTitle) throw new Error('product name is required');
@@ -1181,12 +1158,47 @@ export class SqliteKlvStore {
     return { productIds: products.map((product) => product.id), products };
   }
 
+  /** Returns the retained FMV product that reserves a source stream ID. */
+  async getFmvMissionProductForSourceStream(streamId) {
+    return get(this.db, `SELECT id, mission_id, title FROM mission_products
+      WHERE source_stream_id=? AND product_type='fmv' ORDER BY created_at DESC LIMIT 1`, [streamId]);
+  }
+
   async deleteMissionProductGroup(productIds) {
     const ids = Array.from(new Set(productIds || []));
     if (!ids.length) return;
     await retryBusyWrite('delete_mission_product_group', async () => {
       await run(this.db, 'BEGIN IMMEDIATE');
       try {
+        for (const id of ids) await run(this.db, 'DELETE FROM mission_products WHERE id=?', [id]);
+        await run(this.db, 'COMMIT');
+      } catch (error) {
+        await run(this.db, 'ROLLBACK').catch(() => {});
+        throw error;
+      }
+    });
+  }
+
+  /** Deletes a product group and its FMV/target-log source data atomically. */
+  async deleteMissionProductGroupAndSourceData({ productIds, purgeSourceStreamIds = [], purgeTargetLogStreamIds = [] }) {
+    const ids = Array.from(new Set(productIds || []));
+    const sourceStreamIds = Array.from(new Set(purgeSourceStreamIds || []));
+    const targetLogStreamIds = Array.from(new Set([...sourceStreamIds, ...(purgeTargetLogStreamIds || [])]));
+    if (!ids.length) return;
+    await retryBusyWrite('delete_mission_product_group_and_source_data', async () => {
+      await run(this.db, 'BEGIN IMMEDIATE');
+      try {
+        for (const streamId of sourceStreamIds) {
+          await run(this.db, 'DELETE FROM klv_events WHERE stream_id=?', [streamId]);
+          await run(this.db, 'DELETE FROM platform_track_points WHERE stream_id=?', [streamId]);
+          await run(this.db, 'DELETE FROM frame_center_track_points WHERE stream_id=?', [streamId]);
+          await run(this.db, 'DELETE FROM stream_mission_timeline WHERE stream_id=?', [streamId]);
+          await run(this.db, 'DELETE FROM stream_manual_video_time_anchor WHERE stream_id=?', [streamId]);
+        }
+        for (const streamId of targetLogStreamIds) {
+          await run(this.db, 'DELETE FROM target_log_entries WHERE stream_id=?', [streamId]);
+          await run(this.db, 'DELETE FROM target_log_fields WHERE stream_id=?', [streamId]);
+        }
         for (const id of ids) await run(this.db, 'DELETE FROM mission_products WHERE id=?', [id]);
         await run(this.db, 'COMMIT');
       } catch (error) {

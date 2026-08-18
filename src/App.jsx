@@ -559,7 +559,7 @@ function PlaybackControlIcon({ name }) {
 function App() {
   const [appPage, setAppPage] = useState('sources');
   const [sidebarExpanded, setSidebarExpanded] = useState(loadSidebarExpandedPreference);
-  const [streamId, setStreamId] = useState('stream1');
+  const [streamId, setStreamId] = useState('');
   const [catalogMissions, setCatalogMissions] = useState([]);
   const [catalogMissionId, setCatalogMissionId] = useState('');
   const [sourceType, setSourceType] = useState('stream');
@@ -1825,7 +1825,7 @@ function App() {
   const startSource = async () => {
     if (!canStartSource) return;
     startRequestInFlightRef.current = true;
-    provisioningStreamRef.current = streamId;
+    let targetStreamId = '';
     setStartRequestInFlight(true);
     resetViewerSettingsForNewSource();
     // A replacement source keeps the same HLS URL for its stream id. Dispose
@@ -1849,12 +1849,22 @@ function App() {
     hlsQualityRef.current = 'auto';
     setHlsQuality('auto');
     setHlsQualityControlAvailable(false);
-    const startingRuntime = { streamId, sourceType: selectedFileSource ? 'file' : sourceType, state: 'starting', running: false, lastError: null };
-    streamRuntimeRef.current = startingRuntime;
-    setStreamRuntime(startingRuntime);
     try {
-      setStatus('Clearing previous recording artifacts...');
-      await api(`/sources/${encodeURIComponent(streamId)}/reset`, { method: 'POST' });
+      setStatus('Creating FMV product...');
+      const allocation = await api('/sources/allocate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ missionId: catalogMissionId, sourceType: selectedFileSource ? 'file' : 'stream' })
+      });
+      if (!allocation?.ok || !allocation?.streamId) throw new Error(allocation?.error || 'Could not allocate the FMV source.');
+      targetStreamId = allocation.streamId;
+      setStreamId(targetStreamId);
+      provisioningStreamRef.current = targetStreamId;
+      const startingRuntime = { streamId: targetStreamId, sourceType: selectedFileSource ? 'file' : sourceType, state: 'starting', running: false, lastError: null };
+      streamRuntimeRef.current = startingRuntime;
+      setStreamRuntime(startingRuntime);
+      setStatus('Preparing generated FMV source...');
+      await api(`/sources/${encodeURIComponent(targetStreamId)}/reset`, { method: 'POST' });
       let assetId = null;
       if (selectedFileSource) {
         clipRangeStreamRef.current = null;
@@ -1865,7 +1875,7 @@ function App() {
       if (sourceType === 'file') {
         setFileStartProgress({ phase: 'uploading', loadedBytes: 0, totalBytes: videoFile.size });
         setStatus(`Uploading ${videoFile.name}...`);
-        const uploadResult = await uploadVideoFile(videoFile, streamId);
+        const uploadResult = await uploadVideoFile(videoFile, targetStreamId);
         if (!uploadResult?.ok || !uploadResult.assetId) {
           throw new Error(uploadResult?.error || 'Video upload failed');
         }
@@ -1878,7 +1888,7 @@ function App() {
         const copyResult = await api('/uploads/video/local-copy', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ streamId, inputPath: localServerPath.trim() })
+          body: JSON.stringify({ streamId: targetStreamId, inputPath: localServerPath.trim() })
         });
         if (!copyResult?.ok || !copyResult.assetId) {
           throw new Error(copyResult?.error || 'Local server video copy failed');
@@ -1895,7 +1905,7 @@ function App() {
         headers: { "content-type": "application/json", Prefer: "respond-async" },
         body: JSON.stringify({
           inputs: {
-            streamId,
+            streamId: targetStreamId,
             missionId: catalogMissionId,
             inputUrl: sourceType === 'stream' ? inputUrl : undefined,
             assetId,
@@ -1912,19 +1922,19 @@ function App() {
       if (!result?.jobID) throw new Error(result?.detail || result?.error || 'OGC process job was not accepted');
       setFileStartProgress(null);
       setStatus(JSON.stringify(result, null, 2));
-      await refreshStreamState(streamId);
+      await refreshStreamState(targetStreamId);
       await refreshSources({ silent: true });
-      void monitorOgcProvisionJob(result.jobID, streamId, selectedFileSource).catch((error) => {
+      void monitorOgcProvisionJob(result.jobID, targetStreamId, selectedFileSource).catch((error) => {
         setStatus(`FMV provisioning failed: ${String(error?.message || error)}`);
-        refreshStreamState(streamId).catch(() => {});
+        refreshStreamState(targetStreamId).catch(() => {});
       });
     } catch (error) {
-      if (provisioningStreamRef.current === streamId) provisioningStreamRef.current = null;
+      if (provisioningStreamRef.current === targetStreamId) provisioningStreamRef.current = null;
       setFileStartProgress(null);
       setStatus(`Start source failed: ${String(error?.message || error)}`);
       setStreamRuntime((prev) => ({
         ...prev,
-        streamId,
+        streamId: targetStreamId || prev?.streamId || null,
         // A rejected create request has no published source runtime to stop.
         // Keep the diagnostic but return the controls to their retryable state.
         state: serverOnlineRef.current ? 'stopped' : 'offline',
@@ -3004,7 +3014,7 @@ function App() {
     updateClipBoundary(boundary, Number(player.currentTime?.() || 0));
   };
 
-  const createClip = async () => {
+  const createClip = async ({ createProduct = false } = {}) => {
     if (!currentSourceIsFile || streamRuntime?.state !== 'ready') {
       setStatus('Clipping is available only after an uploaded video is ready.');
       return;
@@ -3012,18 +3022,21 @@ function App() {
     setClipInFlight(true);
     setClipResult(null);
     try {
-      setStatus('Creating clip export job...');
+      setStatus(createProduct ? 'Creating clip and publishing mission product...' : 'Creating clip download...');
       const accepted = await api('/ogc/processes/export-clip/execution', {
         method: 'POST',
         headers: { 'content-type': 'application/json', Prefer: 'respond-async' },
-        body: JSON.stringify({ inputs: { streamId, startSeconds: clipStartSeconds, endSeconds: clipEndSeconds } })
+        body: JSON.stringify({ inputs: { streamId, startSeconds: clipStartSeconds, endSeconds: clipEndSeconds, createProduct } })
       });
       if (!accepted?.jobID) throw new Error(accepted?.detail || accepted?.error || 'Clip export job was not accepted');
       const { outputs } = await waitForOgcProcessResults(accepted.jobID);
       const clip = outputs?.clip;
       if (!clip?.downloadUrl) throw new Error('Clip export job returned no download link');
       setClipResult(clip);
-      setStatus(`Clip ready: ${clip.filename}. Video copied directly from the uploaded source near a keyframe boundary; KLV embedded: ${clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
+      const catalogMessage = clip.productId
+        ? 'Mission product was created and stored.'
+        : 'Download-only clip; no mission product was created.';
+      setStatus(`Clip ready: ${clip.filename}. ${catalogMessage} Video copied directly from the uploaded source near a keyframe boundary; KLV embedded: ${clip.klvEmbedded ? 'yes' : 'not present in source'}.`);
       const download = document.createElement('a');
       download.href = clip.downloadUrl;
       download.download = clip.filename;
@@ -3031,7 +3044,7 @@ function App() {
       download.click();
       download.remove();
     } catch (error) {
-      setStatus(`Clip creation failed: ${String(error?.message || error)}`);
+      setStatus(`${createProduct ? 'Clip download and product publication' : 'Clip download'} failed: ${String(error?.message || error)}`);
     } finally {
       setClipInFlight(false);
     }
@@ -4388,12 +4401,6 @@ function App() {
             <Paper id="sources" shadow="xs" p="md">
               <Text size="lg" fw={500}>Start Source</Text>
               <Group mt="xs" align="end" wrap="nowrap">
-                <TextInput
-                  w={180}
-                  label="Stream ID"
-                  value={streamId}
-                  onChange={(e) => setStreamId(e.target.value)}
-                />
                 <Select
                   w={230}
                   label="Mission"
@@ -4968,18 +4975,21 @@ function App() {
                            <Group mt="xs" gap="xs" wrap="wrap">
                              <Button size="xs" variant="default" onClick={() => setClipBoundaryAtPlayhead('start')} disabled={!clipWidgetReady || clipInFlight}>Set start at playhead</Button>
                              <Button size="xs" variant="default" onClick={() => setClipBoundaryAtPlayhead('end')} disabled={!clipWidgetReady || clipInFlight}>Set end at playhead</Button>
-                             <Button size="xs" color="dark" onClick={createClip} loading={clipInFlight} disabled={!clipExportReady || clipDurationSeconds < 0.25}>
-                               Create &amp; download clip
+                             <Button size="xs" color="dark" onClick={() => createClip()} loading={clipInFlight} disabled={!clipExportReady || clipDurationSeconds < 0.25}>
+                               Download clip
+                             </Button>
+                             <Button size="xs" color="blue" onClick={() => createClip({ createProduct: true })} loading={clipInFlight} disabled={!clipExportReady || clipDurationSeconds < 0.25}>
+                               Download &amp; create product
                              </Button>
                            </Group>
                            {!clipExportReady ? (
                              <Text size="xs" c="yellow" mt="xs">Future source time is grayed out. Clip handles cannot move past the last completed HLS segment; download becomes available when file packaging completes.</Text>
                            ) : null}
                            <Text size="xs" c="dimmed" mt="xs">
-                             Downloads directly from the uploaded source as MPEG-TS with copied video, audio, and KLV. Starts may move to a preceding keyframe; live streams cannot be clipped.
+                             Downloads copy the uploaded source as MPEG-TS with video, audio, and KLV. Creating a product also stores a cataloged copy; its KLV coverage is used when available, otherwise the mission bbox is inherited.
                            </Text>
                            {clipResult ? (
-                             <Text size="xs" c="teal" mt={4}>Ready: {clipResult.filename} · uploaded source copied · embedded KLV: {clipResult.klvEmbedded ? 'yes' : 'not present in source'}</Text>
+                             <Text size="xs" c="teal" mt={4}>Ready: {clipResult.filename} · {clipResult.productId ? 'mission product created' : 'download only'} · embedded KLV: {clipResult.klvEmbedded ? 'yes' : 'not present in source'}</Text>
                            ) : null}
                          </div>
                        ) : (

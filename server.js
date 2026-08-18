@@ -25,6 +25,7 @@ import { createKlvRouter } from "./src/routes/klv.js";
 import { createSourcesRouter } from "./src/routes/sources.js";
 import { createOgcProcessesRouter } from "./src/routes/ogc_processes.js";
 import { createMissionCatalogRouter } from "./src/routes/mission_catalog.js";
+import { deriveClipProductMetadata } from "./src/clip_product_metadata.js";
 import { getProcessCpuPercents, getRuntimeMetricsSnapshot } from "./src/runtime_metrics.js";
 import { getGpuMetrics } from "./src/gpu_metrics.js";
 import { checkMediaTools } from "./src/media_tool_preflight.js";
@@ -57,7 +58,6 @@ const log = createServiceLogger("server");
 const mediaTools = checkMediaTools({ ffprobeCommand: FFPROBE_BIN });
 log[mediaTools.ok ? "info" : "warn"]("media_tools_checked", mediaTools);
 
-const RECORD_ROOT = path.resolve("./recordings");
 const DB_DIR = path.resolve("./db");
 const MISSION_PRODUCT_ROOT = path.resolve(process.env.MISSION_PRODUCT_ROOT || "./mission-products");
 const SOURCE_ASSET_DIRNAME = "source";
@@ -91,21 +91,9 @@ const KLV_FINALIZE_MS_PER_SEGMENT = Math.max(50, Number(process.env.KLV_FINALIZE
 const KLV_FINALIZE_MAX_TIMEOUT_MS = Math.max(KLV_FINALIZE_MIN_TIMEOUT_MS, Number(process.env.KLV_FINALIZE_MAX_TIMEOUT_MS || 2 * 60 * 60 * 1000));
 const PLATFORM_HISTORY_MAX_POINTS = Math.max(2, Math.min(10_000, Number(process.env.PLATFORM_HISTORY_MAX_POINTS || 5000)));
 
-fs.mkdirSync(RECORD_ROOT, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
 fs.mkdirSync(MISSION_PRODUCT_ROOT, { recursive: true });
 if (!process.env.LOCAL_VIDEO_SOURCE_ROOTS) fs.mkdirSync(DEFAULT_LOCAL_VIDEO_SOURCE_ROOT, { recursive: true });
-
-/** Removes generated recording artifacts before a new service session begins. */
-async function purgeRecordingsOnStartup() {
-  const expectedRoot = path.resolve("./recordings");
-  if (RECORD_ROOT !== expectedRoot || path.basename(RECORD_ROOT).toLowerCase() !== "recordings") {
-    throw new Error(`refusing to purge unexpected recording root: ${RECORD_ROOT}`);
-  }
-  await fs.promises.rm(RECORD_ROOT, { recursive: true, force: true });
-  await fs.promises.mkdir(RECORD_ROOT, { recursive: true });
-  log.info("startup_recordings_purge_complete", { recordRoot: RECORD_ROOT });
-}
 
 const activeResumableUploads = new Set();
 const clipThumbnailJobs = new Map();
@@ -142,14 +130,11 @@ server.on("connection", (socket) => {
 });
 
 // ---------- Storage ----------
-await purgeRecordingsOnStartup();
 const store = new SqliteKlvStore({
   dbPath: path.join(DB_DIR, "klv.sqlite"),
   spatialiteExtensionPath: process.env.SPATIALITE_EXTENSION_PATH
 });
 await store.init();
-const startupDatabasePurge = await store.purgeAllMissionData();
-log.info("startup_database_purge_complete", startupDatabasePurge);
 
 // ---------- Sources ----------
 /**
@@ -163,6 +148,7 @@ log.info("startup_database_purge_complete", startupDatabasePurge);
  */
 const sources = new Map();
 const sourceStates = new Map();
+const sourcePreparations = new Map((await store.listSourcePreparations()).map((preparation) => [preparation.streamId, preparation]));
 
 const TRANSPORT_INTEGRITY_FINDINGS = [
   {
@@ -322,22 +308,43 @@ function resolveWebRtcEncodeMode(webRtcMode, probe) {
     : "xcode-any";
 }
 
-/** Validates a stream ID and resolves its server-owned recording directory. */
-function resolveStreamRecordingDir(streamId) {
+/** Validates a source's opaque server-owned stream ID. */
+function validateStreamId(streamId) {
   if (typeof streamId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(streamId)) {
     throw new Error("stream ID must contain only letters, numbers, hyphens, or underscores");
   }
-  const outDir = path.resolve(RECORD_ROOT, streamId);
-  if (!outDir.startsWith(`${RECORD_ROOT}${path.sep}`)) throw new Error("invalid stream recording path");
-  return outDir;
+  return streamId;
+}
+
+/** Resolves a product-owned workspace without accepting an arbitrary path. */
+function resolveProductWorkspace(productId) {
+  if (typeof productId !== 'string' || !/^[a-f0-9-]{36}$/i.test(productId)) throw new Error('invalid product ID');
+  const workspace = path.resolve(MISSION_PRODUCT_ROOT, productId);
+  if (!workspace.startsWith(`${MISSION_PRODUCT_ROOT}${path.sep}`)) throw new Error('invalid product workspace path');
+  return workspace;
+}
+
+/** Resolves the workspace for an active or prepared source. */
+function resolveSourceWorkspace(streamId) {
+  validateStreamId(streamId);
+  const productId = sources.get(streamId)?.productId
+    || sourceStates.get(streamId)?.productId
+    || sourcePreparations.get(streamId)?.productId;
+  if (!productId) throw new Error('source product workspace was not found');
+  return resolveProductWorkspace(productId);
 }
 
 /** Resolves the directory holding one stream's authoritative uploaded assets. */
 function resolveSourceAssetDir(streamId) {
-  const outDir = resolveStreamRecordingDir(streamId);
-  const sourceDir = path.resolve(outDir, SOURCE_ASSET_DIRNAME);
-  if (!sourceDir.startsWith(`${outDir}${path.sep}`)) throw new Error("invalid source asset path");
+  const workspace = resolveSourceWorkspace(streamId);
+  const sourceDir = path.resolve(workspace, SOURCE_ASSET_DIRNAME);
+  if (!sourceDir.startsWith(`${workspace}${path.sep}`)) throw new Error("invalid source asset path");
   return sourceDir;
+}
+
+function resolveSourceSdpPath(streamId) {
+  const workspace = resolveSourceWorkspace(streamId);
+  return path.join(workspace, 'private', 'ingest.sdp');
 }
 
 /** Tests whether a candidate is a path inside a configured directory. */
@@ -1001,25 +1008,77 @@ function currentSourceState(streamId) {
   return "stopped";
 }
 
-/** Deletes generated artifacts while preserving authoritative uploaded source files. */
-async function purgeSourceArtifacts(streamId) {
-  const outDir = resolveStreamRecordingDir(streamId);
-  const sourceDir = resolveSourceAssetDir(streamId);
-  const sdpFile = path.join(DB_DIR, `${streamId}.sdp`);
-
-  await fs.promises.mkdir(outDir, { recursive: true });
-  const entries = await fs.promises.readdir(outDir, { withFileTypes: true }).catch((error) => {
-    if (error?.code === "ENOENT") return [];
+/** Prevents a retained FMV session from being overwritten or mixed with a new one. */
+async function assertStreamIdAvailable(streamId, { allowPreparation = false } = {}) {
+  validateStreamId(streamId);
+  if (sourcePreparations.has(streamId) && !allowPreparation) {
+    const error = new Error(`stream ID ${streamId} is already reserved by a source preparation`);
+    error.statusCode = 409;
     throw error;
-  });
-  await Promise.all(entries
-    .filter((entry) => entry.name !== SOURCE_ASSET_DIRNAME)
-    .map((entry) => fs.promises.rm(path.join(outDir, entry.name), { recursive: true, force: true })));
-  await fs.promises.mkdir(sourceDir, { recursive: true });
-  try { await fs.promises.rm(sdpFile, { force: true }); } catch {}
+  }
+  const product = await store.getFmvMissionProductForSourceStream(streamId);
+  if (!product) return;
+  const error = new Error(`stream ID ${streamId} belongs to retained FMV product “${product.title}”; delete that product or choose a new stream ID`);
+  error.statusCode = 409;
+  error.productId = product.id;
+  throw error;
+}
 
-  const deletedEvents = await store.purgeStream(streamId);
-  return { outDir, sdpFile, deletedEvents };
+/** Allocates an opaque, service-owned backing ID for one new FMV product. */
+async function allocateStreamId() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const streamId = `fmv-${randomUUID()}`;
+    if (sources.has(streamId)) continue;
+    if (!await store.getFmvMissionProductForSourceStream(streamId)) return streamId;
+  }
+  throw new Error('could not allocate a unique FMV stream ID');
+}
+
+/** Reserves one future product workspace before an upload or source start. */
+async function allocateSourcePreparation({ missionId, sourceType = 'file' } = {}) {
+  if (!missionId) throw new Error('missionId is required to prepare an FMV source');
+  const normalizedType = normalizeSourceType(sourceType);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const streamId = await allocateStreamId();
+    const productId = randomUUID();
+    try {
+      const preparation = await store.createSourcePreparation({ productId, streamId, missionId, sourceType: normalizedType });
+      await fs.promises.mkdir(resolveProductWorkspace(productId), { recursive: true });
+      sourcePreparations.set(streamId, preparation);
+      return preparation;
+    } catch (error) {
+      await fs.promises.rm(resolveProductWorkspace(productId), { recursive: true, force: true }).catch(() => {});
+      if (error?.code === 'SQLITE_CONSTRAINT') continue;
+      throw error;
+    }
+  }
+  throw new Error('could not reserve a unique FMV source workspace');
+}
+
+async function removeUnpublishedSourcePreparation(streamId) {
+  const preparation = sourcePreparations.get(streamId) || await store.getSourcePreparationForStream(streamId);
+  if (!preparation) return;
+  await fs.promises.rm(resolveProductWorkspace(preparation.productId), { recursive: true, force: true }).catch(() => {});
+  await store.deleteSourcePreparation(streamId).catch(() => {});
+  sourcePreparations.delete(streamId);
+}
+
+async function publishFmvProduct(source) {
+  if (!source?.productId || source.published) return;
+  const product = await store.createMissionProduct({
+    id: source.productId, missionId: source.missionId, sourceStreamId: source.streamId, type: 'fmv',
+    title: `FMV ${source.streamId}`, description: `Published ${source.sourceType} FMV source.`,
+    temporalStartMs: null, temporalEndMs: null,
+    thumbnailUrl: `/hls/${encodeURIComponent(source.streamId)}/poster.jpg`
+  });
+  await store.addMissionProductAsset({
+    id: randomUUID(), productId: product.id, assetType: 'hls',
+    relativePath: path.posix.join(product.id, 'master.m3u8'), mediaType: 'application/vnd.apple.mpegurl'
+  });
+  await store.syncMissionProductCoverageForStream(source.streamId);
+  await store.deleteSourcePreparation(source.streamId);
+  sourcePreparations.delete(source.streamId);
+  source.published = true;
 }
 
 /**
@@ -1043,7 +1102,7 @@ function getFileClipAvailability(streamId, source, tracked) {
     .filter(Boolean))];
   if (!playlistNames.length) playlistNames.push("v0/index.m3u8");
   const availabilities = playlistNames.map((playlistName) => readCompletedHlsPlaylistAvailability({
-    outDir: resolveStreamRecordingDir(streamId),
+    outDir: resolveSourceWorkspace(streamId),
     playlistName
   }));
   const availability = availabilities.reduce((earliest, candidate) => (
@@ -1055,21 +1114,6 @@ function getFileClipAvailability(streamId, source, tracked) {
   };
 }
 
-/** Clears one stream completely before a new Start Source workflow begins. */
-async function resetSourceArtifacts(streamId) {
-  const outDir = resolveStreamRecordingDir(streamId);
-  const sdpFile = path.join(DB_DIR, `${streamId}.sdp`);
-
-  await fs.promises.rm(outDir, { recursive: true, force: true });
-  await fs.promises.rm(sdpFile, { force: true });
-  // Both methods use BEGIN IMMEDIATE on the shared SQLite connection. They
-  // must be serialized; concurrent transactions cause SQLITE_ERROR: cannot
-  // start a transaction within a transaction.
-  const deletedEvents = await store.purgeStream(streamId);
-  const deletedTargetLog = await store.purgeTargetLog(streamId);
-  return { outDir, sdpFile, deletedEvents, deletedTargetLog };
-}
-
 /** Returns the internal runtime handle for an active source, if any. */
 function getSourceRuntime(streamId) {
   const tracked = sourceStates.get(streamId);
@@ -1078,6 +1122,7 @@ function getSourceRuntime(streamId) {
   if (!source) {
     return {
       streamId,
+      productId: tracked?.productId || null,
       state: tracked?.state || "stopped",
       running: false,
       sourceType: tracked?.sourceType || "stream",
@@ -1136,6 +1181,7 @@ function getSourceRuntime(streamId) {
 
   return {
     streamId,
+    productId: source.productId || tracked?.productId || null,
     state,
     running,
     sourceType: source.sourceType,
@@ -1180,7 +1226,7 @@ async function generateSourcePoster(streamId) {
   const source = sources.get(streamId);
   if (!source || source.poster?.state === "generating" || source.poster?.state === "ready") return;
 
-  const outDir = path.join(RECORD_ROOT, streamId);
+  const outDir = resolveSourceWorkspace(streamId);
   const posterPath = path.join(outDir, "poster.jpg");
   const durationSeconds = Number(sourceStates.get(streamId)?.durationSeconds);
   const captureSeconds = source.sourceType === "file" && Number.isFinite(durationSeconds) && durationSeconds > 0
@@ -1302,64 +1348,87 @@ app.get("/docs", (_req, res) => {
 <script>window.ui = SwaggerUIBundle({ url: '/openapi.yaml', dom_id: '#swagger-ui', deepLinking: true });</script>
 </body></html>`);
 });
-// Authoritative uploads live beside generated HLS artifacts, but must remain
-// private: they are accessed only by the file-source, clip, and snapshot APIs.
-app.use("/hls/:streamId/source", (_req, res) => {
-  res.status(404).type("text/plain").send("source asset is not publicly served");
-});
-// FFmpeg atomically replaces live HLS playlists by renaming index.m3u8.tmp.
-// On Windows, a streamed static-file response can keep index.m3u8 open long
-// enough to block that rename. Playlists are small, so read them fully and
-// close the filesystem handle before writing the HTTP response. Media segments
-// remain served by express.static below and are never buffered in memory.
-app.get("/hls/*", async (req, res, next) => {
-  const relativePath = String(req.params[0] || "");
-  if (!/\.m3u8$/i.test(relativePath)) return next();
-
-  const playlistPath = path.resolve(RECORD_ROOT, relativePath);
-  const relativeToRoot = path.relative(RECORD_ROOT, playlistPath);
-  if (!relativeToRoot || relativeToRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRoot)) {
-    return res.status(403).type("text/plain").send("invalid HLS playlist path");
+function resolveWorkspaceChild(workspace, relativePath, { publicOnly = false } = {}) {
+  const normalized = String(relativePath || '').replaceAll('\\', '/');
+  if (!normalized || normalized.includes('\0')) throw new Error('invalid product asset path');
+  const child = path.resolve(workspace, normalized);
+  if (!child.startsWith(`${workspace}${path.sep}`)) throw new Error('invalid product asset path');
+  const firstPart = normalized.split('/')[0];
+  if (publicOnly && (firstPart === SOURCE_ASSET_DIRNAME || firstPart === 'private' || firstPart === SOURCE_UPLOAD_DIRNAME)) {
+    const error = new Error('product asset is private'); error.statusCode = 404; throw error;
   }
+  return child;
+}
 
+async function resolveWorkspaceForHlsStream(streamId) {
+  validateStreamId(streamId);
+  const inMemory = sources.get(streamId)?.productId || sourceStates.get(streamId)?.productId;
+  if (inMemory) return resolveProductWorkspace(inMemory);
+  const product = await store.getFmvMissionProductForSourceStream(streamId);
+  if (!product?.id) throw new Error('HLS source product was not found');
+  return resolveProductWorkspace(product.id);
+}
+
+// Product workspaces contain private originals and public playback artifacts.
+// Resolve each request rather than mounting the root as a static directory.
+app.get('/hls/:streamId/*', async (req, res) => {
   try {
-    const playlist = await fs.promises.readFile(playlistPath);
-    res
-      .type("application/vnd.apple.mpegurl; charset=utf-8")
-      .set("Access-Control-Allow-Origin", "*")
-      .set("Cache-Control", "no-cache")
-      .send(playlist);
+    const workspace = await resolveWorkspaceForHlsStream(req.params.streamId);
+    const filePath = resolveWorkspaceChild(workspace, req.params[0], { publicOnly: true });
+    if (/\.m3u8$/i.test(filePath)) {
+      const playlist = await fs.promises.readFile(filePath);
+      return res.type('application/vnd.apple.mpegurl; charset=utf-8').set('Access-Control-Allow-Origin', '*').set('Cache-Control', 'no-cache').send(playlist);
+    }
+    return res.set('Access-Control-Allow-Origin', '*').set('Cache-Control', 'no-cache').sendFile(filePath, (error) => {
+      if (error && !res.headersSent) res.status(error.code === 'ENOENT' ? 404 : 500).type('text/plain').send('hls artifact not found');
+    });
   } catch (error) {
-    if (error?.code === "ENOENT") return next();
-    log.warn("hls_playlist_read_error", { path: relativePath, error: serializeError(error) });
-    return res.status(500).type("text/plain").send("unable to read HLS playlist");
+    return res.status(error?.statusCode || (error?.code === 'ENOENT' ? 404 : 404)).type('text/plain').send('hls artifact not found');
   }
 });
-app.use("/hls", express.static(RECORD_ROOT, {
-  setHeaders(res) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "no-cache");
-  }
-}));
-// Prevent SPA fallback from returning index.html for missing HLS artifacts.
-app.use("/hls", (_req, res) => {
-  res.status(404).type("text/plain").send("hls artifact not found");
-});
+app.use('/hls', (_req, res) => res.status(404).type('text/plain').send('hls artifact not found'));
 
-// Published product assets deliberately live outside the transient HLS tree.
-app.use("/mission-products-assets", express.static(MISSION_PRODUCT_ROOT, { fallthrough: false }));
+app.get('/mission-products-assets/:productId/*', async (req, res) => {
+  try {
+    const productId = req.params.productId;
+    const relativePath = String(req.params[0] || '').replaceAll('\\', '/');
+    const product = await store.getMissionProduct(productId);
+    const assetHref = `/mission-products-assets/${productId}/${relativePath}`;
+    const registered = product?.assets?.some((asset) => asset.href === assetHref);
+    // A registered HLS master authorizes the playback sidecars and segments
+    // beside it, but never the private source/upload subtrees.
+    const hlsRegistered = product?.assets?.some((asset) => asset.type === 'hls' && asset.href === `/mission-products-assets/${productId}/master.m3u8`);
+    const firstPart = relativePath.split('/')[0];
+    const hlsChild = hlsRegistered && ![SOURCE_ASSET_DIRNAME, 'private', SOURCE_UPLOAD_DIRNAME].includes(firstPart);
+    if (!registered && !hlsChild) return res.status(404).end();
+    const workspace = resolveProductWorkspace(productId);
+    const filePath = resolveWorkspaceChild(workspace, relativePath, { publicOnly: true });
+    return res.sendFile(filePath, (error) => {
+      if (error && !res.headersSent) res.status(error.code === 'ENOENT' ? 404 : 500).end();
+    });
+  } catch {
+    return res.status(404).end();
+  }
+});
 
 // ---------- OGC Moving Features subset ----------
 registerOgcMovingFeaturesRoutes(app, { sources, store });
 
 // ---------- Mission catalog and OGC API - Records ----------
-app.use(createMissionCatalogRouter({ store, sources, stopSourceRuntime, missionProductRoot: MISSION_PRODUCT_ROOT }));
+app.use(createMissionCatalogRouter({
+  store,
+  sources,
+  stopSourceRuntime,
+  missionProductRoot: MISSION_PRODUCT_ROOT
+}));
 
 // ---------- OGC API - Processes ----------
 // Process jobs provision source sessions through the same lifecycle service as
 // the legacy /sources endpoint; both APIs therefore expose one runtime.
 app.use("/ogc", createOgcProcessesRouter({
   startSourceRuntime,
+  allocateStreamId,
+  allocateSourcePreparation,
   stopSourceRuntime,
   createFileClipRuntime,
   getSourceRuntime,
@@ -1383,7 +1452,9 @@ app.use(createUploadsRouter({
   currentSourceState,
   sources,
   getSourceRuntime,
-  resetSourceArtifacts,
+  assertStreamIdAvailable,
+  allocateStreamId,
+  allocateSourcePreparation,
   loadResumableUpload,
   sendUploadOffset,
   resolveSourceAssetDir,
@@ -1399,7 +1470,7 @@ app.use(createSourcesRouter({
   currentSourceState,
   store,
   setSourceState,
-  resolveStreamRecordingDir
+  validateStreamId
 }));
 /** Builds one CPU or GPU-assisted FFmpeg filmstrip capture command. */
 async function captureClipFilmstrip({ inputPath, times, filterInputs, hstackInputs, thumbnailPath, gpuDecoder = null }) {
@@ -1435,7 +1506,7 @@ async function getClipThumbnailFrames(streamId, source, durationSeconds) {
   }
 
   const assetKey = path.parse(sourceInputPath).name;
-  const thumbnailDir = path.join(resolveStreamRecordingDir(streamId), "clip-thumbnails", assetKey);
+  const thumbnailDir = path.join(resolveSourceWorkspace(streamId), "private", "clip-thumbnails", assetKey);
   const filename = "filmstrip.jpg";
   const thumbnailPath = path.join(thumbnailDir, filename);
   const thumbnailUrl = `/sources/${encodeURIComponent(streamId)}/clip-thumbnails/${encodeURIComponent(assetKey)}/${filename}`;
@@ -1543,7 +1614,7 @@ app.get("/sources/:streamId/clip-thumbnails/:assetKey/:filename", async (req, re
   const currentAssetKey = path.parse(path.resolve(String(source.inputUrl || ""))).name;
   if (assetKey !== currentAssetKey) return res.status(404).end();
   try {
-    const thumbnailDir = path.resolve(resolveStreamRecordingDir(streamId), "clip-thumbnails", assetKey);
+    const thumbnailDir = path.resolve(resolveSourceWorkspace(streamId), "private", "clip-thumbnails", assetKey);
     const filePath = path.resolve(thumbnailDir, filename);
     if (!filePath.startsWith(`${thumbnailDir}${path.sep}`) || !fs.existsSync(filePath)) return res.status(404).end();
     return res.sendFile(filePath);
@@ -1555,39 +1626,31 @@ app.get("/sources/:streamId/clip-thumbnails/:assetKey/:filename", async (req, re
 // ---------- API: file-backed clips ----------
 // Clips seek directly in the authoritative uploaded file. The export stream-copies
 // every source stream, including KLV/data, into a new MPEG-TS container.
-async function publishDerivedMissionProduct({ source, streamId, type, sourcePath, filename, mediaType, title, temporalStartMs = null, temporalEndMs = null }) {
-  if (!source?.missionId || !source?.missionProductId) return null;
-  const productId = randomUUID();
+async function publishDerivedMissionProduct({ source, streamId, type, productId = randomUUID(), sourcePath, filename, mediaType, title, temporalStartMs = null, temporalEndMs = null, geometryWkt = null }) {
+  if (!source?.missionId || !source?.productId) {
+    const error = new Error("a mission-backed FMV source is required to create a derived product");
+    error.statusCode = 409;
+    throw error;
+  }
   const relativePath = path.posix.join(productId, filename);
-  const destination = path.join(MISSION_PRODUCT_ROOT, productId, filename);
-  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-  await fs.promises.copyFile(sourcePath, destination);
-  const product = await store.createMissionProduct({
-    id: productId, missionId: source.missionId, parentProductId: source.missionProductId,
-    sourceStreamId: streamId, type, title, description: `Auto-published ${type} derived from FMV ${streamId}.`,
-    temporalStartMs, temporalEndMs,
-    thumbnailUrl: type === 'snapshot' ? `/mission-products-assets/${relativePath}` : null
-  });
-  await store.addMissionProductAsset({ id: randomUUID(), productId, assetType: type === 'snapshot' ? 'image' : 'original', relativePath, mediaType });
-  return product;
-}
-
-async function archiveFmvMissionProduct(source, streamId) {
-  if (!source?.missionProductId) return;
-  const productDir = path.join(MISSION_PRODUCT_ROOT, source.missionProductId);
-  const hlsDir = path.join(productDir, 'hls');
-  const sourceDir = resolveStreamRecordingDir(streamId);
-  await fs.promises.mkdir(productDir, { recursive: true });
-  // The archive is copied before transient artifacts are torn down. Upload
-  // chunks are intentionally excluded; the source file itself is copied below.
-  await fs.promises.cp(sourceDir, hlsDir, { recursive: true, filter: (entry) => !entry.includes(`${path.sep}.uploads${path.sep}`) });
-  await store.addMissionProductAsset({ id: randomUUID(), productId: source.missionProductId, assetType: 'hls', relativePath: path.posix.join(source.missionProductId, 'hls', 'master.m3u8'), mediaType: 'application/vnd.apple.mpegurl' });
-  if (source.sourceType === 'file' && source.inputUrl && fs.existsSync(source.inputUrl)) {
-    const originalName = path.basename(source.inputUrl);
-    const originalPath = path.join(productDir, 'original', originalName);
-    await fs.promises.mkdir(path.dirname(originalPath), { recursive: true });
-    await fs.promises.copyFile(source.inputUrl, originalPath);
-    await store.addMissionProductAsset({ id: randomUUID(), productId: source.missionProductId, assetType: 'original', relativePath: path.posix.join(source.missionProductId, 'original', originalName), mediaType: 'video/*' });
+  const destination = path.join(resolveProductWorkspace(productId), filename);
+  try {
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    if (path.resolve(sourcePath) !== path.resolve(destination)) await fs.promises.rename(sourcePath, destination);
+    const product = await store.createMissionProduct({
+      id: productId, missionId: source.missionId, parentProductId: source.productId,
+      sourceStreamId: streamId, type, title, description: `Auto-published ${type} derived from FMV ${streamId}.`,
+      temporalStartMs, temporalEndMs, geometryWkt,
+      thumbnailUrl: type === 'snapshot' ? `/mission-products-assets/${relativePath}` : null
+    });
+    await store.addMissionProductAsset({ id: randomUUID(), productId, assetType: type === 'snapshot' ? 'image' : 'original', relativePath, mediaType });
+    return product;
+  } catch (error) {
+    // Publishing is all-or-nothing: no managed file or catalog row survives a
+    // failed asset registration or database write.
+    await store.deleteMissionProductGroup([productId]).catch(() => {});
+    await fs.promises.rm(path.join(MISSION_PRODUCT_ROOT, productId), { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
 }
 
@@ -1604,7 +1667,7 @@ async function createFileClipRuntime(streamId, requestBody) {
     throw error;
   }
 
-  const outDir = path.join(RECORD_ROOT, streamId);
+  const outDir = resolveSourceWorkspace(streamId);
   let requestedRange;
   let sourceInputPath;
   try {
@@ -1624,7 +1687,9 @@ async function createFileClipRuntime(streamId, requestBody) {
   }
 
   const clipId = randomUUID();
-  const clipDir = path.join(outDir, "clips");
+  const createProduct = requestBody?.createProduct === true;
+  const derivedProductId = createProduct ? randomUUID() : null;
+  const clipDir = derivedProductId ? resolveProductWorkspace(derivedProductId) : path.join(outDir, "private", "clips");
   const filename = `${streamId}-clip-${clipId.slice(0, 8)}.ts`;
   const outputPath = path.join(clipDir, filename);
   const inputHasKlv = source.klvProbe?.available === true;
@@ -1685,16 +1750,24 @@ async function createFileClipRuntime(streamId, requestBody) {
     };
     if (!source.clips) source.clips = new Map();
     source.clips.set(clipId, clip);
-    const clipProduct = await publishDerivedMissionProduct({
-      source, streamId, type: 'clip', sourcePath: outputPath, filename, mediaType: 'video/mp2t',
-      title: `Clip ${streamId} · ${requestedRange.start.toFixed(1)}s–${requestedRange.end.toFixed(1)}s`
+    const productMetadata = createProduct
+      ? await deriveClipProductMetadata({ store, streamId, startSeconds: requestedRange.start, endSeconds: requestedRange.end })
+      : null;
+    const clipProduct = createProduct ? await publishDerivedMissionProduct({
+      source, streamId, type: 'clip', productId: derivedProductId, sourcePath: outputPath, filename, mediaType: 'video/mp2t',
+      title: `Clip ${streamId} · ${requestedRange.start.toFixed(1)}s–${requestedRange.end.toFixed(1)}s`,
+      ...productMetadata
+    }) : null;
+    log.info("clip_export_complete", {
+      streamId, clipId, durationSeconds: clip.durationSeconds, klvEmbedded: clip.klvEmbedded,
+      createProduct, productId: clipProduct?.id || null, metadataSource: productMetadata?.metadataSource || null
     });
-    log.info("clip_export_complete", { streamId, clipId, durationSeconds: clip.durationSeconds, klvEmbedded: clip.klvEmbedded });
     return {
       ok: true,
       clip: {
         ...clip,
-        missionProductId: clipProduct?.id || null,
+        createProduct,
+        productId: clipProduct?.id || null,
         downloadUrl: `/sources/${encodeURIComponent(streamId)}/clips/${encodeURIComponent(clipId)}/download`
       }
     };
@@ -1750,7 +1823,8 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
   }
 
   const snapshotId = randomUUID();
-  const snapshotDir = path.join(RECORD_ROOT, streamId, "snapshots");
+  const snapshotProductId = randomUUID();
+  const snapshotDir = resolveProductWorkspace(snapshotProductId);
   const filename = `${streamId}-source-snapshot-${snapshotId.slice(0, 8)}.jpg`;
   const outputPath = path.join(snapshotDir, filename);
   const normalizedTimeSeconds = Number(timeSeconds.toFixed(3));
@@ -1778,12 +1852,11 @@ app.post("/sources/:streamId/snapshot", async (req, res) => {
     const baseMs = Number(sourceStates.get(streamId)?.manualVideoStartUtcMs);
     const snapshotTimeMs = Number.isFinite(baseMs) ? Math.round(baseMs + normalizedTimeSeconds * 1000) : null;
     const snapshotProduct = await publishDerivedMissionProduct({
-      source, streamId, type: 'snapshot', sourcePath: outputPath, filename, mediaType: 'image/jpeg',
+      source, streamId, type: 'snapshot', productId: snapshotProductId, sourcePath: outputPath, filename, mediaType: 'image/jpeg',
       title: `Snapshot ${streamId} · ${normalizedTimeSeconds.toFixed(1)}s`, temporalStartMs: snapshotTimeMs, temporalEndMs: snapshotTimeMs
     });
     log.info("authoritative_snapshot_ready", { streamId, snapshotId, sourceInputPath, timeSeconds: normalizedTimeSeconds });
-    return res.download(outputPath, filename, (error) => {
-      void fs.promises.rm(outputPath, { force: true }).catch(() => {});
+    return res.download(path.join(resolveProductWorkspace(snapshotProduct.id), filename), filename, (error) => {
       if (error && !res.headersSent) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
       }
@@ -1802,12 +1875,12 @@ async function startSourceRuntime(requestBody, requestId) {
   let startedSfuIngest = false;
   let sourceType = "stream";
   let producerId = null;
-  let purgeResult;
   let sourceCreationStarted = false;
+  let productPublished = false;
 
   try {
     const {
-  streamId,
+  streamId: suppliedStreamId,
   inputUrl,
   sourceType: requestedSourceType = "stream",
   assetId,
@@ -1822,14 +1895,27 @@ async function startSourceRuntime(requestBody, requestId) {
   minCueDurSec = 0.10,
   maxCueDurSec = 0.50
 } = requestBody || {};
+    let submittedStreamId = suppliedStreamId;
     sourceType = normalizeSourceType(requestedSourceType);
+    if (!submittedStreamId) {
+      const preparation = await allocateSourcePreparation({ missionId, sourceType });
+      submittedStreamId = preparation.streamId;
+    }
+    const streamId = submittedStreamId;
+    const preparation = sourcePreparations.get(streamId) || await store.getSourcePreparationForStream(streamId);
+    if (!preparation) throw new Error('source must be allocated by the service before it can start');
+    if (preparation.missionId !== missionId || preparation.sourceType !== sourceType) {
+      throw new Error('source preparation does not match the requested mission or source type');
+    }
+    sourcePreparations.set(streamId, preparation);
+    const productId = preparation.productId;
     const hlsMode = normalizeHlsMode(requestedHlsMode);
     const webRtcMode = normalizeWebRtcMode(requestedWebRtcMode);
     const resolvedInputUrl = sourceType === "file"
       ? resolveUploadedVideo(streamId, assetId)
       : (typeof inputUrl === "string" ? inputUrl.trim() : "");
     requestedStreamId = streamId;
-    if (!streamId || !resolvedInputUrl || !missionId) throw new Error("streamId, inputUrl, and missionId are required");
+    if (!resolvedInputUrl || !missionId) throw new Error("inputUrl and missionId are required");
 
     let sourceProbe = null;
     let fileDurationSeconds = null;
@@ -1901,6 +1987,7 @@ async function startSourceRuntime(requestBody, requestId) {
       error.state = getSourceRuntime(streamId);
       throw error;
     }
+    await assertStreamIdAvailable(streamId, { allowPreparation: true });
 
     sourceCreationStarted = true;
     setSourceState(streamId, {
@@ -1910,6 +1997,7 @@ async function startSourceRuntime(requestBody, requestId) {
       inputUrl: resolvedInputUrl,
       sourceType,
       missionId,
+      productId,
       webRtcAvailable: sourceType !== "file",
       hlsMode,
       hlsEffectiveMode,
@@ -1949,16 +2037,6 @@ async function startSourceRuntime(requestBody, requestId) {
       lastError: null
     });
 
-    // Starts received outside the UI still clear generated artifacts. The
-    // source/ directory is retained here because it holds the selected file.
-    setSourceState(streamId, { state: "starting", stage: "purging" });
-    purgeResult = await purgeSourceArtifacts(streamId);
-    log.info("source_purge_complete", {
-      streamId,
-      deletedEvents: purgeResult.deletedEvents,
-      outDir: purgeResult.outDir
-    });
-
     log.info("source_create_start", {
       streamId,
       inputUrl: resolvedInputUrl,
@@ -1973,10 +2051,10 @@ async function startSourceRuntime(requestBody, requestId) {
       detectedAudioCodec: sourceProbe?.audio?.codec || null,
       hlsSegmentSeconds: effectiveSegmentSeconds,
       vttSegmentSeconds: effectiveSegmentSeconds,
-      purgeBeforeStart: true
+      retainedData: true
     });
 
-    const outDir = path.join(RECORD_ROOT, streamId);
+    const outDir = resolveSourceWorkspace(streamId);
     await fs.promises.mkdir(outDir, { recursive: true });
 
     // 1) DVR recorder (HLS MPEG-TS) — provides PROGRAM-DATE-TIME timestamps
@@ -2113,6 +2191,7 @@ async function startSourceRuntime(requestBody, requestId) {
         streamId,
         inputUrl: resolvedInputUrl,
         mode: webRtcEncoderMode,
+        sdpFile: resolveSourceSdpPath(streamId),
         requestId
       });
       startedSfuIngest = true;
@@ -2124,19 +2203,13 @@ async function startSourceRuntime(requestBody, requestId) {
       });
     }
 
-    const catalogProduct = await store.createMissionProduct({
-      id: randomUUID(), missionId, sourceStreamId: streamId, type: 'fmv',
-      title: `FMV ${streamId}`, description: `Auto-published ${sourceType} FMV source.`,
-      temporalStartMs: null, temporalEndMs: null,
-      thumbnailUrl: `/hls/${encodeURIComponent(streamId)}/poster.jpg`
-    });
-    await store.syncMissionProductCoverageForStream(streamId);
     sources.set(streamId, {
       streamId,
       inputUrl: resolvedInputUrl,
       sourceType,
       missionId,
-      missionProductId: catalogProduct.id,
+      productId,
+      published: false,
       mode,
       hlsMode,
       hlsEffectiveMode,
@@ -2159,6 +2232,10 @@ async function startSourceRuntime(requestBody, requestId) {
       poster: { state: "pending", updatedAt: new Date().toISOString(), error: null },
       webrtc: sourceType === "file" ? null : { ingestRunning: true, producerId }
     });
+    if (sourceType !== 'file') {
+      await publishFmvProduct(sources.get(streamId));
+      productPublished = true;
+    }
     queueSourcePoster(streamId);
 
     const finalizeFileSource = async () => {
@@ -2167,6 +2244,8 @@ async function startSourceRuntime(requestBody, requestId) {
       if (source.fileCompletionStarted) return;
       source.fileCompletionStarted = true;
       if (!source.klvProcessingRequired) {
+        await publishFmvProduct(source);
+        productPublished = true;
         setSourceState(streamId, {
           state: "ready",
           running: false,
@@ -2222,6 +2301,8 @@ async function startSourceRuntime(requestBody, requestId) {
             error: serializeError(error)
           });
         }
+        await publishFmvProduct(source);
+        productPublished = true;
         setSourceState(streamId, {
           state: "ready",
           running: false,
@@ -2236,6 +2317,8 @@ async function startSourceRuntime(requestBody, requestId) {
         });
         log.info("file_source_ready", { streamId });
       } catch (error) {
+        await removeUnpublishedSourcePreparation(streamId);
+        sources.delete(streamId);
         setSourceState(streamId, {
           state: "error",
           running: false,
@@ -2285,11 +2368,12 @@ async function startSourceRuntime(requestBody, requestId) {
       void finalizeFileSource();
     }
 
-    log.info("source_create_success", { streamId, sourceType, producerId });
+    log.info("source_create_success", { streamId, productId, sourceType, producerId });
 
     return {
       ok: true,
       streamId,
+      productId: productPublished ? productId : null,
       hlsMasterUrl: `/hls/${streamId}/master.m3u8`,
       subtitlesUrl: `/hls/${streamId}/subtitles.m3u8`,
       sourceType,
@@ -2300,10 +2384,6 @@ async function startSourceRuntime(requestBody, requestId) {
       hlsEncoderMode,
       webRtcEncoderMode,
       webrtc: sourceType === "file" ? { available: false } : { available: true, producerId },
-      purge: {
-        enabled: true,
-        deletedEvents: purgeResult.deletedEvents
-      },
       state: getSourceRuntime(streamId)
     };
   } catch (e) {
@@ -2315,6 +2395,7 @@ async function startSourceRuntime(requestBody, requestId) {
 
     if (requestedStreamId && sourceCreationStarted) {
       sources.delete(requestedStreamId);
+      if (!productPublished) await removeUnpublishedSourcePreparation(requestedStreamId);
       setSourceState(requestedStreamId, {
         // A create failure occurs before a source runtime is published. All
         // child processes above have already been stopped, so leave the UI in
@@ -2373,13 +2454,10 @@ async function stopSourceRuntime(streamId) {
   });
   sources.delete(streamId);
 
-  await archiveFmvMissionProduct(s, streamId).catch((error) => log.warn('mission_product_fmv_archive_error', { streamId, error: serializeError(error) }));
-
   await stopKlvStreamWorker(s.klvWorker);
   await stopHlsRecorder(s.hls);
   await sfuClient.stopIngest(streamId);
-  const deletedTargetLog = await store.purgeTargetLog(streamId);
-
+  if (!s.published) await removeUnpublishedSourcePreparation(streamId);
   setSourceState(streamId, {
     state: "stopped",
     running: false,
@@ -2391,8 +2469,8 @@ async function stopSourceRuntime(streamId) {
     etaSeconds: null,
     lastError: null
   });
-  log.info("source_delete_success", { streamId, deletedTargetLog });
-  return { ok: true, deletedTargetLog };
+  log.info("source_delete_success", { streamId, retainedData: !!s.published });
+  return { ok: true, retainedData: !!s.published };
 }
 
 app.delete("/sources/:streamId", async (req, res) => {
@@ -2616,7 +2694,7 @@ ${targetTrack || "      <description>No target positions were present in the sto
 // ---------- API: KLV telemetry ----------
 app.use(createKlvRouter({
   store,
-  resolveStreamRecordingDir,
+  validateStreamId,
   KLV_CSV_COLUMNS,
   klvCsvRow,
   buildKlvKml,
@@ -2625,7 +2703,7 @@ app.use(createKlvRouter({
   serializeError
 }));
 // ---------- API routers ----------
-app.use(createTargetLogRouter({ store, log, serializeError, resolveStreamRecordingDir, sources }));
+app.use(createTargetLogRouter({ store, log, serializeError, validateStreamId, sources }));
 app.use(createWebrtcRouter({ sfuClient, log, serializeError, sleep }));
 app.use(createMetricsRouter({
   getRuntimeMetricsSnapshot,

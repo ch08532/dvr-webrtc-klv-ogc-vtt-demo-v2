@@ -11,11 +11,27 @@ export function createUploadsRouter(deps) {
     path, fs, Transform, pipeline, randomUUID, VIDEO_UPLOAD_EXTENSIONS,
     MAX_UPLOAD_BYTES, activeResumableUploads, resumableUploadPaths,
     listLocalServerVideos, copyLocalServerVideo, currentSourceState, sources,
-    getSourceRuntime, resetSourceArtifacts, loadResumableUpload,
+    getSourceRuntime, assertStreamIdAvailable, allocateStreamId, allocateSourcePreparation, loadResumableUpload,
     sendUploadOffset, resolveSourceAssetDir, probeInputWithFfprobe, log,
     serializeError
   } = deps;
   const router = Router();
+
+// Backing stream IDs are service-owned. The UI requests one only when it is
+// about to provision a product or upload its authoritative source file.
+router.post("/sources/allocate", async (req, res) => {
+  try {
+    const preparation = allocateSourcePreparation
+      ? await allocateSourcePreparation({ missionId: req.body?.missionId, sourceType: req.body?.sourceType })
+      : { streamId: await allocateStreamId(), productId: null };
+    log.info("source_workspace_allocated", { requestId: req.requestId, streamId: preparation.streamId, productId: preparation.productId });
+    return res.status(201).json({ ok: true, streamId: preparation.streamId, productId: preparation.productId });
+  } catch (error) {
+    log.warn("source_stream_allocate_error", { requestId: req.requestId, error: serializeError(error) });
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
 // Creates a resumable session; bytes are appended by PATCH below.
 // Resumable uploads are persisted below each stream's source/ directory so the
 // browser can continue a large upload after a network interruption or reload.
@@ -35,6 +51,7 @@ router.post("/uploads/video/resumable", async (req, res) => {
   const assetId = `${randomUUID()}${extension}`;
   let paths;
   try {
+    await assertStreamIdAvailable(streamId, { allowPreparation: true });
     paths = resumableUploadPaths(streamId, uploadId);
     await fs.promises.mkdir(paths.uploadDir, { recursive: true });
   } catch (error) {
@@ -81,6 +98,7 @@ router.post("/uploads/video/local-copy", async (req, res) => {
   const streamId = String(req.body?.streamId || "").trim();
   const inputPath = typeof req.body?.inputPath === "string" ? req.body.inputPath : "";
   try {
+    await assertStreamIdAvailable(streamId, { allowPreparation: true });
     const copied = await copyLocalServerVideo(streamId, inputPath);
     log.info("local_video_copy_complete", {
       requestId: req.requestId,
@@ -96,8 +114,9 @@ router.post("/uploads/video/local-copy", async (req, res) => {
   }
 });
 
-// The browser calls this first on every Start Source action. File uploads then
-// land in a fresh source/ directory; live sources proceed directly to startup.
+// The browser calls this first on every Start Source action. It is a
+// non-destructive preflight: retained stream data is deleted only with its
+// mission product, never to make room for another source.
 router.post("/sources/:streamId/reset", async (req, res) => {
   const streamId = req.params.streamId;
   const state = currentSourceState(streamId);
@@ -109,12 +128,12 @@ router.post("/sources/:streamId/reset", async (req, res) => {
     });
   }
   try {
-    const reset = await resetSourceArtifacts(streamId);
-    log.info("source_reset_complete", { streamId, deletedEvents: reset.deletedEvents, outDir: reset.outDir });
-    return res.json({ ok: true, deletedEvents: reset.deletedEvents });
+    await assertStreamIdAvailable(streamId, { allowPreparation: true });
+    log.info("source_start_preflight_complete", { streamId });
+    return res.json({ ok: true, retainedData: true });
   } catch (error) {
-    log.warn("source_reset_error", { streamId, error: serializeError(error) });
-    return res.status(400).json({ ok: false, error: String(error?.message || error) });
+    log.warn("source_start_preflight_error", { streamId, error: serializeError(error) });
+    return res.status(error?.statusCode || 400).json({ ok: false, error: String(error?.message || error) });
   }
 });
 

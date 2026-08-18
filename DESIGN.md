@@ -80,7 +80,7 @@ The top-level Node service owns the source map and public runtime state. The KLV
 | State | Meaning |
 | --- | --- |
 | `stopped` | No active source runtime. |
-| `starting` | Source is being probed, purged, or media workers are being initialized. The `stage` property adds detail such as `purging`, `hls_started`, or `klv_started`. |
+| `starting` | Source is being probed or media workers are being initialized. The `stage` property adds detail such as `initializing`, `hls_started`, or `klv_started`. |
 | `running` | Expected HLS and KLV paths are active; a stream source also has RTP ingest. |
 | `degraded` | At least one expected path failed while another may still provide useful output. |
 | `finalizing` | File-only state: HLS has reached EOF and KLV/VTT sidecars are draining. Latest valid DVR telemetry remains visible. |
@@ -88,7 +88,7 @@ The top-level Node service owns the source map and public runtime state. The KLV
 | `stopping` | Source teardown is in progress. |
 | `error` | Startup or runtime failure prevented the expected source behavior. |
 
-Stopping a source terminates its KLV worker, HLS recorder, and any SFU ingest. Purging before start removes that source's generated recording directory, SDP artifact, and SQLite telemetry rows. The original uploaded asset is not a recording artifact and is separately server-owned.
+Stopping a source terminates its KLV worker, HLS recorder, and any SFU ingest while retaining the FMV product workspace, SDP artifact, and SQLite telemetry rows. The service generates an opaque backing stream ID for each FMV product; operators never provide one. Uploaded FMV catalog records are published only once packaging reaches `ready`; live FMV records are published once running. Deleting the FMV product removes its source-owned data and managed assets.
 
 ### 4.4 OGC process jobs and source sessions
 
@@ -96,8 +96,8 @@ The Process API deliberately separates finite work from continuing media session
 
 | Process | Inputs | Completion boundary | Results |
 | --- | --- | --- | --- |
-| `provision-live-fmv` | Stream ID, input URL, HLS/WebRTC mode, segment and VTT tuning | Source state is `running` | Source state, HLS master/subtitles, Moving Features, and WebRTC signaling links. |
-| `package-fmv-file` | Stream ID, uploaded/local `assetId`, HLS mode, segment and VTT tuning | Source state is `ready` | Source state, HLS master/subtitles, poster, and Moving Features links. |
+| `provision-live-fmv` | Service-generated stream ID, input URL, HLS/WebRTC mode, segment and VTT tuning | Source state is `running` | Source state, published product ID, HLS master/subtitles, Moving Features, and WebRTC signaling links. |
+| `package-fmv-file` | Service-generated stream ID, uploaded/local `assetId`, HLS mode, segment and VTT tuning | Source state is `ready` | Source state, published product ID, HLS master/subtitles, poster, and Moving Features links. |
 | `export-clip` | File stream ID and start/end seconds | FFmpeg has produced and verified the clip | Downloadable MPEG-TS clip link. |
 | `export-klv` | Stream ID and `csv` or `kml` format | Export link has been prepared | Canonical telemetry export link. |
 
@@ -146,7 +146,7 @@ All playlists use MPEG-TS segments and include program-date-time timing. File pl
 
 ### 5.3 Source poster
 
-After source creation, the server queues a lightweight FFmpeg frame capture into `recordings/<streamId>/poster.jpg`. This operation is intentionally asynchronous so it does not delay HLS/KLV/WebRTC startup. The Active Sources panel displays the poster when it is available.
+After source creation, the server queues a lightweight FFmpeg frame capture into `mission-products/<productId>/poster.jpg`. This operation is intentionally asynchronous so it does not delay HLS/KLV/WebRTC startup. The Active Sources panel displays the poster when it is available.
 
 ## 6. KLV extraction, timing, and persistence
 
@@ -183,7 +183,7 @@ This improves storage and I/O throughput without allowing concurrent work to cha
 
 ### 6.4 SQLite persistence
 
-`db/klv.sqlite` stores `stream_id`, source-time milliseconds, and decoded JSON. The store uses WAL journal mode, normal synchronous mode, a busy timeout, bounded retry/backoff for writer contention, and stream-time queries. Telemetry is retained with its HLS and WebVTT artifacts until the source is reset; server startup clears all mission data. The WebVTT rate controls do not reduce the full-rate records persisted to SQLite.
+`db/klv.sqlite` stores `stream_id`, source-time milliseconds, and decoded JSON. The store uses WAL journal mode, normal synchronous mode, a busy timeout, bounded retry/backoff for writer contention, and stream-time queries. Telemetry is retained with its HLS and WebVTT artifacts across source stops and server restarts, then removed with its owning FMV product. The WebVTT rate controls do not reduce the full-rate records persisted to SQLite.
 
 The direct telemetry endpoint is:
 
@@ -197,7 +197,7 @@ Platform and frame-center history are intentionally not generated from the full 
 
 `GET /streams/:streamId/klv/platform-history.geojson` and `GET /streams/:streamId/klv/frame-center-history.geojson` return one GeoJSON Feature each. Their `LineString` coordinates are in browser HLS sequence order, and `properties.timesMs` is index-aligned with the coordinate array. The store removes consecutive stationary duplicates, then deterministically reduces a long path while preserving its first and last points. The server caps each response at `PLATFORM_HISTORY_MAX_POINTS` (default `5000`) and never reads or sends every decoded KLV JSON record for these map features.
 
-The APIs remain cache-disabled because live paths change as completed segments arrive. The compact history indexes are cleared with stream telemetry on source reset/purge. They do not de-duplicate or split replayed mission-timestamp cycles: a looping input is represented in HLS sequence order, so consumers that require separate replay passes need an explicit higher-level policy.
+The APIs remain cache-disabled because live paths change as completed segments arrive. Compact history indexes persist with stream telemetry and are removed only when the owning FMV product is deleted. They do not de-duplicate or split replayed mission-timestamp cycles: a looping input is represented in HLS sequence order, so consumers that require separate replay passes need an explicit higher-level policy.
 
 ## 7. Playback and telemetry UI
 
@@ -240,7 +240,7 @@ The clip widget is available only for file sources because the server needs an a
 
 1. The user drags start/end grips or sets boundaries at the HLS playhead.
 2. The client previews the boundary by seeking HLS.
-3. The UI submits `export-clip` and monitors its OGC job resource.
+3. The UI submits `export-clip` with `createProduct: false` for a download-only export or `true` to publish a managed child clip product, then monitors its OGC job resource.
 4. The executor validates the requested range against the original asset duration, seeks from a nearby preceding decodable keyframe, and stream copies every source stream.
 5. FFmpeg writes a fresh MPEG-TS timeline while retaining video, audio, and data streams (`-c copy`).
 6. The output is MPEG-TS, allowing KLV data streams to remain embedded. The server probes the result and rejects a KLV-bearing source whose KLV was not retained.
@@ -253,9 +253,9 @@ GET  /ogc/jobs/:jobId
 GET  /ogc/jobs/:jobId/results
 ```
 
-The legacy `POST /sources/:streamId/clips` and clip download endpoint remain available for compatible clients. KLV CSV/KML controls likewise submit `export-klv`; their result link resolves to the canonical legacy export resource.
+The legacy `POST /sources/:streamId/clips` and clip download endpoint remain available for compatible clients. Its optional `createProduct` boolean defaults to `false`; a true value stores a managed asset and creates a child product. A product uses KLV coverage/time from the selected range when available, otherwise its null geometry inherits the mission bbox. KLV CSV/KML controls likewise submit `export-klv`; their result link resolves to the canonical legacy export resource.
 
-The default policy accepts any duration at least 0.25 seconds. A deployment can set a positive `MAX_CLIP_DURATION_SECONDS` limit. Clips are held under `recordings/<streamId>/clips/` and tracked in memory for the lifetime of the active source.
+The default policy accepts any duration at least 0.25 seconds. A deployment can set a positive `MAX_CLIP_DURATION_SECONDS` limit. Download-only clips are held privately under their parent FMV product; product-backed clips have their own product directory and catalog record.
 
 ## 9. HTTP, WebSocket, and OGC surfaces
 

@@ -7,14 +7,10 @@ import { Router } from "express";
  * deliberately reduced platform path for map rendering.
  */
 export function createKlvRouter({
-  store, resolveStreamRecordingDir, KLV_CSV_COLUMNS, klvCsvRow, buildKlvKml,
+  store, validateStreamId, KLV_CSV_COLUMNS, klvCsvRow, buildKlvKml,
   PLATFORM_HISTORY_MAX_POINTS, log, serializeError
 }) {
   const router = Router();
-  const validateStreamId = (streamId) => {
-    resolveStreamRecordingDir(streamId);
-    return streamId;
-  };
 // Excel-compatible telemetry export; the UTF-8 BOM is intentional.
 router.get("/streams/:streamId/klv/export.csv", async (req, res) => {
   try {

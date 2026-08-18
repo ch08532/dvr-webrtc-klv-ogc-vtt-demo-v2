@@ -71,7 +71,7 @@ docker-compose up --build
 This will:
 - Build the container with Node.js latest and ffmpeg
 - Run with host networking to access UDP streams
-- Mount `./recordings` and `./db` for persistent storage
+- Mount `./mission-products` and `./db` for persistent storage
 
 ## Testing with Video Streams
 
@@ -102,24 +102,23 @@ FMV source provisioning is also available through the service-lifetime OGC API -
 
 ## Start a source
 In the UI, set:
-- Stream ID: `stream1`
 - Input URL:
   - UDP: `udp://239.1.2.3:5000`
   - or file: `./sample.ts`
 - DVR seconds: e.g. `600`
 - VTT segment seconds: default `5`
 
-Click **Start Source**.
+Click **Start Source**. The service creates the internal stream ID automatically; operators select the mission and source, not a storage/session identifier.
 
 ### Ingesting a video file
 
-Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. Every start automatically clears the selected stream's previous recording tree and KLV records. For a file source, that reset happens before the upload, then the authoritative original is stored at `./recordings/<streamId>/source/<assetId>.<ext>`, beside the newly generated HLS and metadata artifacts. The source directory is private (not served by `/hls`). Uploads use 64 MB resumable HTTP chunks: an interrupted transfer automatically retries, and selecting the same file again resumes from the server-confirmed byte offset when the browser's saved upload session is still available. The UI displays uploaded bytes and percent, then a **Preparing file** stage while the server probes video and KLV streams. File sources produce the same HLS ladder and segmented WebVTT output, then transition to **ready** when packaging completes. Play them from the DVR (HLS) tab; the live WebRTC tab is intentionally unavailable for file sources.
+Select **Video file** in the UI, choose a `.ts`, `.m2ts`, `.mp4`, `.mov`, or `.mkv` file, then click **Start Source**. The service generates an internal stream ID and a future product ID, storing the authoritative original at `./mission-products/<productId>/source/<assetId>.<ext>` beside generated HLS and metadata artifacts. The source directory is private and is never cataloged as a downloadable asset. The catalog FMV product is published only after packaging reaches `ready`; recordings and telemetry then persist across restarts and source stops until that product is deleted. Uploads use 64 MB resumable HTTP chunks: an interrupted transfer automatically retries, and selecting the same file again resumes from the server-confirmed byte offset when the browser's saved upload session is still available.
 
 The default upload limit is 10 GB. Override it with `MAX_VIDEO_UPLOAD_MB` when starting the server.
 
 ### Ingesting a file already on the server
 
-Choose **Local server file** and select a supported file from the server-driven dropdown. It lists files beneath `./videos/` (including subfolders) and the server copies the selection directly into `./recordings/<streamId>/source/` before packaging, avoiding the browser HTTP upload. It still requires disk I/O to create the authoritative copy, but does not route the file through the browser.
+Choose **Local server file** and select a supported file from the server-driven dropdown. It lists files beneath `./videos/` (including subfolders) and the server copies the selection directly into its future product workspace before packaging, avoiding the browser HTTP upload.
 
 For safety, the default allowed root is `./videos/` (created automatically if absent). You can instead configure one or more allowed parent folders; on Windows, separate roots with `;`:
 
@@ -132,9 +131,9 @@ The dropdown lists content only from those roots, and the copy endpoint validate
 
 While a file source is packaging, the UI displays its conversion percentage, source media time processed, FFmpeg speed, and estimated remaining time. It then reports `finalizing` while the remaining carrier segments are decoded and WebVTT is completed, and `ready` when HLS playback is available. The latest valid telemetry remains visible on the DVR map during finalization.
 
-DVR output will appear under `./recordings/<streamId>/`:
+DVR output for an FMV product appears under `./mission-products/<productId>/`:
 - `source/<assetId>.<ext>` (private authoritative uploaded original)
-- `source/.uploads/` (temporary resumable-upload chunks and session metadata)
+- `source/.uploads/` (private temporary resumable-upload chunks and session metadata)
 - `master.m3u8`
 - `v0/index.m3u8` (360p video; timing reference for the VTT playlist)
 - `v1/index.m3u8` (native High video)
@@ -145,7 +144,9 @@ DVR output will appear under `./recordings/<streamId>/`:
 
 ### Creating a file clip
 
-The DVR **Create video clip** control is available only for an uploaded file source. It builds a cached filmstrip of representative frames from the authoritative source behind the trim handles. While packaging is still underway, the server derives the playable boundary from the completed browser-HLS playlist entries whose segment files exist on disk—not FFmpeg's source-processing progress. The future portion of the filmstrip is striped/dimmed, and trim handles are clamped to the last completed HLS segment; the **Playable** readout updates as segments arrive. Once the source reaches `ready`, the full source duration becomes selectable and download is enabled. FFmpeg seeks in the authoritative uploaded file, stream-copies every source stream (video, audio, and KLV/data), and writes a downloadable MPEG-TS clip. The start can move to a nearby preceding decodable keyframe; there is no re-encode or fixed maximum duration by default. Set `MAX_CLIP_DURATION_SECONDS` to impose one.
+The DVR clip control is available only for an uploaded file source. It builds a cached filmstrip of representative frames from the authoritative source behind the trim handles. While packaging is still underway, the server derives the playable boundary from the completed browser-HLS playlist entries whose segment files exist on disk—not FFmpeg's source-processing progress. The future portion of the filmstrip is striped/dimmed, and trim handles are clamped to the last completed HLS segment; the **Playable** readout updates as segments arrive. Once the source reaches `ready`, the full source duration becomes selectable.
+
+**Download clip** stream-copies the selected range into a temporary downloadable MPEG-TS file and does not create a mission product. **Download & create product** also stores a managed copy and publishes a child clip product. When the selected range has KLV location data, its catalog coverage and time extent are derived from that range; otherwise the product inherits its mission coverage bbox. FFmpeg preserves source video, audio, and KLV/data streams, and the start can move to a nearby preceding decodable keyframe. There is no re-encode or fixed maximum duration by default; set `MAX_CLIP_DURATION_SECONDS` to impose one.
 
 ### Snapshots
 
@@ -159,11 +160,11 @@ The DVR diagnostics show the active rendition and an **ABR processing** line tha
 
 The **Add Mark** action creates a SQLite-backed target-log entry for the current stream in DVR or live playback. It is available only when the current frame has a usable KLV mission timestamp or, for a confirmed no-KLV file, a manually configured first-frame UTC anchor. Its displayed and sorted mission time is a user-editable KLV timestamp, not the player offset. The service derives a separate internal video offset from the stream's KLV timeline, keeping file-backed pins aligned to the clip filmstrip and supporting DVR seeking. Editing mission time updates that alignment; a time outside the known KLV mission range remains a valid mark but has no clip pin. Position is optional: blank coordinates are stored as unavailable (`null`), render as `—`, and create no map pin; a deliberate `0,0` remains a valid position. New marks initially use frame-center telemetry when available, falling back to platform position; latitude and longitude can be edited in decimal degrees or set by clicking either telemetry map. Marks are persisted in `db/klv.sqlite`; hovering a list entry, clip-filmstrip dot, or map pin highlights its positioned counterparts, while clicking an aligned list entry or pin in DVR seeks the HLS player without creating a persistent selection. Live WebRTC markers remain informational because that player cannot seek to historical target times.
 
-Use **Manage fields** to add stream-specific text, number, or boolean metadata fields. Deactivating a field retains historical values already stored on entries. At backend startup, the `./recordings/` folder is purged and SQLite telemetry plus Target Log entries/schemas are cleared together. Stopping a source also purges that stream's Target Log from SQLite and clears it from the UI. Starting a new source resets the stream's recordings and KLV records.
+Use **Manage fields** to add stream-specific text, number, or boolean metadata fields. Deactivating a field retains historical values already stored on entries. Recordings, SQLite telemetry, Target Log entries, and schemas persist across backend restarts and source stops. Deleting the FMV product removes all of its source-owned data; deleting a Target Log product removes that source’s Target Log data.
 
 ### Platform and frame-center history
 
-The independent **Platform history** and **Frame-center history** controls use `GET /streams/:streamId/klv/platform-history.geojson` and `GET /streams/:streamId/klv/frame-center-history.geojson`, not the full decoded KLV event collection. The KLV worker stores one final valid platform or frame-center position after each completed browser HLS segment; each response preserves HLS sequence order, removes consecutive stationary points, and returns at most `PLATFORM_HISTORY_MAX_POINTS` coordinates (default `5000`). Its `properties.timesMs` array is index-aligned with the GeoJSON coordinates so file playback can hide points after the active WebVTT cue. Time-shifted HLS and WebRTC request a rolling 15-minute mission-time window every five seconds. The map temporarily appends the active platform or frame center to bridge the normal one-segment storage delay; it does not persist that bridge point. Both compact indexes are reset with stream telemetry. Replayed/looping inputs are not separated into individual passes; their samples remain in HLS sequence order.
+The independent **Platform history** and **Frame-center history** controls use `GET /streams/:streamId/klv/platform-history.geojson` and `GET /streams/:streamId/klv/frame-center-history.geojson`, not the full decoded KLV event collection. The KLV worker stores one final valid platform or frame-center position after each completed browser HLS segment; each response preserves HLS sequence order, removes consecutive stationary points, and returns at most `PLATFORM_HISTORY_MAX_POINTS` coordinates (default `5000`). Its `properties.timesMs` array is index-aligned with the GeoJSON coordinates so file playback can hide points after the active WebVTT cue. Time-shifted HLS and WebRTC request a rolling 15-minute mission-time window every five seconds. The map temporarily appends the active platform or frame center to bridge the normal one-segment storage delay; it does not persist that bridge point. Compact indexes persist with stream telemetry until the owning FMV product is deleted. Replayed/looping inputs are not separated into individual passes; their samples remain in HLS sequence order.
 
 ### KLV CSV export
 

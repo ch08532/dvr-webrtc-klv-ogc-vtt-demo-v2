@@ -5,7 +5,7 @@ info:
   description: |
     HTTP API for source ingest, authoritative file workflows, HLS/KLV state,
     clips, snapshots, telemetry, and WebRTC signaling. File-backed operations
-    use the private authoritative asset stored under recordings/<streamId>/source.
+    use the private authoritative asset stored under mission-products/<productId>/source.
 servers:
   - url: http://localhost:8090
     description: Default local server
@@ -191,6 +191,26 @@ paths:
               schema: { $ref: '#/components/schemas/StartSourceResponse' }
         '400': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /sources/allocate:
+    post:
+      tags: [Sources]
+      summary: Reserve a service-generated stream ID and future FMV product workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [missionId, sourceType]
+              properties:
+                missionId: { type: string, format: uuid }
+                sourceType: { type: string, enum: [stream, file] }
+      responses:
+        '201':
+          description: Internal stream and future product IDs allocated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SourceAllocation' }
   /sources/{streamId}/state:
     get:
       tags: [Sources]
@@ -205,12 +225,12 @@ paths:
   /sources/{streamId}/reset:
     post:
       tags: [Sources]
-      summary: Clear a stopped stream's recording artifacts and KLV records
-      description: Called before every UI Start Source action. It removes the stream recording tree, including its prior authoritative file.
+      summary: Validate a reserved source workspace before start
+      description: Called before source start. It never removes product data.
       parameters: [ { $ref: '#/components/parameters/StreamId' } ]
       responses:
         '200':
-          description: Stream reset
+          description: Stream start preflight passed
           content:
             application/json:
               schema: { $ref: '#/components/schemas/OperationResult' }
@@ -218,7 +238,7 @@ paths:
   /sources/{streamId}:
     delete:
       tags: [Sources]
-      summary: Stop a source and purge its stream-scoped target-log data
+      summary: Stop a source while retaining its stream-scoped data
       parameters: [ { $ref: '#/components/parameters/StreamId' } ]
       responses:
         '200':
@@ -349,7 +369,7 @@ paths:
   /sources/{streamId}/clips:
     post:
       tags: [File tools]
-      summary: Stream-copy an authoritative file clip, including KLV/data streams
+      summary: Stream-copy an authoritative file clip, optionally publishing a mission product
       parameters: [ { $ref: '#/components/parameters/StreamId' } ]
       requestBody:
         required: true
@@ -361,6 +381,7 @@ paths:
               properties:
                 startSeconds: { type: number, format: double }
                 endSeconds: { type: number, format: double }
+                createProduct: { type: boolean, default: false, description: When true, store a managed copy and publish a child clip product. }
       responses:
         '201': { description: Clip ready for download }
         '409': { $ref: '#/components/responses/Error' }
@@ -649,9 +670,9 @@ components:
         modifiedAt: { type: string, format: date-time }
     StartSourceRequest:
       type: object
-      required: [streamId, sourceType]
+      required: [sourceType]
       properties:
-        streamId: { type: string }
+        streamId: { type: string, readOnly: true, description: Service-generated backing ID returned from source allocation. }
         sourceType: { type: string, enum: [stream, file] }
         inputUrl: { type: string, description: Required for stream sources }
         assetId: { type: string, description: Required for file sources }
@@ -667,13 +688,22 @@ components:
       properties:
         ok: { type: boolean }
         streamId: { type: string }
+        productId: { type: string, format: uuid, nullable: true, description: Published product ID; file sources expose it when ready. }
         hlsMasterUrl: { type: string }
         subtitlesUrl: { type: string }
         state: { $ref: '#/components/schemas/SourceRuntime' }
+    SourceAllocation:
+      type: object
+      required: [ok, streamId]
+      properties:
+        ok: { type: boolean }
+        streamId: { type: string, description: Service-generated internal backing ID. }
+        productId: { type: string, format: uuid, description: Reserved future FMV product ID. }
     SourceRuntime:
       type: object
       properties:
         streamId: { type: string }
+        productId: { type: string, format: uuid, nullable: true }
         state: { type: string, enum: [stopped, starting, running, degraded, finalizing, ready, stopping, error] }
         sourceType: { type: string, enum: [stream, file] }
         running: { type: boolean }

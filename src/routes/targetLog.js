@@ -8,19 +8,15 @@ import { randomUUID } from "node:crypto";
  * module globals. Entries retain a mission timestamp and, when known, its
  * matching playable video offset.
  */
-export function createTargetLogRouter({ store, log, serializeError, resolveStreamRecordingDir, sources }) {
+export function createTargetLogRouter({ store, log, serializeError, validateStreamId, sources }) {
   const router = Router();
-  const validateStreamId = (streamId) => {
-    resolveStreamRecordingDir(streamId);
-    return streamId;
-  };
   const publishCatalogEntry = async (streamId, entry) => {
     const source = sources?.get(streamId);
-    if (!source?.missionId || !source?.missionProductId) return;
-    let targetLog = await store.getTargetLogProductForFmv(source.missionProductId);
+    if (!source?.missionId || !source?.productId) return;
+    let targetLog = await store.getTargetLogProductForFmv(source.productId);
     if (!targetLog) {
       const product = await store.createMissionProduct({
-        id: randomUUID(), missionId: source.missionId, parentProductId: source.missionProductId,
+        id: randomUUID(), missionId: source.missionId, parentProductId: source.productId,
         sourceStreamId: streamId, type: 'target-log', title: `Target Log ${streamId}`,
         description: `Auto-published target log associated with FMV ${streamId}.`
       });
